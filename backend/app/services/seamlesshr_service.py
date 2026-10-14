@@ -892,6 +892,7 @@ def apply_attendance_ids(db: Session, pairs: Dict[str, Any]) -> Dict[str, Any]:
     `repin_required` lists employees whose reader PIN changed — they may already be
     enrolled on readers under the old PIN and need re-syncing to the readers.
     """
+    from sqlalchemy import func
     from ..models.personnel import Personnel
     from .device_pin import is_valid_pin
 
@@ -912,14 +913,20 @@ def apply_attendance_ids(db: Session, pairs: Dict[str, Any]) -> Dict[str, Any]:
         if person.attendance_id == aid:
             rep["unchanged"] += 1
             continue
+        # Two IDs differing only by leading zeros ("122"/"0122") cannot be told apart
+        # when a numeric reader reports its PIN, so they count as the same ID.
+        # (flush below makes earlier rows of this same batch visible: the app's
+        # sessions use autoflush=False.)
         other = db.query(Personnel).filter(
-            Personnel.attendance_id == aid, Personnel.emp_code != code).first()
+            func.ltrim(Personnel.attendance_id, "0") == aid.lstrip("0"),
+            Personnel.emp_code != code).first()
         if other:
             rep["conflicts"].append({"emp_code": code, "attendance_id": aid,
                                      "held_by": other.emp_code})
             continue
         old_pin = person.attendance_id or person.emp_code
         person.attendance_id = aid
+        db.flush()
         rep["updated"] += 1
         if old_pin != aid:
             rep["repin_required"].append(code)
