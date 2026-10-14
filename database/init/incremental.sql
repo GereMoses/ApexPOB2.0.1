@@ -212,3 +212,13 @@ CREATE TRIGGER trg_sync_auth_user
 -- "'gps' is an invalid keyword argument for MusteringLog".
 ALTER TABLE public.mustering_log ADD COLUMN IF NOT EXISTS gps   varchar(50);
 ALTER TABLE public.mustering_log ADD COLUMN IF NOT EXISTS photo text;
+
+-- ── SeamlessHR Attendance ID (= the user ID/PIN written to ZKTeco readers) ────
+-- SeamlessHR matches a biometric punch to an employee by `attendanceId`, which its
+-- support docs define as the Personnel ID on the device. Its staff_id values
+-- (e.g. EMPLOYEE001) are not numeric, so they cannot be reader PINs. This column
+-- holds SeamlessHR's Attendance ID as TEXT (leading zeros matter: "0122").
+-- Stored value is what readers are given and what is pushed back as attendanceId.
+ALTER TABLE public.personnel ADD COLUMN IF NOT EXISTS attendance_id varchar(20);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_personnel_attendance_id
+    ON public.personnel (attendance_id) WHERE attendance_id IS NOT NULL;

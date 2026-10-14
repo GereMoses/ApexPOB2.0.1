@@ -13,6 +13,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 
 from ..core.database import get_db, Base
+from ..services.device_pin import rewrite_command
 from ..core.dependencies import get_current_user
 from ..models.user import User
 from ..models.biotime_models import (
@@ -120,6 +121,7 @@ class BlacklistCreate(BaseModel):
 # ─── Helper ───────────────────────────────────────────────────────────────────
 
 def _queue_cmd(db: Session, sn: str, cmd: str) -> int:
+    cmd = rewrite_command(db, cmd)   # PIN=<emp_code> -> reader PIN
     result = db.execute(
         sa_text("INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, status) "
                 "VALUES (:sn, :cmd, :now, 0) RETURNING id"),

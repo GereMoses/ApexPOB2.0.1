@@ -12,6 +12,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 
 from ..core.database import get_db
+from ..services.device_pin import rewrite_command, pin_for
 from ..core.dependencies import get_current_user
 from ..models.user import User
 from ..models.biotime_models import (
@@ -34,6 +35,7 @@ VERIFY_TYPE_MAP = {
 
 
 def _queue_cmd(db: Session, sn: str, cmd: str) -> int:
+    cmd = rewrite_command(db, cmd)   # PIN=<emp_code> -> reader PIN
     result = db.execute(
         text("INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, status) "
              "VALUES (:sn, :cmd, :now, 0) RETURNING id"),
@@ -666,7 +668,7 @@ async def enroll_direct(
     # Match on user_id == emp_code OR badge_id (handles both sync conventions)
     uid = None
     for u in device_users:
-        if u.get("user_id") in (payload.emp_code, badge_id):
+        if u.get("user_id") in (payload.emp_code, badge_id, pin_for(db, payload.emp_code, fallback=badge_id)):
             uid = u["uid"]
             break
 
@@ -682,7 +684,7 @@ async def enroll_direct(
             ip=ip, port=port,
             uid=new_uid,
             name=full_name,
-            user_id=badge_id,
+            user_id=pin_for(db, payload.emp_code, fallback=badge_id),
             card=card_no,
         )
         if not reg_result.get("success"):
@@ -693,7 +695,7 @@ async def enroll_direct(
         uid = new_uid
 
     result = await zkteco_direct.enroll_and_capture(
-        ip, port, uid=uid, user_id=badge_id, finger_id=payload.finger_id
+        ip, port, uid=uid, user_id=pin_for(db, payload.emp_code, fallback=badge_id), finger_id=payload.finger_id
     )
 
     if not result["success"]:
@@ -811,7 +813,7 @@ async def sync_card_to_devices(
         uid = None
         if users_res.get("success"):
             for u in users_res.get("users", []):
-                if str(u.get("user_id", "")) == str(emp.badge_id or emp.emp_code):
+                if str(u.get("user_id", "")) in (str(emp.badge_id or emp.emp_code), pin_for(db, emp.emp_code)):
                     uid = u["uid"]
                     break
 
@@ -823,7 +825,7 @@ async def sync_card_to_devices(
             ip=ip,
             uid=uid,
             name=(emp.full_name or emp.badge_id or emp.emp_code)[:24],
-            user_id=str(emp.badge_id or emp.emp_code),
+            user_id=pin_for(db, emp.emp_code, fallback=str(emp.badge_id or emp.emp_code)),
             card=int(emp.card_number) if emp.card_number else 0,
             port=port,
         )

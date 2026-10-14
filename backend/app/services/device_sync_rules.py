@@ -11,6 +11,7 @@ import logging
 
 from ..models.biotime_models import IClockTerminal, IClockTransaction, PersonnelEmployee
 from ..core.database import get_db
+from .device_pin import rewrite_command
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ class DeviceSyncRulesService:
     ) -> Optional[int]:
         """Queue a command for a device"""
         try:
+            command = rewrite_command(db, command)   # PIN=<emp_code> -> reader PIN
             result = db.execute(text("""
                 INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, status)
                 VALUES (:sn, :cmd_content, :commit_time, 0)

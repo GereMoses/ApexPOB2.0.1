@@ -20,6 +20,7 @@ from ...core.database import SessionLocal
 from ...models.device import Device, DeviceStatus
 from ...models.biotime_models import IClockTransaction, IClockTerminal
 from ...models.personnel import Personnel
+from ..device_pin import resolve_emp_code
 from .direct_connection import zkteco_direct
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,11 @@ def _resolve_emp_code(db: Session, user_id: str) -> str:
     """
     if not user_id:
         return user_id
+    # SeamlessHR attendance ID (the PIN we write to the reader) wins; it also
+    # matches ignoring leading zeros. No attendance-ID match returns user_id as-is.
+    by_attendance = resolve_emp_code(db, user_id)
+    if by_attendance != user_id:
+        return by_attendance
     emp = db.query(Personnel).filter(
         or_(Personnel.badge_id == user_id, Personnel.emp_code == user_id)
     ).first()

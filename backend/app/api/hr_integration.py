@@ -25,6 +25,7 @@ from ..core.dependencies import get_current_user
 from ..services.seamlesshr_service import (
     get_config, push_attendance, test_connection,
     _build_attendance_records, pull_employees, pull_leave, handle_webhook_event,
+    adopt_attendance_ids, apply_attendance_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,41 @@ async def pull_employees_endpoint(
     # Also refresh leave so muster rosters exclude anyone on approved leave (best-effort).
     leave = await pull_leave(db, triggered_by=getattr(current_user, "email", "manual"))
     return {"success": True, **result, "on_leave": leave.get("on_leave", 0)}
+
+
+class AttendanceIdItem(BaseModel):
+    employee_code: str          # SeamlessHR employee code (staff_id)
+    attendance_id: str          # SeamlessHR Attendance ID = the reader PIN
+
+
+class AttendanceIdImport(BaseModel):
+    items: list[AttendanceIdItem]
+
+
+@router.post("/adopt-attendance-ids")
+async def adopt_attendance_ids_endpoint(
+    days: int = 31,
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_admin),
+):
+    """Adopt SeamlessHR's Attendance IDs: they become each employee's reader PIN and
+    the attendanceId sent with every punch. Run after pull-employees."""
+    result = await adopt_attendance_ids(db, days=days)
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail=result["error"])
+    return {"success": True, **result}
+
+
+@router.post("/import-attendance-ids")
+async def import_attendance_ids_endpoint(
+    body: AttendanceIdImport,
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_admin),
+):
+    """Adopt Attendance IDs from an export supplied by SeamlessHR when the API key
+    cannot read attendance records. Same validation as adopt-attendance-ids."""
+    pairs = {i.employee_code: i.attendance_id for i in body.items}
+    return {"success": True, **apply_attendance_ids(db, pairs)}
 
 
 @router.post("/webhook")

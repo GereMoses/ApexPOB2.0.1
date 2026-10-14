@@ -16,6 +16,7 @@ import asyncio
 import logging
 
 from app.core.database import get_db
+from app.services.device_pin import rewrite_command
 from app.core.dependencies import get_current_user
 from app.core.websocket import ConnectionManager
 from app.services.emergency_service import EmergencyService
@@ -67,6 +68,7 @@ def _queue_ac_sync(emp_code: str, level_id: int, db: Session, revoke: bool = Fal
         else:
             cmd = f"DATA UPDATE USERINFO PIN={emp_code} TZ1={tz1} TZ2={tz2} TZ3={tz3} Group=1 VerifyStyle=131"
 
+        cmd = rewrite_command(db, cmd)   # PIN=<emp_code> -> reader PIN
         for row in term_rows:
             sn = row._mapping["terminal_sn"]
             db.execute(text(

@@ -33,6 +33,7 @@ from ..services.device_planes import is_controller as _is_controller
 from ..services.device_planes import is_direct_only as _is_direct_only
 
 from ..core.database import get_db, SessionLocal
+from ..services.device_pin import rewrite_command, resolve_emp_code
 from ..core.config import settings
 from ..models.biotime_models import (
     IClockTerminal, IClockTransaction, IClockDevcmd,
@@ -502,6 +503,7 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
         time_str = rec.get('Time') or rec.get('LogTime') or rec.get('LOGTIME')
         if not emp_code or not time_str:
             continue
+        emp_code = resolve_emp_code(db, emp_code)   # reader PIN (SeamlessHR attendance ID) -> emp_code
 
         punch_time = _parse_punch_time(time_str)
         if not punch_time:
@@ -781,7 +783,8 @@ def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
     seen_this_batch: set = set()
 
     for rec in records:
-        emp_code = str(rec.get('PIN') or rec.get('UserID') or rec.get('USERID') or '').strip()
+        emp_code = resolve_emp_code(
+            db, str(rec.get('PIN') or rec.get('UserID') or rec.get('USERID') or '').strip())
         name     = str(rec.get('Name') or rec.get('NAME') or '').strip()
         card     = str(rec.get('Card') or rec.get('CardNo') or rec.get('CARDNO') or '').strip()
 
@@ -845,7 +848,7 @@ def handle_fingertmp(records: List[Dict], sn: str, db: Session) -> int:
     """Store fingerprint templates uploaded by device → iclock_bio_template."""
     saved = 0
     for rec in records:
-        emp_code  = rec.get('PIN') or rec.get('UserID') or ''
+        emp_code  = resolve_emp_code(db, rec.get('PIN') or rec.get('UserID') or '')
         finger_id = rec.get('FingerID') or rec.get('FINGERID') or '0'
         size      = rec.get('Size') or rec.get('SIZE') or '0'
         valid     = rec.get('Valid') or rec.get('VALID') or '1'
@@ -908,6 +911,7 @@ def handle_biodata(records: List[Dict], sn: str, db: Session) -> int:
     mapped: List[Dict] = []
     for r in records:
         pin = r.get('PIN') or r.get('Pin') or r.get('UserID') or r.get('UserPin')
+        pin = resolve_emp_code(db, pin) if pin else pin
         tmp = r.get('Tmp') or r.get('TMP') or r.get('TmpData') or r.get('Template') or ''
         if not pin or not tmp:
             continue
@@ -1193,6 +1197,7 @@ def _emp_to_zk_pin(emp_code: str) -> int:
 
 
 def queue_command(sn: str, cmd: str, db: Session, created_by: Optional[int] = None) -> int:
+    cmd = rewrite_command(db, cmd)   # PIN=<emp_code> -> reader PIN
     row = db.execute(text("""
         INSERT INTO iclock_devcmd (sn, cmd_content, status, cmd_commit_time)
         VALUES (:sn, :cmd, 0, :now)

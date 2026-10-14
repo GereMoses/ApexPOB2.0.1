@@ -27,6 +27,7 @@ Attendance payload sent per employee per day:
 
 import logging
 import asyncio
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -335,7 +336,15 @@ def _to_punch_events(r: Dict, opts: Dict, emp_map: Dict[str, str]) -> List[Dict]
     event type, so it is stable across retries and unique per event.
     """
     src     = opts.get("employee_id_source", "emp_code")
-    emp_val = emp_map.get(r["employee_id"], r["employee_id"]) if (src != "emp_code" and emp_map) else r["employee_id"]
+    if opts.get("attendance_id_source", "device_personnel_id") == "device_personnel_id":
+        # SeamlessHR's attendanceId IS the reader PIN = personnel.attendance_id. An
+        # employee without one cannot be matched on their side, so send nothing
+        # (the caller reports them) instead of a punch SeamlessHR will drop.
+        emp_val = emp_map.get(r["employee_id"])
+        if not emp_val:
+            return []
+    else:
+        emp_val = emp_map.get(r["employee_id"], r["employee_id"]) if (src != "emp_code" and emp_map) else r["employee_id"]
     fm      = opts.get("field_map") or {}
     default_sn = opts.get("default_device_sn") or "POB-MANUAL"
     dt_style = opts.get("datetime_style", "offset")
@@ -494,7 +503,13 @@ async def push_attendance(
 
     # Translate emp_code → alternate employee identifier if configured
     emp_map: Dict[str, str] = {}
-    if opts.get("employee_id_source", "emp_code") != "emp_code":
+    if opts.get("attendance_id_source", "device_personnel_id") == "device_personnel_id":
+        for erow in db.execute(text(
+                "SELECT emp_code, attendance_id FROM personnel "
+                "WHERE emp_code IS NOT NULL AND attendance_id IS NOT NULL")).fetchall():
+            if erow[1]:
+                emp_map[erow[0]] = str(erow[1])
+    elif opts.get("employee_id_source", "emp_code") != "emp_code":
         col = opts["employee_id_source"]
         if col in ("badge_id", "biotime_employee_id"):
             for erow in db.execute(text(f"SELECT emp_code, {col} FROM personnel WHERE emp_code IS NOT NULL")).fetchall():
@@ -511,11 +526,20 @@ async def push_attendance(
     # never split a group across batches: a day is marked synced only when its
     # whole group lands, so a half-sent day can't be skipped on the next run.
     groups: List[tuple] = []
+    no_attendance_id: List[str] = []
     for r in records:
         payloads = (_to_punch_events(r, opts, emp_map) if style == "punch_events"
                     else [_to_payload(r, opts, emp_map)])
         if payloads:
             groups.append((r["employee_id"], payloads))
+        elif style == "punch_events":
+            no_attendance_id.append(r["employee_id"])
+    if no_attendance_id:
+        logger.warning(
+            "SeamlessHR sync %s: %d employee(s) held back — no Attendance ID on file "
+            "(adopt IDs from SeamlessHR first): %s",
+            sync_date, len(no_attendance_id), ", ".join(sorted(set(no_attendance_id))[:20]))
+        result["no_attendance_id"] = sorted(set(no_attendance_id))
 
     batches: List[List[tuple]] = []
     current: List[tuple] = []
@@ -540,9 +564,19 @@ async def push_attendance(
             body = payload_list if not wrapper else {wrapper: payload_list}
             try:
                 resp = await client.request(method, url, json=body, headers=headers)
-                if resp.status_code in (200, 201, 204):
+                accepted, detail = _batch_accepted(resp)
+                if accepted:
                     sent += len(batch)
                     sent_codes.extend(emp for emp, _ in batch)
+                elif resp.status_code in (200, 201, 204):
+                    # HTTP 200 with a failure count in the body: SeamlessHR
+                    # accepted the request but rejected the punches. Leave the
+                    # days unsynced so the next run retries them.
+                    logger.warning(
+                        "SeamlessHR batch %d (%d events) accepted but not applied: %s",
+                        batch_no, len(payload_list), detail,
+                    )
+                    failed += len(batch)
                 else:
                     logger.warning(
                         "SeamlessHR batch %d (%d events) returned %s: %s",
@@ -564,7 +598,10 @@ async def push_attendance(
         result["message"] = (
             f"Sent {sent}/{len(records)} records to SeamlessHR for {sync_date}"
             + (f" ({failed} failed)" if failed else "")
+            + (f" ({len(set(no_attendance_id))} held back: no Attendance ID)" if no_attendance_id else "")
         )
+        if no_attendance_id and result["status"] == "success":
+            result["status"] = "partial"
 
     except Exception as e:
         result["message"] = f"Unexpected error: {e}"
@@ -573,6 +610,38 @@ async def push_attendance(
     _log_sync(db, result)
     logger.info(f"SeamlessHR sync [{result['status']}]: {result['message']}")
     return result
+
+
+_BATCH_COUNTS_RE = re.compile(
+    r"(\d+)\s+attendance records? sent successfully,\s*(\d+)\s+attendance records? failed", re.I)
+
+
+def _batch_accepted(resp) -> tuple:
+    """
+    Decide whether a /biometric/process response means the punches were applied.
+
+    SeamlessHR answers HTTP 200 "processed successfully" even when every record
+    failed; the truth is in data.message ("0 attendance records sent
+    successfully, 1 attendance records failed"). Treat the batch as accepted
+    only when the status is 2xx AND no failure count is reported. A body in an
+    unrecognised shape falls back to the status code alone.
+    """
+    if resp.status_code not in (200, 201, 204):
+        return False, f"HTTP {resp.status_code}"
+    try:
+        body = resp.json()
+    except Exception:
+        return True, ""
+    inner = body.get("data") if isinstance(body, dict) else None
+    texts = [body.get("message", "")] if isinstance(body, dict) else []
+    if isinstance(inner, dict):
+        texts.append(inner.get("message", ""))
+    for t in texts:
+        m = _BATCH_COUNTS_RE.search(str(t))
+        if m:
+            ok, bad = int(m.group(1)), int(m.group(2))
+            return bad == 0, str(t)
+    return True, ""
 
 
 async def test_connection(cfg: Dict) -> Dict[str, Any]:
@@ -588,8 +657,10 @@ async def test_connection(cfg: Dict) -> Dict[str, Any]:
             resp = await client.get(url, headers=headers)
         if resp.status_code in (200, 201):
             return {"success": True,  "message": f"Connected — HTTP {resp.status_code}"}
-        if resp.status_code == 401:
-            return {"success": False, "message": "Authentication failed — check your API key"}
+        # SeamlessHR answers bad credentials with HTTP 400 {"message":"Unauthorized access"}
+        # (and a missing key with 401), not 401/403.
+        if resp.status_code == 401 or "unauthorized access" in resp.text.lower():
+            return {"success": False, "message": "Authentication failed — check Client ID and Client Secret"}
         if resp.status_code == 403:
             return {"success": False, "message": "Access denied — check Organisation ID and API permissions"}
         if resp.status_code == 404:
@@ -802,6 +873,108 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
             "message": f"Employee pull failed: {e}",
         })
         return {"error": str(e), "created": created, "updated": updated, "skipped": skipped, "total": seen}
+
+
+# ── Attendance IDs (SeamlessHR is the master; the reader PIN follows it) ───────
+
+def _clean_attendance_id(value) -> Optional[str]:
+    """SeamlessHR returns the literal string "null" for employees with no ID."""
+    v = str(value).strip() if value is not None else ""
+    return None if (not v or v.lower() in ("null", "none", "nan")) else v
+
+
+def apply_attendance_ids(db: Session, pairs: Dict[str, Any]) -> Dict[str, Any]:
+    """Store SeamlessHR Attendance IDs on personnel.attendance_id.
+
+    `pairs` maps SeamlessHR employee code (= staff_id = personnel.emp_code) to its
+    Attendance ID. Nothing is invented: an ID that is not 1-9 digits (a numeric
+    ZKTeco PIN) or that another employee already holds is reported, not stored.
+    `repin_required` lists employees whose reader PIN changed — they may already be
+    enrolled on readers under the old PIN and need re-syncing to the readers.
+    """
+    from ..models.personnel import Personnel
+    from .device_pin import is_valid_pin
+
+    rep: Dict[str, Any] = {"updated": 0, "unchanged": 0, "unknown_employee": [],
+                           "invalid": [], "conflicts": [], "repin_required": []}
+    for code, raw in pairs.items():
+        code = str(code or "").strip()
+        aid = _clean_attendance_id(raw)
+        if not code or not aid:
+            continue
+        person = db.query(Personnel).filter(Personnel.emp_code == code).first()
+        if not person:
+            rep["unknown_employee"].append(code)
+            continue
+        if not is_valid_pin(aid):
+            rep["invalid"].append({"emp_code": code, "attendance_id": aid})
+            continue
+        if person.attendance_id == aid:
+            rep["unchanged"] += 1
+            continue
+        other = db.query(Personnel).filter(
+            Personnel.attendance_id == aid, Personnel.emp_code != code).first()
+        if other:
+            rep["conflicts"].append({"emp_code": code, "attendance_id": aid,
+                                     "held_by": other.emp_code})
+            continue
+        old_pin = person.attendance_id or person.emp_code
+        person.attendance_id = aid
+        rep["updated"] += 1
+        if old_pin != aid:
+            rep["repin_required"].append(code)
+    db.commit()
+    return rep
+
+
+async def adopt_attendance_ids(db: Session, days: int = 31) -> Dict[str, Any]:
+    """Read employeeCode -> attendanceId pairs from SeamlessHR's attendance records
+    (GET /v1/attendances) and store them. The employee list does not carry the
+    Attendance ID, so this endpoint is the only API source for it."""
+    cfg = get_config(db)
+    if not cfg:
+        return {"error": "SeamlessHR is not configured"}
+    headers = await build_auth_headers(cfg)
+    url = cfg["api_base_url"] + "/v1/attendances"
+    end = date.today()
+    start = end - timedelta(days=max(1, days))
+    per_page = 100
+    pairs: Dict[str, str] = {}
+    pages = 0
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            page = 1
+            while page <= 200:
+                resp = await client.get(url, headers=headers, params={
+                    "page": page, "perPage": per_page, "dateType": "custom",
+                    "startDate": start.isoformat(), "endDate": end.isoformat()})
+                if resp.status_code != 200:
+                    msg = ""
+                    try:
+                        msg = resp.json().get("message", "")
+                    except Exception:
+                        pass
+                    if "unauthorized" in msg.lower():
+                        return {"error": "SeamlessHR refused the attendance read ('Unauthorized "
+                                         "access') — this API key may not have Time & Attendance "
+                                         "read access. Ask SeamlessHR to enable it, or use the "
+                                         "import endpoint with an export."}
+                    return {"error": f"SeamlessHR attendance read failed: HTTP {resp.status_code} {msg}"}
+                rows = (resp.json() or {}).get("data") or []
+                pages += 1
+                for row in rows:
+                    aid = _clean_attendance_id(row.get("attendanceId"))
+                    code = str(row.get("employeeCode") or "").strip()
+                    if aid and code:
+                        pairs.setdefault(code, aid)
+                if len(rows) < per_page:
+                    break
+                page += 1
+    except httpx.RequestError as e:
+        return {"error": f"Cannot reach SeamlessHR: {e}"}
+    rep = apply_attendance_ids(db, pairs)
+    rep.update({"pairs_found": len(pairs), "pages_read": pages})
+    return rep
 
 
 # ── Webhook handler (real-time employee sync FROM SeamlessHR) ──────────────────

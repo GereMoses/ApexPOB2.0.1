@@ -15,6 +15,7 @@ import os
 import uuid
 
 from ..core.database import get_db
+from ..services.device_pin import rewrite_command, pin_for
 from ..core.dependencies import get_current_user
 from ..models.user import User
 from ..models.biotime_models import IClockTerminal, IClockTransaction, PersonnelEmployee
@@ -163,6 +164,7 @@ def get_device_status(last_activity: Optional[datetime], state: Optional[int] = 
 def queue_command(db: Session, device_sn: str, command: str, user_id: Optional[int] = None):
     """Queue a command for a device"""
     try:
+        command = rewrite_command(db, command)   # PIN=<emp_code> -> reader PIN
         # Insert command into iclock_devcmd table
         result = db.execute(text("""
             INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, status)
@@ -1250,7 +1252,7 @@ async def sync_user_to_device(
                 try:
                     conn.set_user(uid=uid, name=name, privilege=zk_const.USER_DEFAULT,
                                   password=row.pwd or "", group_id="",
-                                  user_id=row.emp_code, card=card)
+                                  user_id=pin_for(db, row.emp_code), card=card)
                 finally:
                     conn.disconnect()
 
@@ -1352,7 +1354,7 @@ async def sync_all_users_to_device(
                                     privilege=zk_const.USER_DEFAULT,
                                     password=row.pwd or "",
                                     group_id="",
-                                    user_id=row.emp_code,
+                                    user_id=pin_for(db, row.emp_code),
                                     card=card,
                                 )
                                 synced += 1
@@ -1424,7 +1426,7 @@ async def sync_all_users_to_device(
                                 conn.set_user(
                                     uid=uid, name=name, privilege=zk_const.USER_DEFAULT,
                                     password=row.pwd or "", group_id="",
-                                    user_id=row.emp_code, card=card,
+                                    user_id=pin_for(db, row.emp_code), card=card,
                                 )
                                 synced += 1
                             except Exception as exc:
@@ -1554,7 +1556,7 @@ async def flush_pending_commands_via_zklib(
                         uid = max_uid
                     conn.set_user(uid=uid, name=name, privilege=zk_const.USER_DEFAULT,
                                   password=row.pwd or "", group_id="",
-                                  user_id=str(row.emp_code), card=card)
+                                  user_id=pin_for(db, str(row.emp_code)), card=card)
                     synced += 1
                 except Exception as exc:
                     errors.append(f"{row.emp_code}: {exc}")
@@ -1647,7 +1649,7 @@ async def sync_department_to_device(
                             card = int(row.card_no) if row.card_no and row.card_no.isdigit() else 0
                             conn.set_user(uid=row.id, name=name, privilege=zk_const.USER_DEFAULT,
                                           password=row.pwd or "", group_id="",
-                                          user_id=row.emp_code, card=card)
+                                          user_id=pin_for(db, row.emp_code), card=card)
                             synced += 1
                         except Exception as exc:
                             errors.append(f"{row.emp_code}: {exc}")

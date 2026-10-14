@@ -24,6 +24,8 @@ class Personnel(Base):
     first_name = Column(String(100), nullable=False)
     last_name = Column(String(100), nullable=False)
     badge_id    = Column(String(50), unique=True, index=True, nullable=True)
+    # SeamlessHR Attendance ID = the PIN on the ZKTeco reader (text; keeps leading zeros).
+    attendance_id = Column(String(20), unique=True, nullable=True)
     card_number = Column(BigInteger, nullable=True, index=True)  # physical RFID card number
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     full_name = Column(String(200), nullable=True, index=True)

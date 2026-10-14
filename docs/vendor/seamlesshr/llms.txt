@@ -1,0 +1,111 @@
+# SeamlessHR Documentation
+
+> Documentation for SeamlessHR
+
+## API Reference: Overview
+- [Introduction](https://docs.seamlesshr.com/reference/introduction.md)
+- [API Structure](https://docs.seamlesshr.com/reference/api-structure.md): Breakdown of the various SeamlessHR Products, their base endpoints and description
+- [Authentication](https://docs.seamlesshr.com/reference/authentication.md): A simple guide to authenticating your SeamlessHR API request
+- [Standard HTTP Responses](https://docs.seamlesshr.com/reference/http-codes.md): SeamlessHR employs standard HTTP response codes to signify the success or failure of an API request.
+
+## API Reference: seamlesshr APi
+- [HRIS](https://docs.seamlesshr.com/reference/hris.md)
+  - Employee Management
+    - [Get All Employees](https://docs.seamlesshr.com/reference/fetch-employees.md)
+    - [Get Birthdays](https://docs.seamlesshr.com/reference/get-birthdays.md)
+    - [Get Single Employee](https://docs.seamlesshr.com/reference/single-employees.md)
+    - [Add Employee](https://docs.seamlesshr.com/reference/create-employee-1.md)
+    - [Update Employee](https://docs.seamlesshr.com/reference/update-employee.md)
+    - [Get Holidays](https://docs.seamlesshr.com/reference/get-holidays.md)
+    - [Create Contract Type](https://docs.seamlesshr.com/reference/create-contract-type.md)
+    - [Get All Contract Types](https://docs.seamlesshr.com/reference/get-all-contract-types.md)
+    - [Get Contract Type](https://docs.seamlesshr.com/reference/get-contract-type.md)
+    - [Get Employee Direct Report](https://docs.seamlesshr.com/reference/get-employee-direct-report.md)
+    - [Activate Employee](https://docs.seamlesshr.com/reference/activate-employee.md)
+    - [Deactivate Employee](https://docs.seamlesshr.com/reference/deactivate-employee.md)
+    - [Exit Employee](https://docs.seamlesshr.com/reference/deactivate-employee-copy-1.md)
+  - Company Management
+    - [Get Company Departments](https://docs.seamlesshr.com/reference/get-company-departments.md)
+    - [Create Department](https://docs.seamlesshr.com/reference/create-department.md)
+    - [Update Department](https://docs.seamlesshr.com/reference/create-department-copy.md)
+    - [Delete Department](https://docs.seamlesshr.com/reference/delete-department.md)
+    - [Get Company Job Roles](https://docs.seamlesshr.com/reference/get-company-job-roles.md)
+    - [Create Job Role](https://docs.seamlesshr.com/reference/create-job-role.md)
+    - [Update Job Role](https://docs.seamlesshr.com/reference/create-job-role-copy.md)
+    - [Delete Job Role](https://docs.seamlesshr.com/reference/delete-department-copy.md)
+    - [Get Paygroups](https://docs.seamlesshr.com/reference/get-paygroups.md)
+- [Leave](https://docs.seamlesshr.com/reference/leave.md)
+  - [Get Employee Leave balance](https://docs.seamlesshr.com/reference/leave-balance.md)
+  - [List Leave Requests](https://docs.seamlesshr.com/reference/employees-on-leave.md)
+  - [List Leave Policies](https://docs.seamlesshr.com/reference/list-leave-policies.md)
+  - [Get Employees On Leave](https://docs.seamlesshr.com/reference/get-employees-on-leave.md)
+- Payroll
+  - [Ledger Transaction](https://docs.seamlesshr.com/reference/ledger-transaction.md)
+  - [Pay Items Summation](https://docs.seamlesshr.com/reference/pay-items-summation.md)
+- [Performance](https://docs.seamlesshr.com/reference/performance.md)
+  - [List appraisal cycles](https://docs.seamlesshr.com/reference/list-appraisal-cycles.md)
+  - [Create Appraisal Cycle](https://docs.seamlesshr.com/reference/create-appraisal-cycle.md)
+  - [List appraisal periods](https://docs.seamlesshr.com/reference/list-appraisal-periods-in-an-appraisal-cycle.md)
+  - [List employee appraisals](https://docs.seamlesshr.com/reference/list-employee-appraisals-in-an-appraisal-period.md)
+  - [Switch performance framework](https://docs.seamlesshr.com/reference/switch-performance-framework-used-in-setting-up-employee-objectives-in-an-appraisal-cycle.md)
+  - [Create a KPI](https://docs.seamlesshr.com/reference/create-a-kpi-for-an-employee-in-an-appraisal-cycle.md)
+  - [Update KPI details](https://docs.seamlesshr.com/reference/update-details-of-an-existing-kpi.md): Update details of an existing KPI.
+  - [Delete KPI](https://docs.seamlesshr.com/reference/delete-an-existing-kpi.md)
+  - [Create an objective](https://docs.seamlesshr.com/reference/create-an-objective-for-an-employee-in-an-appraisal-cycle.md): Create an objective for an employee in an appraisal cycle.
+  - [Create a key result](https://docs.seamlesshr.com/reference/create-a-key-result-for-an-employee-in-an-appraisal-cycle.md)
+  - [Update objective](https://docs.seamlesshr.com/reference/update-an-existing-objective.md)
+  - [Update key result](https://docs.seamlesshr.com/reference/update-an-existing-key-result.md)
+  - [Delete key result](https://docs.seamlesshr.com/reference/delete-an-existing-key-result.md)
+  - [Delete objective](https://docs.seamlesshr.com/reference/delete-an-existing-objective.md)
+  - [List employee objectives](https://docs.seamlesshr.com/reference/list-owner-objectives.md)
+  - [Activate objectives](https://docs.seamlesshr.com/reference/activate-objectives.md)
+  - [Submit objectives](https://docs.seamlesshr.com/reference/submit-objectives-for-approval.md)
+  - [Cancel objective request](https://docs.seamlesshr.com/reference/cancel-pending-objective-request.md): Cancel pending objective request.
+  - [Update actuals for a keyresult](https://docs.seamlesshr.com/reference/update-actuals-for-a-keyresult.md)
+  - [Move Objectives to Drafts](https://docs.seamlesshr.com/reference/move-objectives-to-drafts.md)
+  - [Update actuals for a KPI](https://docs.seamlesshr.com/reference/update-actuals-for-a-kpi.md)
+  - [Bulk upload objectives (OKRs & BSC) ](https://docs.seamlesshr.com/reference/bulk-upload-objectives-okrs-kpis.md)
+- [Loan](https://docs.seamlesshr.com/reference/loan.md)
+  - [Create Loan](https://docs.seamlesshr.com/reference/create-loan.md)
+  - [Get Loan Policy](https://docs.seamlesshr.com/reference/get-loan-policy.md)
+  - [Update Loan](https://docs.seamlesshr.com/reference/update-loan.md)
+  - [Liquidate Loan](https://docs.seamlesshr.com/reference/liquidate-loan.md)
+- Time & Attendance
+  - [Get Attendance Records](https://docs.seamlesshr.com/reference/get-all-attendance-records.md)
+  - [Bulk Sync Attendance Records](https://docs.seamlesshr.com/reference/general-biometric-sync.md)
+- Breeze
+  - [Authenticate](https://docs.seamlesshr.com/reference/authenticate.md): Authenticates a user. It accepts the login username and password of the teammate on the Breezepayer Platform.
+  - [Payment Accounts](https://docs.seamlesshr.com/reference/accounts.md)
+  - [Account Balance](https://docs.seamlesshr.com/reference/payment-accounts-copy.md)
+  - [Workflows](https://docs.seamlesshr.com/reference/account-balance-copy.md)
+  - [Banks](https://docs.seamlesshr.com/reference/workflows-copy.md)
+  - [Initiate Payment](https://docs.seamlesshr.com/reference/initiate-payment-copy.md)
+  - [Update Payment](https://docs.seamlesshr.com/reference/banks-copy.md)
+  - [Payment Status](https://docs.seamlesshr.com/reference/banks-copy-1.md)
+- [RMS - Recruitment Management System](https://docs.seamlesshr.com/reference/rms.md)
+  - [List Countries](https://docs.seamlesshr.com/reference/countries.md)
+  - [List States By Country](https://docs.seamlesshr.com/reference/states.md)
+  - [List Specializations](https://docs.seamlesshr.com/reference/specializations.md)
+  - [List Companies](https://docs.seamlesshr.com/reference/companies.md)
+  - [List Jobs](https://docs.seamlesshr.com/reference/jobs.md)
+  - [Fetch Job Details](https://docs.seamlesshr.com/reference/job-details.md)
+- Requisition
+  - [List Policies](https://docs.seamlesshr.com/reference/list-policies.md)
+  - [List Expense Requisition](https://docs.seamlesshr.com/reference/list-expense-requisition.md): Fetch the records of all expenses.
+  - [List Requests](https://docs.seamlesshr.com/reference/list-requests.md): This is the endpoint to fetch all requisition requests.
+  - [Expense Summation](https://docs.seamlesshr.com/reference/expense-summation.md)
+
+## API Reference: Guides
+- [Single Sign On (SSO)](https://docs.seamlesshr.com/reference/single-sign-on-sso.md)
+  - [OpenID Connect (OIDC)](https://docs.seamlesshr.com/reference/google-workspace.md)
+    - [Office 365](https://docs.seamlesshr.com/reference/office-365.md): Office 365 SSO enables easy authentication for SeamlessHR through Microsoft 365 accounts. This streamlines access while ensuring centralized control over user permissions.
+    - [Google](https://docs.seamlesshr.com/reference/google.md): Google SSO (Single Sign-On) enables users to log in to SeamlessHR with their Google accounts, streamlining the authentication process securely. It offers a convenient and centralized access control…
+    - [Zoho](https://docs.seamlesshr.com/reference/zoho-1.md)
+  - [SAML](https://docs.seamlesshr.com/reference/saml.md)
+    - [Azure AD](https://docs.seamlesshr.com/reference/azure-ad.md)
+    - [OneLogin](https://docs.seamlesshr.com/reference/onelogin.md)
+    - [Okta](https://docs.seamlesshr.com/reference/okta.md)
+    - [Google ](https://docs.seamlesshr.com/reference/google-saml.md)
+- [Employee Data Synchronisation](https://docs.seamlesshr.com/reference/employee-data-synchronisation.md)
+  - [Connecting with Azure AD](https://docs.seamlesshr.com/reference/connecting-with-azure-ad.md)
+  - [Webhook](https://docs.seamlesshr.com/reference/webhook.md)
