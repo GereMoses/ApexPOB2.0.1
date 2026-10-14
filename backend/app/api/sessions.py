@@ -75,9 +75,9 @@ async def list_sessions(
         return {"sessions": sessions, "count": len(sessions)}
     except Exception:
         rows = db.execute(text("""
-            SELECT id, created_at, last_active, ip_address, user_agent, is_active
+            SELECT id, created_at, created_at AS last_active, ip_address, device_info AS user_agent, is_active
             FROM user_sessions WHERE user_id = :uid AND is_active = true
-            ORDER BY last_active DESC LIMIT 20
+            ORDER BY created_at DESC LIMIT 20
         """), {"uid": current_user.id}).fetchall()
         return {"sessions": [dict(r._mapping) for r in rows], "count": len(rows)}
 
@@ -134,10 +134,10 @@ async def list_all_sessions(
         raise HTTPException(status_code=403, detail="Admin only")
     rows = db.execute(text("""
         SELECT us.id, us.user_id, u.username, us.created_at,
-               us.last_active, us.ip_address, us.is_active
+               us.created_at AS last_active, us.ip_address, us.is_active
         FROM user_sessions us
         LEFT JOIN auth_user u ON u.id = us.user_id
         WHERE us.is_active = true
-        ORDER BY us.last_active DESC LIMIT 100
+        ORDER BY us.created_at DESC LIMIT 100
     """)).fetchall()
     return {"sessions": [dict(r._mapping) for r in rows], "count": len(rows)}

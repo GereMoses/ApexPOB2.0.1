@@ -103,7 +103,7 @@ class PersonnelBioTimeService:
                 'emergency_contact': json.loads(emp.emergency_contact).get('name') if emp.emergency_contact else None,
                 'emergency_phone': json.loads(emp.emergency_contact).get('phone') if emp.emergency_contact else None,
                 'onboarding_status': 0,  # Will be calculated from onboarding tasks
-                'custom_fields': emp.custom_fields or {},
+                'custom_fields': getattr(emp, 'custom_fields', None) or {},   # no such column on personnel
                 
                 'create_time': emp.created_at,
                 'update_time': emp.updated_at,

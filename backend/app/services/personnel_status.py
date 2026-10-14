@@ -309,7 +309,9 @@ class PersonnelStatusService:
             query = query.filter(Personnel.current_location.ilike(f"%{location}%"))
         
         if zone:
-            query = query.filter(Personnel.current_zone.ilike(f"%{zone}%"))
+            from ..models.zone import Zone
+            query = query.join(Zone, Personnel.current_zone_id == Zone.id).filter(
+                Zone.name.ilike(f"%{zone}%"))
         
         personnel_list = query.order_by(Personnel.last_seen.desc()).all()
         
@@ -321,9 +323,10 @@ class PersonnelStatusService:
                 "full_name": person.full_name,
                 "company": person.company,
                 "role": person.role,
-                "status": person.status.value,
+                "status": person.status.value if person.status is not None else None,
                 "current_location": person.current_location,
-                "current_zone": person.current_zone,
+                # current_zone is a relationship to Zone, not a string
+                "current_zone": person.current_zone.name if person.current_zone else None,
                 "last_seen": person.last_seen
             })
         

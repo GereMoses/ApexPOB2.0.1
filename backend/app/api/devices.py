@@ -45,7 +45,7 @@ async def get_devices(
         params["skip"] = skip
         
         result = db.execute(text(query), params)
-        devices = [dict(row) for row in result.fetchall()]
+        devices = [dict(row._mapping) for row in result.fetchall()]
         
         return devices
     except Exception as e:

@@ -65,9 +65,9 @@ def _fetch_data(db):
     training_cutoff = (today + timedelta(days=TRAINING_WARN_DAYS)).isoformat()
     training = db.execute(text("""
         SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
-               p.emp_code, tc.name AS course, te.expiry_date
+               p.emp_code, tc.course_name AS course, te.expiry_date
         FROM training_enrollment te
-        JOIN training_course tc ON tc.id = te.course_id
+        JOIN training_courses tc ON tc.id = te.course_id
         JOIN personnel p ON p.id = te.personnel_id
         WHERE te.status = 'completed'
           AND te.expiry_date IS NOT NULL

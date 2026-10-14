@@ -130,11 +130,14 @@ async def get_my_leave_requests(
         emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         result = db.execute(text("""
-            SELECT id, leave_type, start_time, end_time, days_count, 
-                   status, approved_by, approved_time, created_at
-            FROM att_leave
-            WHERE emp_code = :emp_code
-            ORDER BY created_at DESC
+            SELECT l.id, t.leave_name, l.start_time, l.end_time,
+                   GREATEST(EXTRACT(EPOCH FROM (l.end_time - l.start_time)) / 86400.0, 0) AS days_count,
+                   l.approval_status, l.approver_id, l.approved_at, l.created_at
+            FROM att_leave l
+            JOIN personnel_employee e ON e.id = l.emp_id
+            LEFT JOIN att_leave_type t ON t.id = l.leave_type_id
+            WHERE e.emp_code = :emp_code
+            ORDER BY l.created_at DESC
         """), {'emp_code': emp_code})
         
         leave_requests = []

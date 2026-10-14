@@ -40,7 +40,7 @@ async def mobile_check_in(
     Mobile check-in with geolocation
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Record check-in with location
         result = db.execute(text("""
@@ -88,7 +88,7 @@ async def mobile_check_out(
     Mobile check-out with geolocation
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Record check-out with location
         result = db.execute(text("""
@@ -135,7 +135,7 @@ async def get_my_qr_code(
     Get user's QR code for mobile access
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Get employee details
         result = db.execute(text("""
@@ -183,7 +183,7 @@ async def emergency_alert(
     Submit emergency alert from mobile
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Create emergency event
         result = db.execute(text("""
@@ -236,11 +236,11 @@ async def get_my_location(
     Get user's current location/zone
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         result = db.execute(text("""
             SELECT current_zone_id, is_onboard
-            FROM personnel_employee
+            FROM personnel
             WHERE emp_code = :emp_code
         """), {'emp_code': emp_code})
         
@@ -278,15 +278,15 @@ async def get_notifications(
     Get mobile notifications for user
     """
     try:
-        emp_code = current_user.get('emp_code')
-        
+        # In-app notifications live in sys_notifications, keyed by login user.
         result = db.execute(text("""
             SELECT id, notification_type, message, is_read, created_at
-            FROM notifications
-            WHERE emp_code = :emp_code
+            FROM sys_notifications
+            WHERE user_id = :uid
+              AND (expires_at IS NULL OR expires_at > NOW())
             ORDER BY created_at DESC
             LIMIT :limit
-        """), {'emp_code': emp_code, 'limit': limit})
+        """), {'uid': current_user.id, 'limit': limit})
         
         notifications = []
         for row in result:
@@ -320,7 +320,7 @@ async def mark_notification_read(
     Mark notification as read
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         db.execute(text("""
             UPDATE notifications
@@ -356,7 +356,7 @@ async def get_mustering_status(
     Get current mustering status for user
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Check if there's an active mustering event
         result = db.execute(text("""
@@ -410,7 +410,7 @@ async def mustering_checkin(
     Check-in to mustering point from mobile
     """
     try:
-        emp_code = current_user.get('emp_code')
+        emp_code = getattr(current_user, 'emp_code', None) or current_user.username
         
         # Get active mustering event
         result = db.execute(text("""

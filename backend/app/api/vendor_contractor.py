@@ -576,7 +576,9 @@ async def get_contract_assignments(
         List of contract assignments
     """
     try:
-        from ..models.vendor_contractor import ContractAssignment, Contractor, VendorContract, Vendor, Personnel, Department
+        from ..models.vendor_contractor import ContractAssignment, Contractor, VendorContract, Vendor
+        from ..models.personnel import Personnel
+        from ..models.department import Department
         
         query = db.query(ContractAssignment)
         

@@ -222,3 +222,103 @@ ALTER TABLE public.mustering_log ADD COLUMN IF NOT EXISTS photo text;
 ALTER TABLE public.personnel ADD COLUMN IF NOT EXISTS attendance_id varchar(20);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_personnel_attendance_id
     ON public.personnel (attendance_id) WHERE attendance_id IS NOT NULL;
+
+-- ── SQL functions whose result types never matched their declarations ─────────
+-- Each of these raised "structure of query does not match function result type" (or
+-- "column reference is ambiguous") the moment it returned a real row, so they only
+-- looked fine against empty tables. EXTRACT() is numeric and COUNT(DISTINCT) is
+-- bigint on PostgreSQL 14+; RETURNS TABLE needs the exact declared types.
+-- get_attendance_summary / calculate_attendance also now ignore door-access reader
+-- swipes (iclock_terminal.reader_purpose other than ATTENDANCE), as the Python
+-- attendance engine already does — otherwise an exit swipe hours after the shift
+-- inflates worked hours. Unregistered terminals still count as ATTENDANCE.
+CREATE OR REPLACE FUNCTION public.get_attendance_summary(emp_code_param character varying, start_date date, end_date date)
+RETURNS TABLE(date date, check_in_time timestamp with time zone, check_out_time timestamp with time zone, work_hours double precision, late_minutes integer, early_departure integer, status character varying, is_holiday boolean)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        DATE(t.punch_time),
+        MIN(t.punch_time),
+        MAX(t.punch_time),
+        (EXTRACT(EPOCH FROM (MAX(t.punch_time) - MIN(t.punch_time))) / 3600)::double precision,
+        0::integer,
+        0::integer,
+        'PRESENT'::character varying,
+        public.is_holiday(DATE(t.punch_time))
+    FROM iclock_transaction t
+    WHERE t.emp_code = emp_code_param
+      AND DATE(t.punch_time) BETWEEN start_date AND end_date
+      AND COALESCE((SELECT it.reader_purpose FROM iclock_terminal it WHERE it.sn = t.terminal_sn), 'ATTENDANCE') = 'ATTENDANCE'
+    GROUP BY DATE(t.punch_time)
+    ORDER BY DATE(t.punch_time);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.calculate_attendance(emp_code_param character varying, date_param date)
+RETURNS TABLE(check_in_time timestamp with time zone, check_out_time timestamp with time zone, work_hours double precision, late_minutes integer, early_departure integer, status character varying)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        MIN(t.punch_time),
+        MAX(t.punch_time),
+        (EXTRACT(EPOCH FROM (MAX(t.punch_time) - MIN(t.punch_time))) / 3600)::double precision,
+        0::integer,
+        0::integer,
+        'PRESENT'::character varying
+    FROM iclock_transaction t
+    WHERE t.emp_code = emp_code_param
+      AND DATE(t.punch_time) = date_param
+      AND COALESCE((SELECT it.reader_purpose FROM iclock_terminal it WHERE it.sn = t.terminal_sn), 'ATTENDANCE') = 'ATTENDANCE'
+    GROUP BY DATE(t.punch_time);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.get_device_statistics(device_sn_param character varying, start_date date, end_date date)
+RETURNS TABLE(total_transactions bigint, unique_employees integer, first_transaction timestamp with time zone, last_transaction timestamp with time zone)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        COUNT(*),
+        COUNT(DISTINCT t.emp_code)::integer,
+        MIN(t.punch_time),
+        MAX(t.punch_time)
+    FROM iclock_transaction t
+    WHERE t.terminal_sn = device_sn_param
+      AND DATE(t.punch_time) BETWEEN start_date AND end_date;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.calculate_overtime(emp_code_param character varying, date_param date, shift_id integer)
+RETURNS TABLE(daily_overtime double precision, daily_overtime_minutes integer, overtime_rate double precision)
+LANGUAGE plpgsql AS $$
+DECLARE
+    v_work_hours  double precision;
+    v_shift_hours double precision;
+    v_overtime    double precision;
+BEGIN
+    SELECT (EXTRACT(EPOCH FROM (MAX(it.punch_time) - MIN(it.punch_time))) / 3600)::double precision
+      INTO v_work_hours
+      FROM iclock_transaction it
+     WHERE it.emp_code = emp_code_param
+       AND DATE(it.punch_time) = date_param
+       AND COALESCE((SELECT tm.reader_purpose FROM iclock_terminal tm WHERE tm.sn = it.terminal_sn), 'ATTENDANCE') = 'ATTENDANCE';
+
+    SELECT (EXTRACT(EPOCH FROM (t.end_time - t.start_time)) / 3600)::double precision
+      INTO v_shift_hours
+      FROM att_timetable t
+      JOIN att_shift s ON t.id = s.timetable_id
+     WHERE s.id = shift_id;
+
+    IF v_work_hours > v_shift_hours THEN
+        v_overtime := v_work_hours - v_shift_hours;
+    ELSE
+        v_overtime := 0;
+    END IF;
+
+    RETURN QUERY
+    SELECT v_overtime, ROUND(v_overtime * 60)::integer, 1.5::double precision;
+END;
+$$;

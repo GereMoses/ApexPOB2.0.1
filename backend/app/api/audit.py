@@ -42,20 +42,21 @@ async def get_audit_logs(
     if user_id:
         filters.append("o.user_id = :user_id"); params["user_id"] = user_id
     if module:
-        filters.append("o.module ILIKE :module"); params["module"] = f"%{module}%"
+        filters.append("o.table_name ILIKE :module"); params["module"] = f"%{module}%"
     if action:
-        filters.append("o.operation_type ILIKE :action"); params["action"] = f"%{action}%"
+        filters.append("o.action ILIKE :action"); params["action"] = f"%{action}%"
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
 
     rows = db.execute(text(f"""
-        SELECT o.id, o.created_time, o.operation_type, o.module,
-               o.table_name, o.object_id, o.description,
+        SELECT o.id, o.created_at AS created_time, o.action AS operation_type,
+               o.table_name AS module, o.table_name, o.record_id AS object_id,
+               o.remark AS description,
                u.username, u.email,
                o.ip_address, o.user_agent
         FROM base_operationlog o
         LEFT JOIN auth_user u ON u.id = o.user_id
         {where}
-        ORDER BY o.created_time DESC
+        ORDER BY o.created_at DESC
         LIMIT :limit OFFSET :offset
     """), params).fetchall()
 
@@ -81,20 +82,20 @@ async def audit_summary(
         SELECT u.username, COUNT(*) AS actions
         FROM base_operationlog o
         LEFT JOIN auth_user u ON u.id = o.user_id
-        WHERE o.created_time >= NOW() - INTERVAL '30 days'
+        WHERE o.created_at >= NOW() - INTERVAL '30 days'
         GROUP BY u.username ORDER BY actions DESC LIMIT 10
     """)).fetchall()
 
     by_module = db.execute(text("""
-        SELECT module, COUNT(*) AS actions
+        SELECT table_name AS module, COUNT(*) AS actions
         FROM base_operationlog
-        WHERE created_time >= NOW() - INTERVAL '30 days'
-          AND module IS NOT NULL
-        GROUP BY module ORDER BY actions DESC LIMIT 10
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+          AND table_name IS NOT NULL
+        GROUP BY table_name ORDER BY actions DESC LIMIT 10
     """)).fetchall()
 
     total = db.execute(text(
-        "SELECT COUNT(*) FROM base_operationlog WHERE created_time >= NOW() - INTERVAL '30 days'"
+        "SELECT COUNT(*) FROM base_operationlog WHERE created_at >= NOW() - INTERVAL '30 days'"
     )).scalar()
 
     return {

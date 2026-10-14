@@ -933,6 +933,7 @@ async def kiosk_visitor_types(db: Session = Depends(get_db)):
     """Public: return available visitor types for the kiosk dropdown."""
     from sqlalchemy import text as _text
     rows = db.execute(_text(
-        "SELECT id, name, description FROM vis_visitor_type WHERE is_active = TRUE ORDER BY name"
+        "SELECT id, type_name AS name, NULL::text AS description "
+        "FROM vis_type WHERE is_active = TRUE ORDER BY type_name"
     )).fetchall()
     return {"types": [dict(r._mapping) for r in rows]}

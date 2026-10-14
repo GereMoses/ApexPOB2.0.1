@@ -1537,8 +1537,8 @@ async def delete_visitor(visitor_id: int, db: Session = Depends(get_db), current
 async def preview_holidays(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Return upcoming holidays so the user can decide which timezone holiday group to apply them to."""
     rows = db.execute(text("""
-        SELECT id, holiday_name, holiday_date, holiday_type
-        FROM att_holiday WHERE holiday_date >= CURRENT_DATE ORDER BY holiday_date LIMIT 30
+        SELECT id, holiday_name, start_date AS holiday_date, holiday_type
+        FROM att_holiday WHERE start_date >= CURRENT_DATE ORDER BY start_date LIMIT 30
     """)).fetchall()
     data = _rows(rows)
     for item in data:

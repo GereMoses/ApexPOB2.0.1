@@ -141,7 +141,7 @@ class PersonnelAnalyticsService:
         
         monthly_hires_data = [
             {
-                "period": f"{year}-{month:02d}",
+                "period": f"{int(year)}-{int(month):02d}",   # EXTRACT() returns Decimal
                 "count": count
             }
             for year, month, count in monthly_hires

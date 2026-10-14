@@ -24,6 +24,29 @@ def _pdf_response(pdf_bytes: bytes, filename: str) -> StreamingResponse:
     )
 
 
+_PDF_PUNCT = {"\u2022": "-", "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'",
+              "\u201c": '"', "\u201d": '"', "\u2026": "...", "\u2192": "->", "\u00a0": " "}
+
+
+def _pdf_text(v) -> str:
+    """fpdf2's built-in Helvetica is Latin-1 only; any other character (a bullet, an
+    em dash, a Yoruba/Igbo diacritic in a name) raises FPDFUnicodeEncodingException and
+    kills the whole export. Map common punctuation, fold accents where possible, and
+    replace anything left with '?'."""
+    import unicodedata
+    s = "" if v is None else str(v)
+    for k, r in _PDF_PUNCT.items():
+        s = s.replace(k, r)
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        pass
+    folded = "".join(c if ord(c) < 256 else (unicodedata.normalize("NFKD", c)[:1] or "?")
+                     for c in s)
+    return folded.encode("latin-1", "replace").decode("latin-1")
+
+
 def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
                col_widths: list = None) -> bytes:
     """Build a simple tabular PDF with fpdf2."""
@@ -40,11 +63,11 @@ def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
     pdf.set_font("Helvetica", "B", 16)
     pdf.set_fill_color(30, 42, 59)
     pdf.set_text_color(255, 255, 255)
-    pdf.cell(0, 10, title, ln=True, fill=True, align='C')
+    pdf.cell(0, 10, _pdf_text(title), ln=True, fill=True, align='C')
 
     pdf.set_font("Helvetica", "", 9)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(0, 6, subtitle, ln=True, align='C')
+    pdf.cell(0, 6, _pdf_text(subtitle), ln=True, align='C')
     pdf.ln(3)
 
     # Column widths
@@ -58,7 +81,7 @@ def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
     pdf.set_text_color(255, 255, 255)
     pdf.set_font("Helvetica", "B", 8)
     for i, h in enumerate(headers):
-        pdf.cell(col_widths[i], 7, str(h)[:30], border=1, fill=True, align='C')
+        pdf.cell(col_widths[i], 7, _pdf_text(h)[:30], border=1, fill=True, align='C')
     pdf.ln()
 
     # Rows
@@ -67,7 +90,7 @@ def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
         pdf.set_fill_color(248, 249, 250) if ridx % 2 == 0 else pdf.set_fill_color(255, 255, 255)
         pdf.set_text_color(40, 40, 40)
         for i, cell in enumerate(row):
-            val = str(cell)[:35] if cell is not None else ""
+            val = _pdf_text(cell)[:35]
             pdf.cell(col_widths[i], 6, val, border=1, fill=True)
         pdf.ln()
 
@@ -75,7 +98,7 @@ def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
     pdf.set_y(-10)
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 5, f"Generated: {date.today()}  •  {len(rows)} record(s)", align='C')
+    pdf.cell(0, 5, _pdf_text(f"Generated: {date.today()}  \u2022  {len(rows)} record(s)"), align='C')
 
     return bytes(pdf.output())
 

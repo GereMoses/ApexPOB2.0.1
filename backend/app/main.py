@@ -407,6 +407,41 @@ except ImportError:
     logger.debug("prometheus-fastapi-instrumentator not installed — /metrics disabled")
 
 
+def _unshadow_static_routes(application) -> int:
+    """Move a static route in front of any dynamic route that currently captures it.
+
+    FastAPI matches routes in registration order, so `GET /onboarding/{onboarding_id}`
+    registered before `GET /onboarding/types` swallows "types" as an id and the request
+    fails with a 422 — the static route is unreachable. Only routes that are *actually*
+    shadowed (same method, an earlier dynamic route's pattern matches the static path)
+    are moved, and only to just before the first shadowing route; nothing else changes.
+    """
+    from fastapi.routing import APIRoute
+    routes = application.router.routes
+    moved = 0
+    i = 0
+    while i < len(routes):
+        r = routes[i]
+        if isinstance(r, APIRoute) and "{" not in r.path:
+            for j in range(i):
+                d = routes[j]
+                if (isinstance(d, APIRoute) and "{" in d.path
+                        and (r.methods & d.methods) and d.path_regex.match(r.path)):
+                    routes.insert(j, routes.pop(i))
+                    moved += 1
+                    break
+        i += 1
+    return moved
+
+
+try:
+    _moved = _unshadow_static_routes(app)
+    if _moved:
+        logger.info("✅ Un-shadowed %d static route(s) hidden behind dynamic path routes", _moved)
+except Exception as _e:  # never block start-up over route ordering
+    logger.warning("Route un-shadowing skipped: %s", _e)
+
+
 def _sync_time_one_pass() -> None:
     """Synchronous inner body of the time-sync loop — runs in a thread pool."""
     from .api.adms_protocol import queue_clock_sync, STATE_APPROVED, _get_direct_device
