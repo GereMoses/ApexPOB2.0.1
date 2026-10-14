@@ -24,6 +24,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 import EmailSetup from '../Emergency/EmailSetup';
 import DatabaseTab from './DatabaseTab';
+import AttendanceIdsDrawer from './AttendanceIdsDrawer';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 dayjs.extend(relativeTime);
@@ -2453,6 +2454,7 @@ const HRIntegrationTab = () => {
   const [syncing,     setSyncing]     = useState(false);
   const [testing,     setTesting]     = useState(false);
   const [pulling,     setPulling]     = useState(false);
+  const [idsOpen,     setIdsOpen]     = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [previewDate, setPreviewDate] = useState('');
   const [previewData, setPreviewData] = useState(null);
@@ -2951,6 +2953,15 @@ const HRIntegrationTab = () => {
               >
                 Pull Employees from SeamlessHR
               </Button>
+              <Button
+                block icon={<IdcardOutlined />} style={{ marginTop: 8 }}
+                onClick={() => setIdsOpen(true)}
+              >
+                Attendance IDs (reader PINs)
+              </Button>
+              <AttendanceIdsDrawer
+                open={idsOpen} onClose={() => setIdsOpen(false)} configured={!!status.configured}
+              />
               <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
                 For automatic, real-time updates, register the webhook below with SeamlessHR
                 instead of pulling manually.

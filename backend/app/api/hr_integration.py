@@ -262,6 +262,48 @@ class AttendanceIdImport(BaseModel):
     items: list[AttendanceIdItem]
 
 
+@router.get("/attendance-ids")
+async def list_attendance_ids(
+    q: str = "",
+    status: str = "all",            # all | missing | assigned
+    page: int = 1,
+    page_size: int = 25,
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_admin),
+):
+    """SeamlessHR-managed employees and the Attendance ID (= reader PIN) each one has.
+
+    `missing` are the ones whose punches are held back from payroll until an ID is
+    adopted. Inactive leavers are excluded: they no longer need a reader PIN."""
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+    base = "FROM personnel WHERE hr_source = 'SEAMLESSHR' AND COALESCE(is_active, TRUE)"
+    params: dict = {}
+    where = ""
+    if q.strip():
+        where += " AND (emp_code ILIKE :q OR full_name ILIKE :q OR attendance_id ILIKE :q)"
+        params["q"] = f"%{q.strip()}%"
+    if status == "missing":
+        where += " AND attendance_id IS NULL"
+    elif status == "assigned":
+        where += " AND attendance_id IS NOT NULL"
+
+    counts = db.execute(text(
+        "SELECT COUNT(*), COUNT(attendance_id) " + base)).fetchone()
+    total = db.execute(text("SELECT COUNT(*) " + base + where), params).scalar() or 0
+    rows = db.execute(text(
+        "SELECT emp_code, full_name, department, attendance_id " + base + where +
+        " ORDER BY (attendance_id IS NOT NULL), emp_code LIMIT :lim OFFSET :off"),
+        {**params, "lim": page_size, "off": (page - 1) * page_size}).fetchall()
+    return {
+        "summary": {"employees": counts[0], "assigned": counts[1],
+                    "missing": counts[0] - counts[1]},
+        "total": total, "page": page, "page_size": page_size,
+        "items": [{"emp_code": r[0], "name": r[1], "department": r[2],
+                   "attendance_id": r[3]} for r in rows],
+    }
+
+
 @router.post("/adopt-attendance-ids")
 async def adopt_attendance_ids_endpoint(
     days: int = 31,
