@@ -124,6 +124,9 @@ if settings.DATABASE_PASSWORD in _INSECURE_DB_PASSWORDS:
 from .core.rbac import RBACMiddleware
 app.add_middleware(RBACMiddleware, exclude_paths=[
     "/health", "/status", "/docs", "/redoc", "/openapi.json",
+    # Prometheus scrapes with no token. The prod backend publishes no port and nginx
+    # does not proxy /metrics, so only containers on the internal network can reach it.
+    "/metrics",
     "/api/v1/docs", "/api/v1/redoc", "/api/v1/openapi.json",
     "/api/v1/auth/login", "/api/v1/auth/simple-login", "/api/v1/auth/production-login",
     # MFA handshake — consumes the mfa_pending token (which RBAC would reject);
@@ -153,6 +156,11 @@ logger.info("✅ RBAC middleware enabled for comprehensive access control")
 # except Global Admin (who can log in and renew) and public paths.
 _LICENSE_BYPASS_PREFIXES = (
     "/health", "/status", "/docs", "/redoc", "/openapi.json",
+    # Prometheus scrapes this with no token on the internal network (nginx does not
+    # proxy it). It carries no product functionality, and it is already open without a
+    # login while the licence is active, so gating it only blinds monitoring — and its
+    # alerts — at the moment a lapsed licence is the thing you would want to hear about.
+    "/metrics",
     "/api/v1/docs", "/api/v1/redoc", "/api/v1/openapi.json",
     "/api/v1/auth/",
     "/api/v1/subscription/status", "/api/v1/subscription/activate",
