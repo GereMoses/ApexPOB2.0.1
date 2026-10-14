@@ -101,3 +101,30 @@ def rewrite_command(db: Session, cmd: str) -> str:
     if not cmd or "PIN=" not in cmd:
         return cmd
     return _CMD_PIN_RE.sub(lambda m: "PIN=" + pin_for(db, m.group(1)), cmd)
+
+
+def enrollment_block_reason(db: Session, emp_code: str) -> Optional[str]:
+    """Why this employee must not be enrolled on a reader yet, or None if fine.
+
+    SeamlessHR-managed staff are given their Attendance ID as the reader PIN. With
+    none on file the only PIN left is the employee code (e.g. EMPLOYEE001), which a
+    numeric ZKTeco reader rejects — the command is accepted and then silently fails
+    on the device, and the staff member's punches could never reach payroll anyway.
+    Never blocks on a lookup error.
+    """
+    try:
+        row = db.execute(
+            text("SELECT hr_source, attendance_id FROM personnel WHERE emp_code = :c"),
+            {"c": str(emp_code)}).fetchone()
+    except Exception as e:
+        logger.warning("enrollment_block_reason(%s) lookup failed, not blocking: %s", emp_code, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+    if not row or row[0] != "SEAMLESSHR" or is_valid_pin(row[1]):
+        return None
+    return (f"{emp_code} is managed by SeamlessHR but has no Attendance ID yet, so there is "
+            "no valid reader PIN to enrol them under. Adopt their ID first: Settings → HR "
+            "Integration → Attendance IDs (or ask SeamlessHR to assign one).")

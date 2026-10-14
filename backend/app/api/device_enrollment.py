@@ -12,7 +12,7 @@ from typing import List, Optional
 from datetime import datetime, timezone
 
 from ..core.database import get_db
-from ..services.device_pin import rewrite_command, pin_for
+from ..services.device_pin import rewrite_command, pin_for, enrollment_block_reason
 from ..core.dependencies import get_current_user
 from ..models.user import User
 from ..models.biotime_models import (
@@ -306,6 +306,9 @@ async def enable_enrollment_mode(
     queued = []
 
     if emp_code:
+        reason = enrollment_block_reason(db, emp_code)
+        if reason:
+            raise HTTPException(status_code=409, detail=reason)
         # Ensure the user exists on the reader first (idempotent — harmless if already there).
         person = db.query(Personnel).filter(Personnel.emp_code == emp_code).first()
         name = ((person.full_name if person else None)
@@ -363,6 +366,9 @@ async def push_templates_to_devices(
     ).first()
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
+    reason = enrollment_block_reason(db, payload.emp_code)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
 
     templates = db.query(IClockBioTemplate).filter(
         IClockBioTemplate.emp_code == payload.emp_code,
@@ -651,6 +657,10 @@ async def enroll_direct(
     port = getattr(device, "port", None) or 4370
     if not ip:
         raise HTTPException(status_code=404, detail="Device not found or has no IP address")
+
+    reason = enrollment_block_reason(db, payload.emp_code)
+    if reason:
+        raise HTTPException(status_code=409, detail=reason)
 
     # Look up the Personnel record to get badge_id, full name, and card number
     person = db.query(Personnel).filter(Personnel.emp_code == payload.emp_code).first()
