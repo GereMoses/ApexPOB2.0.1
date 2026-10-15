@@ -34,7 +34,8 @@ Services started: postgres, redis, db-init, backend, celery-worker, celery-beat,
 - **ADMS readers:** `http://<server>` (port **80**, HTTP) — `/iclock/*` stays on 80; readers can't do TLS.
 - **Monitoring (Grafana):** `https://<server>/monitoring` — restricted to private/VPN ranges.
 - Gateway port-forwards public **80 / 443** → server. (443 only; 80 is required for ADMS.)
-- Current public IP: **41.67.137.161**; server LAN IP: **192.168.0.235**. Recommendation: move to a **DDNS hostname** so a changing public IP doesn't break readers/cert.
+- Current host: Docker Desktop on the Mac at LAN IP **192.168.101.237** (readers push to `http://192.168.101.237/iclock/`). Earlier server: public 41.67.137.161 / LAN 192.168.0.235. Recommendation: a **fixed LAN IP or DDNS hostname** so an address change doesn't break readers/cert.
+- **`ALLOWED_HOSTS` in `.env.prod` must list the address readers push to** (the server's LAN IP or hostname). Otherwise every push is refused with `400 Invalid host header` and punches are silently lost.
 
 ## 4. Accounts & credentials
 - Default admin: username `admin` (password **must be changed** at go-live).
@@ -82,4 +83,30 @@ docker exec -i pob_postgres pg_restore -U pob_user -d pob_system --clean --if-ex
 - [ ] Validate Business Central + SeamlessHR against vendor sandboxes (`docs/INTEGRATIONS.md`)
 - [ ] Confirm backup destination + test restore
 - [ ] Configure Alertmanager recipients
-- [ ] Run the test suite on the release build (`docker exec pob_backend python -m pytest tests/`)
+- [ ] Run the **go-live safety suite** on the release build: `./scripts/run_safety_tests.sh` (must be 16 passed; uses a throwaway database). The older suite in `backend/tests/*.py` is largely out of date (≈37 failures / 22 errors predating Oct 2026) and needs its own repair.
+- [ ] **Renew the licence** (expired 2026-08-31 — unauthenticated requests get 402)
+- [ ] Complete §10 (SeamlessHR → Marconi switch-over) and §11 (site setup)
+
+## 10. SeamlessHR → Marconi switch-over
+Everything was proven on SeamlessHR's sandbox (Integration Company); Marconi uses the same API. On the day:
+1. **Back up**: `docker exec pob_postgres pg_dump -U pob_user pob_system > pre_marconi.sql`.
+2. **Remove the sandbox staff** (≈344 `hr_source='SEAMLESSHR'` records) and the HR sync history — a pull adds/updates but never deletes, so they would otherwise sit beside Marconi's staff in POB and mustering.
+3. **Settings → HR Integration**: API Base URL = SeamlessHR's **production** URL (ask SeamlessHR — the form defaults to the sandbox), Client ID, Client Secret → **Test Connection** → **Pull employees** (≈2–3 min; the sandbox throttles, the pull retries and pages slowly by design).
+4. **Attendance IDs** (= the reader PIN, = what SeamlessHR matches punches on): Settings → Attendance IDs → *Adopt from SeamlessHR* (needs Time & Attendance read on Marconi's client) or *Import* an export. Staff without one are **not** sent to SeamlessHR.
+5. **Verify one person end to end**: enrol → tap first thing in the morning and again later → Attendance shows clock-in/out → Sync for that day → SeamlessHR reply says `N sent successfully, 0 failed`.
+6. In SeamlessHR's T&A module (Schedule Manager → Records, or Reports → Attendance) HR must **create schedules** for staff; their rotational limits (currently 1 h / 1 shift per week) must be corrected.
+
+Open with SeamlessHR (sandbox): records rejected with "0 sent, 1 failed" and no reason since 15 Oct ~18:40; `GET /v1/attendances` "Unauthorized access"; employee list intermittently 400; record #345 unreadable. Draft: `docs/SeamlessHR_sandbox_questions.md`.
+
+## 11. Site setup (before go-live)
+- **Zones**: replace the 7 demo zones with the real layout — site → areas → rooms (**Parent Zone**), muster points (type Muster Point), and the boundary zones (**Site boundary** switch: gate / helideck / jetty). Place each on the GPS map (*Place on map*). Name the helideck/jetty zones exactly as flights/journeys name them (e.g. "Helipad") so arrivals land there.
+- **Readers** (Devices → reader purpose, then Zones → assign): Attendance, Entry, Exit, Mustering, or **Transport check-in** (helideck/gangway auto check-in). Every Entry/Exit/Mustering reader needs a zone (an alert is raised otherwise).
+- **Shifts**: set per department (all currently fall back to "Day 07-19 Mon–Fri"). Attendance uses **first punch = in, last punch = out** in site time (`att_rules.punch_state_mode = first_last`; `SITE_TIME_ZONE`, default Africa/Lagos).
+- **Roles** (Settings → Roles): give **journey.approve** to supervisors and **transport.override** to the logistics/helideck lead. View/manage rights follow `pob.view` / `pob.change`.
+- **Reader memory**: the F18 still stores June–July test punches; clear its attendance log before go-live so a stamp reset cannot re-send them.
+
+## 12. How POB is decided (for operators)
+- **On board**: any tap at a site reader; arrival of an inbound flight (status *Completed*); completion of an "arriving at site" land journey.
+- **Off board**: Exit through a **site-boundary** zone; departure of an outbound flight (*In transit*); start of a "leaving site" land journey; inactivity auto-checkout (Settings → Database, if enabled).
+- Moving between zones never changes POB; leaving a room puts the person in its parent zone. Readers that upload late cannot move anyone backwards.
+- Confirming a passenger means *boarded* only — POB moves with the flight. Cancelling a flight in transit, offloading or removing a passenger undoes it.
