@@ -603,6 +603,18 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 logger.error(f"acc_event write error {emp_code}@{sn}: {e}")
             continue
 
+        # ── TRANSPORT_CHECKIN reader (helideck / gangway / heliport) ─────────
+        # A tap checks the person in to their next manifested flight. The punch is
+        # still stored below (raw log), but attendance ignores non-ATTENDANCE readers.
+        if reader_purpose == 'TRANSPORT_CHECKIN':
+            try:
+                from .transport_manifest import checkin_from_reader
+                res = checkin_from_reader(db, emp_code, punch_time, sn)
+                logger.info("Transport check-in %s@%s: %s", emp_code, sn, res or "no flight found")
+            except Exception as te:
+                logger.error("Transport check-in error %s@%s: %s", emp_code, sn, te)
+                db.rollback()
+
         # ── ATTENDANCE reader (default) ───────────────────────────────────────
         raw_state = rec.get('Status') or rec.get('InOutStatus') or rec.get('INOUTSTATUS') or '0'
         try:

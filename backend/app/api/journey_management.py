@@ -10,9 +10,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session, joinedload
 
 from ..core.database import get_db
@@ -93,18 +93,32 @@ def _aware(dt: Optional[datetime]) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _site_tz():
+    from ..services.attendance_calculation_service import SITE_TZ
+    return SITE_TZ
+
+
+def _perm(request: Optional[Request], code: str) -> bool:
+    perms = getattr(getattr(request, "state", None), "user_permissions", None) or []
+    return "*" in perms or code in perms
+
+
 def _crosses_night(dep: Optional[datetime], arr: Optional[datetime]) -> bool:
-    """True if any part of the trip falls in night hours (19:00–06:00)."""
+    """True if any part of the trip falls in night hours (19:00–06:00 SITE time —
+    this used UTC hours, so a 18:00–19:00 Lagos departure was not flagged)."""
     if not dep:
         return False
-    end = arr or (dep + timedelta(hours=2))
+    dep = dep.astimezone(_site_tz())
+    end = (arr.astimezone(_site_tz()) if arr else dep + timedelta(hours=2))
+    night = lambda t: t.hour >= 19 or t.hour < 6
+    # Sample along the trip AND the arrival itself (hourly steps from 18:30 never
+    # looked at a 19:20 arrival, so the trip was not flagged).
     cur = dep
-    # Sample hourly along the trip
     while cur <= end:
-        if cur.hour >= 19 or cur.hour < 6:
+        if night(cur):
             return True
-        cur += timedelta(hours=1)
-    return False
+        cur += timedelta(minutes=30)
+    return night(end)
 
 
 def compute_risk(distance_km, dep, arr, factors) -> tuple:
@@ -171,6 +185,12 @@ def _to_dict(j: JourneyPlan, with_checkins: bool = False) -> Dict[str, Any]:
         "status": j.status,
         "approved_by_id": j.approved_by_id,
         "approved_at": j.approved_at.isoformat() if j.approved_at else None,
+        "second_approved_by_id": j.second_approved_by_id,
+        "second_approved_at": j.second_approved_at.isoformat() if j.second_approved_at else None,
+        "approvals_required": 2 if j.risk_level == "HIGH" else 1,
+        "approvals_given": (1 if j.approved_by_id else 0) + (1 if j.second_approved_by_id else 0),
+        "risk_manual_factors": j.risk_manual_factors or [],
+        "created_by_id": j.created_by_id,
         "rejection_reason": j.rejection_reason,
         "notes": j.notes,
         "created_at": j.created_at.isoformat() if j.created_at else None,
@@ -248,6 +268,7 @@ async def create_journey(payload: JourneyCreate, db: Session = Depends(get_db),
         planned_departure=payload.planned_departure, planned_arrival=payload.planned_arrival,
         checkin_interval_min=payload.checkin_interval_min or 60,
         risk_level=level, risk_factors=reasons, risk_notes=payload.risk_notes,
+        risk_manual_factors=payload.risk_factors or [],
         vehicle_check=payload.vehicle_check,
         vehicle_check_ok=bool(payload.vehicle_check) and all(payload.vehicle_check.values()),
         status="DRAFT", notes=payload.notes,
@@ -276,23 +297,38 @@ async def update_journey(journey_id: int, payload: JourneyUpdate, db: Session = 
     if j.status not in ("DRAFT", "REJECTED", "SUBMITTED"):
         raise HTTPException(status_code=400, detail=f"Cannot edit a {j.status} journey")
     data = payload.dict(exclude_unset=True)
+    manual = data.pop("risk_factors", None)
+    if manual is not None:
+        j.risk_manual_factors = manual
     for k, v in data.items():
         setattr(j, k, v)
     if payload.passengers is not None:
         j.passenger_count = len(payload.passengers)
     if payload.vehicle_check is not None:
         j.vehicle_check_ok = bool(payload.vehicle_check) and all(payload.vehicle_check.values())
-    # Recompute risk on any change to its inputs
+    # Recompute from the planner's OWN factors (kept separately). Previously an edit
+    # without factors dropped them, and an edit sending back the stored list counted
+    # automatic reasons (e.g. "Night driving") a second time.
     level, reasons = compute_risk(j.distance_km, j.planned_departure, j.planned_arrival,
-                                  payload.risk_factors if payload.risk_factors is not None else None)
+                                  j.risk_manual_factors or [])
     j.risk_level, j.risk_factors = level, reasons
+    if j.status == "SUBMITTED":
+        # A changed plan must be approved as changed.
+        j.approved_by_id = j.approved_at = None
+        j.second_approved_by_id = j.second_approved_at = None
     db.commit()
     return _to_dict(j, with_checkins=True)
 
 
 @router.delete("/{journey_id}", status_code=204)
-async def delete_journey(journey_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+async def delete_journey(journey_id: int, request: Request, db: Session = Depends(get_db),
+                         current_user=Depends(get_current_user)):
     j = _get(db, journey_id)
+    # An approved / running / finished journey is a safety record — cancel it instead.
+    if j.status not in ("DRAFT", "REJECTED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"A {j.status} journey cannot be deleted — cancel it instead")
+    if j.created_by_id and j.created_by_id != getattr(current_user, "id", None) and not _perm(request, "journey.approve"):
+        raise HTTPException(status_code=403, detail="Only the planner or an approver can delete this journey")
     db.delete(j)
     db.commit()
 
@@ -311,26 +347,59 @@ async def submit_journey(journey_id: int, db: Session = Depends(get_db), _=Depen
 
 
 @router.post("/{journey_id}/approve")
-async def approve_journey(journey_id: int, db: Session = Depends(get_db),
+async def approve_journey(journey_id: int, request: Request, db: Session = Depends(get_db),
                           current_user=Depends(get_current_user)):
+    if not _perm(request, "journey.approve"):
+        raise HTTPException(status_code=403, detail="Approving journeys needs the journey.approve permission")
     j = _get(db, journey_id)
     if j.status != "SUBMITTED":
         raise HTTPException(status_code=400, detail="Only a submitted journey can be approved")
-    j.status = "APPROVED"
-    j.approved_by_id = getattr(current_user, "id", None)
-    j.approved_at = _now()
+    uid = getattr(current_user, "id", None)
+    if j.created_by_id and uid == j.created_by_id:
+        raise HTTPException(status_code=403, detail="You cannot approve a journey you planned")
+    if j.approved_by_id is None:
+        j.approved_by_id, j.approved_at = uid, _now()
+    elif j.risk_level == "HIGH" and j.second_approved_by_id is None:
+        if uid == j.approved_by_id:
+            raise HTTPException(status_code=403, detail="A HIGH-risk journey needs a second, different approver")
+        j.second_approved_by_id, j.second_approved_at = uid, _now()
+    # HIGH risk needs two different approvers; anything else needs one.
+    if j.risk_level != "HIGH" or j.second_approved_by_id:
+        j.status = "APPROVED"
     db.commit()
     return _to_dict(j)
 
 
 @router.post("/{journey_id}/reject")
-async def reject_journey(journey_id: int, payload: RejectBody, db: Session = Depends(get_db),
-                         _=Depends(get_current_user)):
+async def reject_journey(journey_id: int, payload: RejectBody, request: Request,
+                         db: Session = Depends(get_db), _=Depends(get_current_user)):
+    if not _perm(request, "journey.approve"):
+        raise HTTPException(status_code=403, detail="Rejecting journeys needs the journey.approve permission")
     j = _get(db, journey_id)
     if j.status != "SUBMITTED":
         raise HTTPException(status_code=400, detail="Only a submitted journey can be rejected")
     j.status = "REJECTED"
     j.rejection_reason = payload.reason
+    j.approved_by_id = j.approved_at = None
+    j.second_approved_by_id = j.second_approved_at = None
+    db.commit()
+    return _to_dict(j)
+
+
+class VehicleCheckBody(BaseModel):
+    vehicle_check: Dict[str, Any]
+
+
+@router.post("/{journey_id}/vehicle-check")
+async def record_vehicle_check(journey_id: int, payload: VehicleCheckBody, db: Session = Depends(get_db),
+                               _=Depends(get_current_user)):
+    """Record the pre-trip inspection. It is done just before departure — usually
+    after approval, when the plan itself can no longer be edited."""
+    j = _get(db, journey_id)
+    if j.status in ("IN_PROGRESS", "COMPLETED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"Cannot change the vehicle check of a {j.status} journey")
+    j.vehicle_check = payload.vehicle_check
+    j.vehicle_check_ok = bool(payload.vehicle_check) and all(payload.vehicle_check.values())
     db.commit()
     return _to_dict(j)
 
@@ -340,6 +409,9 @@ async def start_journey(journey_id: int, db: Session = Depends(get_db), _=Depend
     j = _get(db, journey_id)
     if j.status != "APPROVED":
         raise HTTPException(status_code=400, detail="Journey must be APPROVED before it can start")
+    if not j.vehicle_check_ok:
+        raise HTTPException(status_code=400,
+                            detail="The pre-trip vehicle check is not complete / not passed — record it before starting")
     now = _now()
     j.status = "IN_PROGRESS"
     j.actual_departure = now
@@ -365,6 +437,25 @@ async def journey_checkin(journey_id: int, payload: CheckInBody, db: Session = D
     j.last_checkin_at = now
     j.next_checkin_due = now + timedelta(minutes=j.checkin_interval_min or 60)
     db.commit()
+    if (payload.status or "OK").upper() == "CONCERN":
+        # A driver reporting a problem is exactly what the control room must see now.
+        ref = j.reference or f"JMP-{j.id}"
+        msg = (f"⚠️ {ref} {j.origin} → {j.destination}: driver {j.driver_name or ''} reported a CONCERN"
+               f"{' at ' + payload.location if payload.location else ''}. {payload.notes or ''}").strip()
+        dk = f"journey_concern_{j.id}_{now:%Y%m%d%H%M%S}"
+        db.execute(text("""
+            INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, expires_at)
+            VALUES (:dk, 'journey_concern', :t, :m, 'critical', NOW() + INTERVAL '48 hours')
+            ON CONFLICT (dedup_key) DO NOTHING
+        """), {"dk": dk, "t": f"Journey concern {ref}", "m": msg})
+        db.commit()
+        try:
+            from .notifications import notify_sync
+            notify_sync({"type": "journey_concern", "priority": "critical",
+                         "title": f"Journey concern {ref}", "message": msg,
+                         "dedup_key": dk, "journey_id": j.id})
+        except Exception as e:
+            logger.warning("journey concern broadcast failed: %s", e)
     return _to_dict(j, with_checkins=True)
 
 

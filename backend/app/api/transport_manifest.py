@@ -6,10 +6,10 @@ Helideck / gangway check-in reconciliation for accurate POB tracking.
 import asyncio
 import io
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time as dtime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import func, text
@@ -233,7 +233,7 @@ def travel_compliance(p: Optional[Personnel]) -> Dict[str, Any]:
 
     med = _parse_date(getattr(p, "medical_fitness_date", None))
     if med is None:
-        issues.append("No medical certificate on file"); warning = True
+        pass   # judged below: missing records are "unknown", not a warning
     elif med < today:
         issues.append(f"Medical expired {med.isoformat()}"); blocked = True
     elif med <= soon:
@@ -260,11 +260,150 @@ def travel_compliance(p: Optional[Personnel]) -> Dict[str, Any]:
 
     has_training = _scan(getattr(p, "training_records", None))
     has_certs = _scan(getattr(p, "certifications", None))
-    if not has_training and not has_certs:
-        issues.append("No safety training / certifications on file"); warning = True
+    if med is None and not has_training and not has_certs:
+        # No records at all (nothing feeds them yet — SeamlessHR does not send them).
+        # Flagging every passenger as a warning teaches people to ignore the column;
+        # report "unknown" and keep blocking only on a record that has EXPIRED.
+        return {"status": "unknown", "issues": ["No medical / training records on file"]}
 
     status = "blocked" if blocked else ("warning" if warning else "ok")
     return {"status": status, "issues": issues}
+
+
+# ─── Site time, permissions ─────────────────────────────────────────────────────
+
+def _site_tz():
+    from ..services.attendance_calculation_service import SITE_TZ
+    return SITE_TZ
+
+
+def _site_today() -> date:
+    return datetime.now(_site_tz()).date()
+
+
+def _site_day_bounds(d: date):
+    """[start, end) of a SITE calendar day as aware datetimes. Day filters used UTC
+    midnight, so a 00:30 Lagos flight was listed (and counted) on the previous day."""
+    start = datetime.combine(d, dtime.min, tzinfo=_site_tz())
+    return start, start + timedelta(days=1)
+
+
+def _perm(request: Optional[Request], code: str) -> bool:
+    perms = getattr(getattr(request, "state", None), "user_permissions", None) or []
+    return "*" in perms or code in perms
+
+
+# ─── POB movements (driven by the flight's REAL status) ─────────────────────────
+#
+# Confirming a passenger means "checked in / boarded" — nothing more. POB changes
+# only when the flight actually moves:
+#   OUTBOUND passenger  → off board when the flight DEPARTS (IN_TRANSIT/COMPLETED)
+#   INBOUND passenger   → on board when the flight ARRIVES (COMPLETED)
+# Previously POB changed at confirm: a cancelled inbound flight left its passengers
+# "on board", and an outbound passenger was taken off POB (and marked safe in an
+# active muster) while still standing on the helideck. _sync_entry_pob is the single
+# rule, re-run after every change, so every case is also reversible.
+
+_DEPARTED = {"IN_TRANSIT", "COMPLETED"}
+_ARRIVED = {"COMPLETED"}
+
+_FLIGHT_TRANSITIONS = {
+    "SCHEDULED":  {"CONFIRMED", "IN_TRANSIT", "COMPLETED", "CANCELLED"},
+    "CONFIRMED":  {"SCHEDULED", "IN_TRANSIT", "COMPLETED", "CANCELLED"},
+    "IN_TRANSIT": {"COMPLETED", "CANCELLED"},          # cancelled in transit = turned back
+    "CANCELLED":  {"SCHEDULED"},                        # reinstate
+    "COMPLETED":  set(),
+}
+
+
+def _zone_for_location(db: Session, location: Optional[str]) -> Optional[int]:
+    """Zone whose name or code is the arrival/departure point (e.g. 'Helideck')."""
+    if not location:
+        return None
+    row = db.execute(text(
+        "SELECT id FROM zones WHERE lower(name) = lower(:l) OR lower(code) = lower(:l) "
+        "ORDER BY id LIMIT 1"), {"l": location.strip()}).fetchone()
+    return row[0] if row else None
+
+
+def _go_onboard(db: Session, personnel_id: int, location: Optional[str]) -> None:
+    from .adms_protocol import _recalc_zone_occupancy
+    p = db.execute(text("SELECT emp_code, current_zone_id FROM personnel WHERE id = :i"),
+                   {"i": personnel_id}).fetchone()
+    if not p:
+        return
+    zone_id = _zone_for_location(db, location)
+    db.execute(text("""
+        UPDATE personnel SET is_onboard = TRUE, is_pob = TRUE,
+               pob_since = COALESCE(pob_since, NOW()), pob_location = :loc,
+               current_location = COALESCE(:loc, current_location),
+               last_seen = NOW(), updated_at = NOW()
+        WHERE id = :i
+    """), {"i": personnel_id, "loc": location})
+    if zone_id and p.current_zone_id != zone_id:
+        # Place them in the arrival point's zone so they show on the live map.
+        if p.current_zone_id:
+            db.execute(text("""INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+                VALUES (:z, :ec, 'TRANSPORT', 'CLOCK_OUT', NOW(), :z)"""),
+                {"z": p.current_zone_id, "ec": p.emp_code})
+        db.execute(text("""INSERT INTO zone_personnel_tracking
+            (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:z, :ec, 'TRANSPORT', 'CLOCK_IN', NOW(), :pz)"""),
+            {"z": zone_id, "ec": p.emp_code, "pz": p.current_zone_id})
+        db.execute(text("UPDATE personnel SET current_zone_id = :z WHERE id = :i"),
+                   {"z": zone_id, "i": personnel_id})
+        for z in {zone_id, p.current_zone_id} - {None}:
+            _recalc_zone_occupancy(z, db)
+
+
+def _go_offboard(db: Session, personnel_id: int) -> None:
+    from ..services.database_admin_service import _off_board
+    _off_board(db, "id = :pid", {"pid": personnel_id})
+    db.execute(text("UPDATE personnel SET pob_location = NULL WHERE id = :i"), {"i": personnel_id})
+
+
+def _mark_departed_in_muster(db: Session, emp_code: Optional[str], user_id) -> None:
+    """A passenger who has actually flown out is not on the installation: mark them
+    accounted-for in any active muster so they are not searched for."""
+    if not emp_code:
+        return
+    active_event = db.query(MusteringEvent).filter(MusteringEvent.status == 0).first()
+    if not active_event:
+        return
+    log = db.query(MusteringLog).filter(MusteringLog.event_id == active_event.id,
+                                        MusteringLog.emp_code == emp_code).first()
+    if log and log.status != 1:
+        from ..services.mustering_service import MusteringService
+        MusteringService(db).mark_person_status(active_event.id, emp_code, status=1,
+                                                marked_by=user_id or 0)
+
+
+def _sync_entry_pob(db: Session, schedule: TransportSchedule, entry: ManifestEntry,
+                    user_id=None, removing: bool = False) -> None:
+    """Make this passenger's POB state match reality. Idempotent."""
+    if not entry.personnel_id:
+        return
+    st = (schedule.status or "").upper()
+    should = (not removing and entry.status == "CONFIRMED" and (
+        (entry.direction == "OUTBOUND" and st in _DEPARTED) or
+        (entry.direction == "INBOUND" and st in _ARRIVED)))
+    if should and not entry.pob_applied_at:
+        if entry.direction == "OUTBOUND":
+            _go_offboard(db, entry.personnel_id)
+            _mark_departed_in_muster(db, entry.emp_code, user_id)
+        else:
+            _go_onboard(db, entry.personnel_id, schedule.arrival_location)
+        entry.pob_applied_at = datetime.now(timezone.utc)
+    elif not should and entry.pob_applied_at:
+        # Undo: an outbound passenger whose flight turned back (or who was offloaded /
+        # removed after departure) is back where they left from; an inbound passenger
+        # recorded as arrived by mistake is taken off again.
+        if entry.direction == "OUTBOUND":
+            _go_onboard(db, entry.personnel_id, schedule.departure_location)
+        else:
+            _go_offboard(db, entry.personnel_id)
+        entry.pob_applied_at = None
 
 
 # ─── Flight endpoints ──────────────────────────────────────────────────────────
@@ -280,9 +419,9 @@ async def list_flights(
 ) -> Dict[str, Any]:
     """List flights with optional date/status filters. Defaults to today ± 7 days."""
     if date_from is None:
-        date_from = date.today() - timedelta(days=7)
+        date_from = _site_today() - timedelta(days=7)
     if date_to is None:
-        date_to = date.today() + timedelta(days=7)
+        date_to = _site_today() + timedelta(days=7)
 
     q = (
         db.query(TransportSchedule)
@@ -291,8 +430,8 @@ async def list_flights(
             joinedload(TransportSchedule.manifest_entries),
         )
         .filter(
-            TransportSchedule.departure_time >= datetime.combine(date_from, datetime.min.time()),
-            TransportSchedule.departure_time <= datetime.combine(date_to, datetime.max.time()),
+            TransportSchedule.departure_time >= _site_day_bounds(date_from)[0],
+            TransportSchedule.departure_time < _site_day_bounds(date_to)[1],
         )
     )
     if flight_status:
@@ -329,6 +468,18 @@ async def create_flight(
         .filter(Transport.identifier == payload.transport_identifier)
         .first()
     )
+    if transport:
+        # Details the user actually filled in update the aircraft/vessel — they were
+        # frozen at first use, so a wrong capacity or payload limit could never be fixed.
+        sent = payload.__fields_set__
+        if "transport_capacity" in sent and payload.transport_capacity:
+            transport.capacity = payload.transport_capacity
+        if "transport_max_payload_kg" in sent:
+            transport.max_payload_kg = payload.transport_max_payload_kg
+        if "transport_operator" in sent and payload.transport_operator:
+            transport.operator = payload.transport_operator
+        if "transport_type" in sent:
+            transport.type = payload.transport_type
     if not transport:
         transport = Transport(
             identifier=payload.transport_identifier,
@@ -416,7 +567,10 @@ async def update_flight_status(
         raise HTTPException(status_code=404, detail="Flight not found")
 
     new_status = payload.status.upper()
-    now = datetime.utcnow()
+    cur = (schedule.status or "SCHEDULED").upper()
+    if new_status != cur and new_status not in _FLIGHT_TRANSITIONS.get(cur, set()):
+        raise HTTPException(status_code=400, detail=f"A {cur} flight cannot be changed to {new_status}")
+    now = datetime.now(timezone.utc)
     # Stamp actuals on the real-world transitions so delays can be computed.
     if new_status == "IN_TRANSIT" and not schedule.actual_departure_time:
         schedule.actual_departure_time = now
@@ -426,6 +580,10 @@ async def update_flight_status(
             schedule.actual_departure_time = schedule.departure_time
 
     schedule.status = new_status
+    # POB follows the real movement: departure takes outbound passengers off,
+    # arrival puts inbound passengers on, and cancelling (turned back) undoes both.
+    for e in db.query(ManifestEntry).filter(ManifestEntry.schedule_id == flight_id).all():
+        _sync_entry_pob(db, schedule, e, getattr(_, "id", None))
     db.commit()
     delay = None
     if schedule.actual_departure_time and schedule.departure_time:
@@ -503,12 +661,22 @@ async def add_manifest_entry(
             personnel_id = person.id
     if person and not passenger_name:
         passenger_name = f"{person.first_name} {person.last_name}".strip()
+    # Store the person's real code even when they were picked by id — badge check-in,
+    # the helideck reader and reconcile all match on emp_code.
+    emp_code = (person.emp_code if person else None) or payload.emp_code
+    if person or emp_code:
+        dup = db.query(ManifestEntry).filter(
+            ManifestEntry.schedule_id == flight_id,
+            (ManifestEntry.personnel_id == personnel_id) if person else (ManifestEntry.emp_code == emp_code),
+        ).first()
+        if dup:
+            raise HTTPException(status_code=409, detail=f"{passenger_name} is already on this manifest")
 
     entry = ManifestEntry(
         schedule_id=flight_id,
         personnel_id=personnel_id,
         passenger_name=passenger_name,
-        emp_code=payload.emp_code,
+        emp_code=emp_code,
         company=payload.company,
         id_number=payload.id_number,
         body_weight=payload.body_weight,
@@ -525,139 +693,107 @@ async def add_manifest_entry(
     return out
 
 
-@router.patch("/flights/{flight_id}/manifest/{entry_id}")
-async def update_manifest_entry(
-    flight_id: int,
-    entry_id: int,
-    payload: ManifestEntryUpdate,
-    db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
-) -> Dict[str, Any]:
-    """Confirm arrival, mark no-show, or offload a passenger."""
-    entry = (
-        db.query(ManifestEntry)
-        .filter(ManifestEntry.id == entry_id, ManifestEntry.schedule_id == flight_id)
-        .first()
-    )
-    if not entry:
-        raise HTTPException(status_code=404, detail="Manifest entry not found")
+def _set_entry_status(db: Session, flight_id: int, entry: ManifestEntry,
+                      payload: "ManifestEntryUpdate", user_id=None,
+                      can_override: bool = False, actor: str = "") -> Dict[str, Any]:
+    """Core of confirm / no-show / offload / reset — shared by the manifest screen,
+    badge check-in and the helideck reader. Raises HTTPException on a limit."""
+    schedule = (db.query(TransportSchedule).options(joinedload(TransportSchedule.transport))
+                .filter(TransportSchedule.id == flight_id).first())
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Flight not found")
+    if (schedule.status or "").upper() == "CANCELLED":
+        raise HTTPException(status_code=400, detail="This flight is cancelled — reinstate it first")
 
     new_status = payload.status.upper()
     allowed = {"MANIFESTED", "CONFIRMED", "NO_SHOW", "OFFLOADED"}
     if new_status not in allowed:
         raise HTTPException(status_code=400, detail=f"status must be one of {allowed}")
 
-    # Capacity enforcement — don't confirm more passengers than seats (override to bypass).
-    if new_status == "CONFIRMED" and entry.status != "CONFIRMED" and not payload.override_capacity:
-        cap_sched = db.query(TransportSchedule).filter(TransportSchedule.id == flight_id).first()
-        cap = cap_sched.transport.capacity if cap_sched and cap_sched.transport else None
-        if cap:
-            already = (
-                db.query(ManifestEntry)
-                .filter(
-                    ManifestEntry.schedule_id == flight_id,
-                    ManifestEntry.status == "CONFIRMED",
-                    ManifestEntry.id != entry.id,
-                )
-                .count()
-            )
-            if already >= cap:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Flight is at capacity ({already}/{cap}). Offload a passenger or override.",
-                )
+    overrides = [n for n, f in (("seat capacity", payload.override_capacity),
+                                ("fitness to travel", payload.override_compliance),
+                                ("weight limit", payload.override_weight)) if f]
+    if overrides:
+        # Boarding someone over a safety limit is a deliberate, accountable decision.
+        if not can_override:
+            raise HTTPException(status_code=403,
+                                detail="Overriding a boarding limit needs the transport.override permission")
+        if not (payload.remarks or "").strip():
+            raise HTTPException(status_code=400, detail="Give a reason for the override")
 
-        # Fitness-to-travel — hard-block boarding someone with an EXPIRED medical /
-        # safety certificate (status 'blocked'). Warnings never block; expiry does.
+    if new_status == "CONFIRMED" and entry.status != "CONFIRMED":
+        t = schedule.transport
+        cap = t.capacity if t else None
+        if cap and not payload.override_capacity:
+            already = db.query(ManifestEntry).filter(
+                ManifestEntry.schedule_id == flight_id, ManifestEntry.status == "CONFIRMED",
+                ManifestEntry.id != entry.id).count()
+            if already >= cap:
+                raise HTTPException(status_code=409,
+                                    detail=f"Flight is at capacity ({already}/{cap}). Offload a passenger or override.")
+
         if entry.personnel_id and not payload.override_compliance:
             person = db.query(Personnel).filter(Personnel.id == entry.personnel_id).first()
             comp = travel_compliance(person)
             if comp["status"] == "blocked":
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Not fit to travel — {'; '.join(comp['issues'])}. Override to board.",
-                )
+                raise HTTPException(status_code=409,
+                                    detail=f"Not fit to travel — {'; '.join(comp['issues'])}. Override to board.")
 
-        # Weight & balance — enforce the aircraft/vessel payload limit when one is set.
-        if not payload.override_weight:
-            sc = db.query(TransportSchedule).options(joinedload(TransportSchedule.transport)).filter(
-                TransportSchedule.id == flight_id).first()
-            max_kg = getattr(sc.transport, "max_payload_kg", None) if sc and sc.transport else None
-            if max_kg:
-                confirmed_wt = (
-                    db.query(func.coalesce(func.sum(
-                        func.coalesce(ManifestEntry.body_weight, 0) + func.coalesce(ManifestEntry.baggage_weight, 0)
-                    ), 0))
-                    .filter(ManifestEntry.schedule_id == flight_id,
-                            ManifestEntry.status == "CONFIRMED",
-                            ManifestEntry.id != entry.id)
-                    .scalar() or 0
-                )
-                cargo_wt = sum((c.get("weight_kg") or 0) for c in (sc.cargo_manifest or []) if isinstance(c, dict))
-                this_wt = (entry.body_weight or 0) + (entry.baggage_weight or 0)
-                projected = float(confirmed_wt) + float(cargo_wt) + float(this_wt)
-                if projected > float(max_kg):
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Over payload limit — {projected:.0f} kg would exceed {max_kg:.0f} kg. "
-                               f"Offload weight or override.",
-                    )
+        max_kg = getattr(t, "max_payload_kg", None) if t else None
+        if max_kg and not payload.override_weight:
+            # A missing weight used to count as 0 kg, silently defeating the limit.
+            if entry.body_weight is None:
+                raise HTTPException(status_code=409,
+                                    detail="Passenger weight missing — enter body weight (kg) before boarding "
+                                           "(this aircraft/vessel has a payload limit).")
+            confirmed_wt = (db.query(func.coalesce(func.sum(
+                func.coalesce(ManifestEntry.body_weight, 0) + func.coalesce(ManifestEntry.baggage_weight, 0)), 0))
+                .filter(ManifestEntry.schedule_id == flight_id, ManifestEntry.status == "CONFIRMED",
+                        ManifestEntry.id != entry.id).scalar() or 0)
+            cargo_wt = sum((c.get("weight_kg") or 0) for c in (schedule.cargo_manifest or []) if isinstance(c, dict))
+            projected = float(confirmed_wt) + float(cargo_wt) + float(entry.body_weight or 0) + float(entry.baggage_weight or 0)
+            if projected > float(max_kg):
+                raise HTTPException(status_code=409,
+                                    detail=f"Over payload limit — {projected:.0f} kg would exceed {max_kg:.0f} kg. "
+                                           f"Offload weight or override.")
 
     entry.status = new_status
     if payload.remarks is not None:
         entry.remarks = payload.remarks
+    if overrides:
+        note = f"[OVERRIDE {', '.join(overrides)} by {actor or user_id}] {payload.remarks.strip()}"
+        entry.remarks = note
+        logger.warning("Transport override on flight %s passenger %s: %s", flight_id, entry.passenger_name, note)
     if new_status == "CONFIRMED":
-        entry.confirmed_at = datetime.utcnow()
-        entry.confirmed_by_id = getattr(current_user, "id", None)
-        sched = db.query(TransportSchedule).filter(TransportSchedule.id == entry.schedule_id).first()
-
-        # INBOUND arrival: the person is now on board at the destination — add to POB.
-        # (Previously only OUTBOUND was handled, so confirmed arrivals never updated POB.)
-        if entry.direction == "INBOUND" and entry.personnel_id:
-            db.query(Personnel).filter(Personnel.id == entry.personnel_id).update(
-                {
-                    "is_onboard": True,
-                    "is_pob": True,
-                    "pob_location": (sched.arrival_location if sched else None),
-                    "pob_since": datetime.utcnow(),
-                },
-                synchronize_session=False,
-            )
-
-        # OUTBOUND departure clears zone/POB state and marks the person safe/departed
-        # in any active mustering event so they don't appear as MISSING after leaving.
-        if entry.direction == "OUTBOUND" and entry.personnel_id:
-            db.query(Personnel).filter(Personnel.id == entry.personnel_id).update(
-                {"current_zone_id": None, "is_onboard": False, "is_pob": False, "pob_location": None},
-                synchronize_session=False,
-            )
-            if entry.emp_code:
-                active_event = (
-                    db.query(MusteringEvent).filter(MusteringEvent.status == 0).first()
-                )
-                if active_event:
-                    active_log = (
-                        db.query(MusteringLog)
-                        .filter(
-                            MusteringLog.event_id == active_event.id,
-                            MusteringLog.emp_code == entry.emp_code,
-                        )
-                        .first()
-                    )
-                    if active_log and active_log.status != 1:
-                        from ..services.mustering_service import MusteringService
-                        MusteringService(db).mark_person_status(
-                            active_event.id,
-                            entry.emp_code,
-                            status=1,
-                            marked_by=getattr(current_user, "id", 0),
-                        )
-    elif new_status in ("NO_SHOW", "OFFLOADED"):
+        entry.confirmed_at = datetime.now(timezone.utc)
+        entry.confirmed_by_id = user_id
+    else:
         entry.confirmed_at = None
         entry.confirmed_by_id = None
 
+    _sync_entry_pob(db, schedule, entry, user_id)
     db.commit()
     return _entry_to_dict(entry)
+
+
+@router.patch("/flights/{flight_id}/manifest/{entry_id}")
+async def update_manifest_entry(
+    flight_id: int,
+    entry_id: int,
+    payload: ManifestEntryUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Confirm (boarded), mark no-show, offload, or reset a passenger. POB itself
+    moves with the flight's departure / arrival — see _sync_entry_pob."""
+    entry = (db.query(ManifestEntry)
+             .filter(ManifestEntry.id == entry_id, ManifestEntry.schedule_id == flight_id).first())
+    if not entry:
+        raise HTTPException(status_code=404, detail="Manifest entry not found")
+    return _set_entry_status(db, flight_id, entry, payload, getattr(current_user, "id", None),
+                             can_override=_perm(request, "transport.override"),
+                             actor=getattr(current_user, "username", "") or getattr(current_user, "email", ""))
 
 
 @router.post("/flights/{flight_id}/checkin")
@@ -667,29 +803,59 @@ async def checkin_by_badge(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ) -> Dict[str, Any]:
-    """Check a passenger in by scanning their badge / QR (emp_code) at the
-    helideck / gangway. Confirms their manifest entry — reusing the same POB and
-    mustering side-effects as a manual confirm."""
-    emp = (payload.emp_code or "").strip()
-    if not emp:
+    """Check a passenger in by scanning their badge / QR / reader PIN at the
+    helideck or gangway."""
+    from ..services.device_pin import resolve_emp_code
+    raw = (payload.emp_code or "").strip()
+    if not raw:
         raise HTTPException(status_code=400, detail="emp_code is required")
-    entry = (
-        db.query(ManifestEntry)
-        .filter(ManifestEntry.schedule_id == flight_id, ManifestEntry.emp_code == emp)
-        .order_by(ManifestEntry.id)
-        .first()
-    )
+    emp = resolve_emp_code(db, raw)   # a scanned reader PIN (Attendance ID) → emp_code
+    entry = (db.query(ManifestEntry)
+             .filter(ManifestEntry.schedule_id == flight_id,
+                     func.lower(ManifestEntry.emp_code).in_([emp.lower(), raw.lower()]))
+             .order_by(ManifestEntry.id).first())
     if not entry:
-        raise HTTPException(status_code=404, detail=f"{emp} is not on this flight's manifest")
+        raise HTTPException(status_code=404, detail=f"{raw} is not on this flight's manifest")
     if entry.status == "CONFIRMED":
         return {**_entry_to_dict(entry), "already_checked_in": True}
-    # Reuse the confirm path (weight/POB/mustering side-effects all apply).
-    result = await update_manifest_entry(
-        flight_id, entry.id, ManifestEntryUpdate(status="CONFIRMED"), db, current_user
-    )
+    result = _set_entry_status(db, flight_id, entry, ManifestEntryUpdate(status="CONFIRMED"),
+                               getattr(current_user, "id", None))
     result["checked_in"] = True
     result["passenger_name"] = entry.passenger_name
     return result
+
+
+def checkin_from_reader(db: Session, emp_code: str, punch_time: datetime, device_sn: str) -> Optional[str]:
+    """A tap on a reader set to TRANSPORT_CHECKIN (helideck / gangway / heliport)
+    checks the person in to their next flight: the one they are manifested on that
+    departs between 1 h before and 6 h after the tap. A blocked boarding (capacity,
+    weight, fitness) raises a notification instead of boarding them silently."""
+    pt = punch_time if punch_time.tzinfo else punch_time.replace(tzinfo=timezone.utc)
+    entry = (db.query(ManifestEntry).join(TransportSchedule)
+             .filter(func.lower(ManifestEntry.emp_code) == (emp_code or "").lower(),
+                     ManifestEntry.status.in_(["MANIFESTED", "NO_SHOW"]),
+                     TransportSchedule.status.in_(["SCHEDULED", "CONFIRMED"]),
+                     TransportSchedule.departure_time >= pt - timedelta(hours=1),
+                     TransportSchedule.departure_time <= pt + timedelta(hours=6))
+             .order_by(TransportSchedule.departure_time).first())
+    if not entry:
+        return None
+    try:
+        _set_entry_status(db, entry.schedule_id, entry, ManifestEntryUpdate(status="CONFIRMED"),
+                          actor=f"reader {device_sn}")
+        return "checked_in"
+    except HTTPException as e:
+        db.rollback()
+        db.execute(text("""
+            INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, expires_at)
+            VALUES (:dk, 'transport_checkin_blocked', :t, :m, 'high', NOW() + INTERVAL '1 day')
+            ON CONFLICT (dedup_key) DO NOTHING
+        """), {"dk": f"tcheckin_{entry.id}_{pt:%Y%m%d%H%M}",
+               "t": f"Check-in blocked: {entry.passenger_name}",
+               "m": f"{entry.passenger_name} tapped at {device_sn} but could not be boarded on flight "
+                    f"#{entry.schedule_id}: {e.detail}"})
+        db.commit()
+        return "blocked"
 
 
 # ─── Crew & cargo (per-journey) ─────────────────────────────────────────────────
@@ -761,19 +927,25 @@ async def notify_passengers(flight_id: int, payload: NotifyBody, db: Session = D
 
     ident = s.transport.identifier if s.transport else f"#{flight_id}"
     route = f"{s.departure_location} → {s.arrival_location}"
-    when = s.departure_time.strftime("%d %b %Y %H:%M") if s.departure_time else "TBC"
+    when = s.departure_time.astimezone(_site_tz()).strftime("%d %b %Y %H:%M") if s.departure_time else "TBC"
     subject = payload.subject or f"Transport {ident}: {route}"
     body = payload.message or (
         f"You are manifested on {ident} ({route}), departing {when}. "
         f"Please be at the departure point in good time with your ID."
     )
 
-    entries = s.manifest_entries or []
+    result = await _notify_passengers(db, s, subject, body, payload.email, payload.sms)
+    return {"success": True, "result": result}
+
+
+async def _notify_passengers(db: Session, s: TransportSchedule, subject: str, body: str,
+                             email: bool = True, sms: bool = False) -> Dict[str, Any]:
+    entries = [e for e in (s.manifest_entries or []) if e.status not in ("NO_SHOW", "OFFLOADED")]
     pids = [e.personnel_id for e in entries if e.personnel_id]
     people = {p.id: p for p in db.query(Personnel).filter(Personnel.id.in_(pids)).all()} if pids else {}
     result: Dict[str, Any] = {"email": None, "sms": None}
 
-    if payload.email:
+    if email:
         from ..services.notify_email import send_email, smtp_configured
         emails = sorted({people[e.personnel_id].email for e in entries
                          if e.personnel_id and people.get(e.personnel_id) and people[e.personnel_id].email})
@@ -782,7 +954,7 @@ async def notify_passengers(flight_id: int, payload: NotifyBody, db: Session = D
         else:
             result["email"] = await asyncio.to_thread(send_email, list(emails), subject, f"<p>{body}</p>", body)
 
-    if payload.sms:
+    if sms:
         from ..services.notify_sms import send_sms, sms_configured
         phones = sorted({(people[e.personnel_id].phone or people[e.personnel_id].emergency_contact_phone)
                          for e in entries if e.personnel_id and people.get(e.personnel_id)
@@ -791,8 +963,50 @@ async def notify_passengers(flight_id: int, payload: NotifyBody, db: Session = D
             result["sms"] = {"sent": 0, "error": "SMS gateway not configured"}
         else:
             result["sms"] = await asyncio.to_thread(send_sms, list(phones), body)
+    return result
 
-    return {"success": True, "result": result}
+
+class FlightUpdate(BaseModel):
+    departure_location: Optional[str] = None
+    arrival_location: Optional[str] = None
+    departure_time: Optional[datetime] = None
+    arrival_time: Optional[datetime] = None
+    schedule_type: Optional[str] = None
+    notes: Optional[str] = None
+    notify: bool = True          # tell passengers when the time changes
+
+
+@router.put("/flights/{flight_id}")
+async def update_flight(flight_id: int, payload: FlightUpdate, db: Session = Depends(get_db),
+                        current_user=Depends(get_current_user)) -> Dict[str, Any]:
+    """Reschedule / edit a flight (there was no way to change one once created). A
+    time change notifies the passengers automatically when email/SMS is set up."""
+    s = (db.query(TransportSchedule)
+         .options(joinedload(TransportSchedule.transport), joinedload(TransportSchedule.manifest_entries))
+         .filter(TransportSchedule.id == flight_id).first())
+    if not s:
+        raise HTTPException(status_code=404, detail="Flight not found")
+    if (s.status or "").upper() in ("COMPLETED", "CANCELLED", "IN_TRANSIT"):
+        raise HTTPException(status_code=400, detail=f"A {s.status} flight cannot be edited")
+    old_dep = s.departure_time
+    data = payload.dict(exclude_unset=True)
+    data.pop("notify", None)
+    if "notes" in data:
+        s.special_requirements = data.pop("notes")
+    for k, v in data.items():
+        setattr(s, k, v)
+    db.commit()
+    db.refresh(s)
+    out = _schedule_to_dict(s)
+    moved = payload.departure_time and old_dep and abs((payload.departure_time - old_dep).total_seconds()) >= 60
+    if moved and payload.notify and s.manifest_entries:
+        ident = s.transport.identifier if s.transport else f"#{flight_id}"
+        when = s.departure_time.astimezone(_site_tz()).strftime("%d %b %Y %H:%M")
+        out["notified"] = await _notify_passengers(
+            db, s, f"Schedule change: {ident} {s.departure_location} → {s.arrival_location}",
+            f"Your transport {ident} ({s.departure_location} → {s.arrival_location}) now departs {when}.",
+            email=True, sms=True)
+    return out
 
 
 @router.get("/flights/{flight_id}/manifest.xlsx")
@@ -828,7 +1042,7 @@ async def export_manifest_xlsx(flight_id: int, db: Session = Depends(get_db),
 
     meta = [
         ("Route", f"{s.departure_location} → {s.arrival_location}"),
-        ("Departure", s.departure_time.strftime("%d %b %Y  %H:%M") if s.departure_time else "—"),
+        ("Departure", s.departure_time.astimezone(_site_tz()).strftime("%d %b %Y  %H:%M") if s.departure_time else "—"),
         ("Operator", (s.transport.operator if s.transport else "") or "—"),
         ("Crew", ", ".join(f"{c.get('name')} ({c.get('role')})" for c in (s.crew or [])) or "—"),
         ("Weight", f"{summary['total_weight_kg']} kg  (pax {summary['body_weight_kg']} + bag {summary['baggage_weight_kg']} + cargo {summary['cargo_weight_kg']})"),
@@ -876,13 +1090,12 @@ async def export_manifest_xlsx(flight_id: int, db: Session = Depends(get_db),
 @router.get("/analytics")
 async def transport_analytics(db: Session = Depends(get_db), _=Depends(get_current_user)) -> Dict[str, Any]:
     """Dashboard metrics: today's activity, on-time %, and a 7-day POB movement trend."""
-    today = date.today()
-    day_start = datetime.combine(today, datetime.min.time())
-    day_end = datetime.combine(today, datetime.max.time())
+    today = _site_today()
+    day_start, day_end = _site_day_bounds(today)
 
     todays = db.query(TransportSchedule).filter(
         TransportSchedule.departure_time >= day_start,
-        TransportSchedule.departure_time <= day_end,
+        TransportSchedule.departure_time < day_end,
     ).all()
     today_ids = [f.id for f in todays]
     today_entries = (
@@ -907,14 +1120,14 @@ async def transport_analytics(db: Session = Depends(get_db), _=Depends(get_curre
     trend = []
     for d in range(6, -1, -1):
         day = today - timedelta(days=d)
-        ds = datetime.combine(day, datetime.min.time())
-        de = datetime.combine(day, datetime.max.time())
+        ds, de = _site_day_bounds(day)
         fids = [r[0] for r in db.query(TransportSchedule.id).filter(
-            TransportSchedule.departure_time >= ds, TransportSchedule.departure_time <= de).all()]
+            TransportSchedule.departure_time >= ds, TransportSchedule.departure_time < de).all()]
         arr = dep = 0
         if fids:
             for e in db.query(ManifestEntry).filter(ManifestEntry.schedule_id.in_(fids),
-                                                    ManifestEntry.status == "CONFIRMED").all():
+                                                    ManifestEntry.status == "CONFIRMED",
+                                                    ManifestEntry.pob_applied_at.isnot(None)).all():
                 if e.direction == "INBOUND":
                     arr += 1
                 else:
@@ -943,6 +1156,9 @@ async def delete_manifest_entry(
     )
     if not entry:
         raise HTTPException(status_code=404, detail="Manifest entry not found")
+    schedule = db.query(TransportSchedule).filter(TransportSchedule.id == flight_id).first()
+    if schedule:
+        _sync_entry_pob(db, schedule, entry, removing=True)   # undo any POB change first
     db.delete(entry)
     db.commit()
 
@@ -957,16 +1173,15 @@ async def pob_summary(
 ) -> Dict[str, Any]:
     """POB delta for a given day (defaults to today): confirmed arrivals minus confirmed departures."""
     if summary_date is None:
-        summary_date = date.today()
+        summary_date = _site_today()
 
-    day_start = datetime.combine(summary_date, datetime.min.time())
-    day_end = datetime.combine(summary_date, datetime.max.time())
+    day_start, day_end = _site_day_bounds(summary_date)
 
     flights_today = (
         db.query(TransportSchedule)
         .filter(
             TransportSchedule.departure_time >= day_start,
-            TransportSchedule.departure_time <= day_end,
+            TransportSchedule.departure_time < day_end,
         )
         .all()
     )
@@ -989,8 +1204,10 @@ async def pob_summary(
         .all()
     )
 
-    confirmed_inbound  = [e for e in entries if e.status == "CONFIRMED" and e.direction == "INBOUND"]
-    confirmed_outbound = [e for e in entries if e.status == "CONFIRMED" and e.direction == "OUTBOUND"]
+    # Count only movements that actually happened (flight arrived / departed) — a
+    # boarded passenger on a flight that has not moved has not changed POB yet.
+    confirmed_inbound  = [e for e in entries if e.status == "CONFIRMED" and e.direction == "INBOUND" and e.pob_applied_at]
+    confirmed_outbound = [e for e in entries if e.status == "CONFIRMED" and e.direction == "OUTBOUND" and e.pob_applied_at]
     no_shows = [e for e in entries if e.status == "NO_SHOW"]
 
     # Discrepancies: passengers still MANIFESTED on completed / in-transit flights
@@ -1073,41 +1290,39 @@ async def reconcile_manifest_with_mustering(
     if not schedule:
         raise HTTPException(status_code=404, detail="Flight schedule not found")
 
-    # Manifest emp_codes for this flight
+    # Passengers who should be ON the installation now: outbound passengers waiting
+    # to fly out (inbound passengers are, by definition, not there yet).
     manifest_emp_codes: set = {
         e.emp_code for e in (schedule.manifest_entries or [])
-        if e.emp_code and e.status not in ("CANCELLED", "NO_SHOW", "OFFLOADED")
+        if e.emp_code and e.direction == "OUTBOUND"
+        and e.status not in ("CANCELLED", "NO_SHOW", "OFFLOADED")
     }
 
-    # Active mustering personnel — anyone with an open muster log entry (status=0=missing or 1=safe)
-    muster_rows = db.execute(text("""
+    # Headcount = people ACCOUNTED FOR in an active muster (status 1 = safe). This
+    # used to take every muster log row, including status 0 = MISSING, so a missing
+    # person was reported as verified present.
+    muster_emp_codes: set = {r[0] for r in db.execute(text("""
         SELECT DISTINCT ml.emp_code
         FROM mustering_log ml
         JOIN mustering_event me ON me.id = ml.event_id
-        WHERE me.status = 0   -- active event only
-    """)).fetchall()
-    muster_emp_codes: set = {r[0] for r in muster_rows}
+        WHERE me.status = 0 AND ml.status = 1
+    """)).fetchall()}
+    active_muster = db.execute(text("SELECT 1 FROM mustering_event WHERE status = 0 LIMIT 1")).first()
 
-    # If no active muster, fall back to current POB (last seen on platform)
-    if not muster_emp_codes:
-        pob_rows = db.execute(text("""
-            SELECT DISTINCT p.emp_code
-            FROM personnel p
-            WHERE p.status = 'ACTIVE'
-              AND EXISTS (
-                  SELECT 1 FROM iclock_transaction t
-                  WHERE t.emp_code = p.emp_code
-                    AND t.punch_time >= NOW() - INTERVAL '24 hours'
-              )
-        """)).fetchall()
-        muster_emp_codes = {r[0] for r in pob_rows}
-        headcount_source = "pob_24h"
+    if not active_muster:
+        # No muster: use live on-board status (was: any attendance punch in 24 h).
+        muster_emp_codes = {r[0] for r in db.execute(text(
+            "SELECT emp_code FROM personnel WHERE is_onboard = TRUE AND is_active = TRUE"
+        )).fetchall()}
+        headcount_source = "onboard"
     else:
         headcount_source = "active_muster"
 
     verified             = sorted(manifest_emp_codes & muster_emp_codes)
     missing_in_muster    = sorted(manifest_emp_codes - muster_emp_codes)
-    extra_on_platform    = sorted(muster_emp_codes   - manifest_emp_codes)
+    # "Extra" only means something against a muster headcount; against the whole
+    # on-board list it would just be everyone not on this flight.
+    extra_on_platform    = sorted(muster_emp_codes - manifest_emp_codes) if active_muster else []
 
     # Enrich missing list with names for the safety officer
     def _name(emp_code: str) -> str:

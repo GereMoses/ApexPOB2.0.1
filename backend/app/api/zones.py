@@ -946,22 +946,17 @@ def assign_reader(
         raise HTTPException(status_code=404, detail="Zone not found")
 
     terminal_id = body.get("device_id")
-    reader_purpose = body.get("reader_purpose", "ATTENDANCE").upper()
-    # Zones take DIRECT readers only for STANDALONE (Horus H1 / ADMS) devices used
-    # for T&A and mustering. Access-control readers are NOT assigned to zones here —
-    # they are dumb readers wired to a controller, so the mapping is
-    #   controller port → door → zone  (Access Control → Controllers), never
-    # reader → zone directly.
-    standalone_purposes = {"ATTENDANCE", "MUSTERING", "POB", "EMERGENCY"}
-    if reader_purpose in {"ACCESS_ENTRY", "ACCESS_EXIT"}:
-        raise HTTPException(
-            status_code=400,
-            detail=("Access readers are not assigned to zones directly. They are "
-                    "controller ports mapped as controller port → door → zone under "
-                    "Access Control → Controllers."),
-        )
-    if reader_purpose not in standalone_purposes:
-        reader_purpose = "ATTENDANCE"
+    # Keep the reader's role (set under Devices) unless the caller explicitly sends
+    # one. This used to default to ATTENDANCE, so giving an Entry/Exit reader a zone
+    # silently turned it back into an attendance reader. Standalone ADMS readers (e.g.
+    # the ZKTeco F18) may be Entry/Exit doors themselves — that is how location is
+    # tracked on a site without door controllers; controller-wired readers are mapped
+    # under Access Control → Controllers instead.
+    valid_purposes = {"ATTENDANCE", "ACCESS_ENTRY", "ACCESS_EXIT", "MUSTERING", "POB",
+                      "EMERGENCY", "TRANSPORT_CHECKIN"}
+    reader_purpose = (body.get("reader_purpose") or "").upper() or None
+    if reader_purpose and reader_purpose not in valid_purposes:
+        raise HTTPException(status_code=400, detail=f"Unknown reader purpose {reader_purpose}")
 
     terminal = db.execute(text(
         "SELECT id, sn, alias, zone_id FROM iclock_terminal WHERE id = :tid"
@@ -973,32 +968,12 @@ def assign_reader(
 
     old_zone_id = terminal.zone_id
 
-    # Before reassigning: force-checkout any employee whose last global punch
-    # was a check-in on this terminal, so they don't phantom-follow it to the new zone.
-    if old_zone_id != zone_id:
-        stale = db.execute(text("""
-            SELECT DISTINCT latest.emp_code
-            FROM (
-                SELECT DISTINCT ON (t.emp_code) t.emp_code, t.punch_state, t.terminal_sn, t.punch_time
-                FROM iclock_transaction t
-                ORDER BY t.emp_code, t.punch_time DESC
-            ) latest
-            WHERE latest.punch_state IN (0, 4)
-              AND latest.terminal_sn = :sn
-        """), {"sn": terminal.sn}).fetchall()
-
-        if stale:
-            now = datetime.utcnow()
-            for row in stale:
-                db.execute(text("""
-                    INSERT INTO iclock_transaction
-                        (emp_code, punch_time, punch_state, verify_type, terminal_sn)
-                    VALUES (:ec, :pt, 1, 0, :sn)
-                    ON CONFLICT DO NOTHING
-                """), {"ec": row.emp_code, "pt": now, "sn": terminal.sn})
-
+    # (Moving a reader used to insert fake CHECK-OUT punches into iclock_transaction
+    # for whoever last checked in on it — read by attendance as real taps. People do
+    # not move because a reader did; their location stays as recorded.)
     db.execute(text(
-        "UPDATE iclock_terminal SET zone_id = :zid, reader_purpose = :rp WHERE id = :tid"
+        "UPDATE iclock_terminal SET zone_id = :zid, "
+        "reader_purpose = COALESCE(:rp, reader_purpose, 'ATTENDANCE') WHERE id = :tid"
     ), {"zid": zone_id, "rp": reader_purpose, "tid": terminal_id})
 
     db.commit()

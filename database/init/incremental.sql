@@ -353,3 +353,28 @@ ALTER TABLE public.zones ADD COLUMN IF NOT EXISTS is_site_boundary boolean NOT N
 -- this they scan the whole tracking history on every tap.
 CREATE INDEX IF NOT EXISTS idx_zpt_zone_emp_time ON public.zone_personnel_tracking (zone_id, emp_code, punch_time DESC);
 CREATE INDEX IF NOT EXISTS idx_zpt_emp_time ON public.zone_personnel_tracking (emp_code, punch_time DESC);
+
+-- ── Journey management: POB at real departure/arrival, journey risk + approvals ──
+ALTER TABLE public.manifest_entry ADD COLUMN IF NOT EXISTS pob_applied_at timestamptz;
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS risk_manual_factors jsonb;
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS second_approved_by_id integer;
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS second_approved_at timestamptz;
+-- Permissions (superusers bypass). View/manage follow the POB permissions; approving
+-- a journey is separate so the planner cannot approve their own trip by default.
+INSERT INTO public.auth_permission (name, codename, description) VALUES
+  ('View transport',   'transport.view',   'See flights, voyages and manifests'),
+  ('Manage transport', 'transport.manage', 'Create/cancel flights, build manifests, board passengers'),
+  ('Override transport limits', 'transport.override', 'Board over seat, weight or fitness-to-travel limits (reason required)'),
+  ('View journeys',    'journey.view',     'See land journey plans'),
+  ('Manage journeys',  'journey.manage',   'Plan, start, check in and complete land journeys'),
+  ('Approve journeys', 'journey.approve',  'Approve or reject land journey plans')
+ON CONFLICT (codename) DO NOTHING;
+INSERT INTO public.auth_role_permission (role_id, permission_id)
+SELECT rp.role_id, np.id
+FROM public.auth_role_permission rp
+JOIN public.auth_permission op ON op.id = rp.permission_id
+JOIN public.auth_permission np ON
+     (op.codename = 'pob.view'    AND np.codename IN ('transport.view','journey.view'))
+  OR (op.codename = 'pob.change'  AND np.codename IN ('transport.manage','journey.manage'))
+WHERE NOT EXISTS (SELECT 1 FROM public.auth_role_permission x
+                  WHERE x.role_id = rp.role_id AND x.permission_id = np.id);

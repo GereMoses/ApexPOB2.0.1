@@ -77,6 +77,13 @@ _ROUTE_RULES = [
     ("/api/v1/pob-status",            frozenset({"POST","PUT","PATCH","DELETE"}),       "pob.change"),
     ("/api/v1/zones",                 frozenset({"GET"}),                               "pob.view"),
     ("/api/v1/zones",                 frozenset({"POST","PUT","PATCH","DELETE"}),       "pob.change"),
+    # Journey management (flights/voyages + land journeys). Approving a journey and
+    # overriding transport limits are checked inside the endpoints (journey.approve,
+    # transport.override) because those paths carry an id and cannot be matched here.
+    ("/api/v1/transport",             frozenset({"GET"}),                               "transport.view"),
+    ("/api/v1/transport",             frozenset({"POST","PUT","PATCH","DELETE"}),       "transport.manage"),
+    ("/api/v1/journeys",              frozenset({"GET"}),                               "journey.view"),
+    ("/api/v1/journeys",              frozenset({"POST","PUT","PATCH","DELETE"}),       "journey.manage"),
     # Payroll / MTD / Meeting (no dedicated permission — map to nearest)
     ("/api/v1/payroll",               frozenset({"GET"}),                               "reports.view"),
     ("/api/v1/payroll",               frozenset({"POST","PUT","PATCH","DELETE"}),       "settings.change"),

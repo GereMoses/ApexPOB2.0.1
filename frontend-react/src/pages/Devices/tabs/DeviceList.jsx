@@ -82,6 +82,7 @@ const READER_PURPOSE_META = {
   MUSTERING:    { label: 'Mustering',    color: 'orange', deviceType: 2 },
   POB:          { label: 'POB',          color: 'purple', deviceType: 1 },
   EMERGENCY:    { label: 'Emergency',    color: 'red',    deviceType: 3 },
+  TRANSPORT_CHECKIN: { label: 'Transport check-in', color: 'geekblue', deviceType: 1 },
 };
 
 const getReaderPurposeName  = (p) => (READER_PURPOSE_META[p] || READER_PURPOSE_META.ATTENDANCE).label;
@@ -1384,6 +1385,7 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
                   <Option value="MUSTERING">Mustering Station</Option>
                   <Option value="POB">POB (Personnel On Board)</Option>
                   <Option value="EMERGENCY">Emergency Station</Option>
+                  <Option value="TRANSPORT_CHECKIN">Transport check-in (helideck / gangway)</Option>
                 </Select>
               </Form.Item>
             </Col>
@@ -1654,6 +1656,7 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
                             <Option value="ACCESS_ENTRY">Entry</Option>
                             <Option value="ACCESS_EXIT">Exit</Option>
                             <Option value="MUSTERING">Mustering</Option>
+                            <Option value="TRANSPORT_CHECKIN">Transport check-in</Option>
                           </Select>
                         </Form.Item>
                       </Form>
@@ -1886,6 +1889,7 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
                                             <Option value="ACCESS_ENTRY">Entry Reader</Option>
                                             <Option value="ACCESS_EXIT">Exit Reader</Option>
                                             <Option value="MUSTERING">Mustering Point</Option>
+                                            <Option value="TRANSPORT_CHECKIN">Transport check-in</Option>
                                           </Select>
                                         </Form.Item>
                                       </Col>

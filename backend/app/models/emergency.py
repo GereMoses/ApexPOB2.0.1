@@ -485,6 +485,10 @@ class ManifestEntry(Base):
     confirmed_at = Column(DateTime(timezone=True))
     confirmed_by_id = Column(Integer, nullable=True)   # auth_user.id
     remarks = Column(Text)
+    # When this passenger's POB movement was applied (outbound: flight departed;
+    # inbound: flight arrived). NULL = not applied, so a reversal knows what to undo
+    # and a repeated status change never applies it twice.
+    pob_applied_at = Column(DateTime(timezone=True))
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

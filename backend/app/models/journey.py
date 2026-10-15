@@ -53,6 +53,10 @@ class JourneyPlan(Base):
     risk_level = Column(String(10), default="LOW")    # LOW / MEDIUM / HIGH
     risk_factors = Column(JSONB)                        # list[str]
     risk_notes = Column(Text)
+    # Factors the planner chose. risk_factors holds the computed reasons (these plus
+    # automatic ones like night driving); keeping them apart stops an edit from
+    # dropping manual factors or counting automatic ones twice.
+    risk_manual_factors = Column(JSONB)
 
     # Pre-trip vehicle inspection
     vehicle_check = Column(JSONB)                       # {tyres:true, brakes:true, ...}
@@ -63,6 +67,9 @@ class JourneyPlan(Base):
     # DRAFT / SUBMITTED / APPROVED / REJECTED / IN_PROGRESS / COMPLETED / CANCELLED
     approved_by_id = Column(Integer, nullable=True)
     approved_at = Column(DateTime(timezone=True))
+    # HIGH-risk journeys need a second, different approver.
+    second_approved_by_id = Column(Integer, nullable=True)
+    second_approved_at = Column(DateTime(timezone=True))
     rejection_reason = Column(Text)
 
     created_by_id = Column(Integer, nullable=True)

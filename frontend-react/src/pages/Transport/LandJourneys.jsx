@@ -7,12 +7,12 @@
 import React, { useState } from 'react';
 import {
   Table, Button, Tag, Space, Modal, Form, Input, InputNumber, Select, DatePicker,
-  Drawer, Descriptions, Alert, App, Timeline, Empty, Tooltip,
+  Drawer, Descriptions, Alert, App, Timeline, Empty, Tooltip, Checkbox,
 } from 'antd';
 import {
   PlusOutlined, CarOutlined, WarningOutlined, CheckCircleOutlined, CloseCircleOutlined,
   SendOutlined, PlayCircleOutlined, FlagOutlined, EnvironmentOutlined, PhoneOutlined,
-  ReloadOutlined, StopOutlined, ClockCircleOutlined,
+  ReloadOutlined, StopOutlined, ClockCircleOutlined, EditOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -35,6 +35,13 @@ const STATUS = {
   CANCELLED:   { color: 'default',    label: 'Cancelled' },
 };
 
+// Pre-trip vehicle inspection — every item must pass before a journey can start.
+const VEHICLE_CHECKS = [
+  ['tyres', 'Tyres & spare'], ['brakes', 'Brakes'], ['lights', 'Lights & indicators'],
+  ['fluids', 'Fuel, oil & coolant'], ['seatbelts', 'Seat belts'], ['first_aid', 'First-aid kit'],
+  ['extinguisher', 'Fire extinguisher'], ['documents', 'Vehicle documents'], ['comms', 'Phone / radio charged'],
+];
+
 const StatTile = ({ label, value, color }) => (
   <div style={{ flex: 1, background: '#fff', border: '1px solid #f0f0f0', borderTop: `3px solid ${color}`,
     borderRadius: 8, padding: '12px 16px' }}>
@@ -49,7 +56,20 @@ export default function LandJourneys() {
   const [createForm] = Form.useForm();
   const [checkinForm] = Form.useForm();
   const [showCreate, setShowCreate] = useState(false);
+  const [editingId, setEditingId] = useState(null);  // null = new plan
   const [selected, setSelected] = useState(null);   // journey id for drawer
+  const [paxOptions, setPaxOptions] = useState([]);  // staff search results
+  const [paxStaff, setPaxStaff] = useState({});      // emp_code -> {name, emp_code}
+
+  const searchPax = async (q) => {
+    if (!q || q.length < 2) return;
+    try {
+      const res = await apiService.get('/api/v1/transport/personnel-search', { q });
+      const list = Array.isArray(res) ? res : [];
+      setPaxStaff(prev => ({ ...prev, ...Object.fromEntries(list.map(p => [p.emp_code, { name: p.name, emp_code: p.emp_code }])) }));
+      setPaxOptions(list.map(p => ({ value: p.emp_code, label: `${p.name} (${p.emp_code})` })));
+    } catch (_) { /* search is best-effort */ }
+  };
 
   const { data: statsData } = useQuery({
     queryKey: ['journey-stats'],
@@ -80,18 +100,70 @@ export default function LandJourneys() {
   // Plain (non-hook) option factory so useMutation stays at the top level.
   const opts = (ok) => ({
     onSuccess: () => { if (ok) message.success(ok); invalidate(); },
-    onError: (e) => message.error(e.message || 'Action failed'),
+    onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Action failed'),
   });
 
-  const createM = useMutation({
-    mutationFn: (v) => apiService.post('/api/v1/journeys', {
-      ...v,
+  const toBody = (v) => {
+    const { vehicle_checks, passenger_codes, ...rest } = v;
+    const done = new Set(vehicle_checks || []);
+    return {
+      ...rest,
       planned_departure: v.planned_departure.toISOString(),
-      planned_arrival: v.planned_arrival ? v.planned_arrival.toISOString() : undefined,
-    }),
-    onSuccess: () => { message.success('Journey created'); setShowCreate(false); createForm.resetFields(); invalidate(); },
-    onError: (e) => message.error(e.message || 'Failed to create journey'),
+      planned_arrival: v.planned_arrival ? v.planned_arrival.toISOString() : null,
+      // Staff picked from search keep their code (links them to personnel); anything
+      // typed in is a guest name.
+      passengers: (passenger_codes || []).map(c => paxStaff[c] || { name: c }),
+      vehicle_check: Object.fromEntries(VEHICLE_CHECKS.map(([k]) => [k, done.has(k)])),
+    };
+  };
+  const createM = useMutation({
+    mutationFn: (v) => editingId
+      ? apiService.put(`/api/v1/journeys/${editingId}`, toBody(v))
+      : apiService.post('/api/v1/journeys', toBody(v)),
+    onSuccess: () => {
+      message.success(editingId ? 'Journey updated' : 'Journey created');
+      setShowCreate(false); setEditingId(null); createForm.resetFields(); invalidate();
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Failed to save journey'),
   });
+
+  const openEdit = (jj) => {
+    setEditingId(jj.id);
+    const staff = Object.fromEntries((jj.passengers || []).filter(p => p.emp_code).map(p => [p.emp_code, p]));
+    setPaxStaff(prev => ({ ...prev, ...staff }));
+    setPaxOptions((jj.passengers || []).filter(p => p.emp_code).map(p => ({ value: p.emp_code, label: `${p.name} (${p.emp_code})` })));
+    createForm.setFieldsValue({
+      origin: jj.origin, destination: jj.destination, distance_km: jj.distance_km, purpose: jj.purpose,
+      driver_name: jj.driver_name, driver_license: jj.driver_license,
+      vehicle_reg: jj.vehicle_reg, vehicle_type: jj.vehicle_type,
+      planned_departure: jj.planned_departure ? dayjs(jj.planned_departure) : null,
+      planned_arrival: jj.planned_arrival ? dayjs(jj.planned_arrival) : null,
+      checkin_interval_min: jj.checkin_interval_min,
+      risk_factors: jj.risk_manual_factors || [],
+      notes: jj.notes,
+      passenger_codes: (jj.passengers || []).map(p => p.emp_code || p.name),
+      vehicle_checks: Object.entries(jj.vehicle_check || {}).filter(([, ok]) => ok).map(([k]) => k),
+    });
+    setShowCreate(true);
+  };
+  const vcheckM   = useMutation({
+    mutationFn: ({ id, checks }) => apiService.post(`/api/v1/journeys/${id}/vehicle-check`, {
+      vehicle_check: Object.fromEntries(VEHICLE_CHECKS.map(([k]) => [k, checks.includes(k)])),
+    }),
+    ...opts('Vehicle check recorded'),
+  });
+  const recordVehicleCheck = (jj) => {
+    let checks = Object.entries(jj.vehicle_check || {}).filter(([, ok]) => ok).map(([k]) => k);
+    modal.confirm({
+      title: 'Pre-trip vehicle check', okText: 'Save', icon: <CarOutlined />, width: 520,
+      content: (
+        <Checkbox.Group defaultValue={checks} onChange={(v) => { checks = v; }}
+          options={VEHICLE_CHECKS.map(([value, label]) => ({ value, label }))}
+          style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', rowGap: 6, marginTop: 8 }} />
+      ),
+      onOk: () => vcheckM.mutate({ id: jj.id, checks }),
+    });
+  };
   const submitM   = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/submit`), ...opts('Submitted for approval') });
   const approveM  = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/approve`), ...opts('Journey approved') });
   const startM    = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/start`), ...opts('Journey started') });
@@ -156,7 +228,7 @@ export default function LandJourneys() {
         <Space><CarOutlined /><span style={{ fontWeight: 600 }}>Journey plans</span></Space>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} size="small">Refresh</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setShowCreate(true)}>New Journey Plan</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingId(null); createForm.resetFields(); setShowCreate(true); }}>New Journey Plan</Button>
         </Space>
       </div>
 
@@ -168,8 +240,9 @@ export default function LandJourneys() {
       />
 
       {/* Create modal */}
-      <Modal title="New Journey Plan" open={showCreate} onCancel={() => setShowCreate(false)}
-        onOk={doCreate} confirmLoading={createM.isPending} width={640}>
+      <Modal title={editingId ? 'Edit Journey Plan' : 'New Journey Plan'} open={showCreate}
+        onCancel={() => { setShowCreate(false); setEditingId(null); }}
+        onOk={doCreate} confirmLoading={createM.isPending} width={680}>
         <Form form={createForm} layout="vertical">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
             <Form.Item name="origin" label="Origin" rules={[{ required: true }]}><Input placeholder="Port Harcourt" /></Form.Item>
@@ -193,6 +266,15 @@ export default function LandJourneys() {
               <Select mode="tags" placeholder="e.g. poor road, security" style={{ width: '100%' }} />
             </Form.Item>
           </div>
+          <Form.Item name="passenger_codes" label="Passengers"
+            tooltip="Search staff by name or code; type a name and press Enter for a guest">
+            <Select mode="tags" showSearch filterOption={false} onSearch={searchPax}
+              options={paxOptions} placeholder="Search staff…" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="vehicle_checks" label="Pre-trip vehicle check (all must pass before the journey can start)">
+            <Checkbox.Group options={VEHICLE_CHECKS.map(([value, label]) => ({ value, label }))}
+              style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', rowGap: 4 }} />
+          </Form.Item>
           <Form.Item name="notes" label="Notes"><Input.TextArea rows={2} /></Form.Item>
         </Form>
       </Modal>
@@ -222,18 +304,32 @@ export default function LandJourneys() {
               <Descriptions.Item label="Check-in every">{j.checkin_interval_min} min</Descriptions.Item>
               <Descriptions.Item label="Next check-in">{j.next_checkin_due ? dayjs(j.next_checkin_due).format('DD MMM HH:mm') : '—'}</Descriptions.Item>
               <Descriptions.Item label="Passengers" span={2}>
-                {(j.passengers || []).length ? j.passengers.map(p => p.name).join(', ') : `${j.passenger_count || 0}`}</Descriptions.Item>
+                {(j.passengers || []).length ? j.passengers.map(p => p.emp_code ? `${p.name} (${p.emp_code})` : `${p.name} (guest)`).join(', ') : `${j.passenger_count || 0}`}</Descriptions.Item>
+              <Descriptions.Item label="Vehicle check">
+                {j.vehicle_check_ok ? <Tag color="green">Passed</Tag> : <Tag color="red">Not complete</Tag>}</Descriptions.Item>
+              <Descriptions.Item label="Approvals">
+                {j.approvals_given || 0} / {j.approvals_required || 1}{j.approvals_required === 2 ? ' (HIGH risk: two approvers)' : ''}</Descriptions.Item>
             </Descriptions>
 
             {/* Workflow actions */}
             <Space wrap style={{ marginBottom: 18 }}>
+              {['DRAFT', 'REJECTED', 'SUBMITTED'].includes(j.status) &&
+                <Button icon={<EditOutlined />} onClick={() => openEdit(j)}>Edit</Button>}
               {j.status === 'DRAFT' && <Button type="primary" icon={<SendOutlined />} loading={submitM.isPending} onClick={() => submitM.mutate(j.id)}>Submit for approval</Button>}
               {j.status === 'REJECTED' && <Button type="primary" icon={<SendOutlined />} onClick={() => submitM.mutate(j.id)}>Re-submit</Button>}
               {j.status === 'SUBMITTED' && <>
-                <Button type="primary" icon={<CheckCircleOutlined />} loading={approveM.isPending} onClick={() => approveM.mutate(j.id)}>Approve</Button>
+                <Button type="primary" icon={<CheckCircleOutlined />} loading={approveM.isPending} onClick={() => approveM.mutate(j.id)}>
+                  {j.approvals_required === 2 && j.approvals_given === 1 ? 'Second approval' : 'Approve'}</Button>
                 <Button danger icon={<CloseCircleOutlined />} onClick={() => reject(j.id)}>Reject</Button>
               </>}
-              {j.status === 'APPROVED' && <Button type="primary" icon={<PlayCircleOutlined />} loading={startM.isPending} onClick={() => startM.mutate(j.id)}>Start journey</Button>}
+              {['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED'].includes(j.status) &&
+                <Button icon={<CarOutlined />} onClick={() => recordVehicleCheck(j)}>Vehicle check</Button>}
+              {j.status === 'APPROVED' && (
+                <Tooltip title={j.vehicle_check_ok ? '' : 'Record a passed pre-trip vehicle check first'}>
+                  <Button type="primary" icon={<PlayCircleOutlined />} loading={startM.isPending}
+                    disabled={!j.vehicle_check_ok} onClick={() => startM.mutate(j.id)}>Start journey</Button>
+                </Tooltip>
+              )}
               {j.status === 'IN_PROGRESS' && <Button type="primary" icon={<FlagOutlined />} loading={completeM.isPending} onClick={() => completeM.mutate(j.id)}>Complete</Button>}
               {!['COMPLETED', 'CANCELLED'].includes(j.status) &&
                 <Button icon={<StopOutlined />} onClick={() => modal.confirm({ title: 'Cancel this journey?', okType: 'danger', onOk: () => cancelM.mutate(j.id) })}>Cancel</Button>}

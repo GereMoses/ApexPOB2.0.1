@@ -82,6 +82,17 @@ const COMPLIANCE_CFG = {
   ok:      { color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0', label: 'Fit' },
   warning: { color: '#d97706', bg: '#fffbeb', border: '#fde68a', label: 'Check' },
   blocked: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', label: 'Unfit' },
+  unknown: { color: '#64748b', bg: '#f8fafc', border: '#e2e8f0', label: 'No records' },
+};
+
+// Allowed flight status changes (mirrors the server). POB moves on DEPARTED
+// (outbound off) and ARRIVED/Completed (inbound on); cancelling in transit undoes it.
+const FLIGHT_NEXT = {
+  SCHEDULED:  ['CONFIRMED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED'],
+  CONFIRMED:  ['SCHEDULED', 'IN_TRANSIT', 'COMPLETED', 'CANCELLED'],
+  IN_TRANSIT: ['COMPLETED', 'CANCELLED'],
+  CANCELLED:  ['SCHEDULED'],
+  COMPLETED:  [],
 };
 const ComplianceTag = ({ c }) => {
   if (!c) return null;
@@ -365,7 +376,25 @@ function ManifestDrawer({ flight, onClose }) {
   const [reconcileResult, setReconcileResult] = useState(null);
   const [reconciling, setReconciling] = useState(false);
   const [badgeCode, setBadgeCode] = useState('');
+  const [showEdit, setShowEdit] = useState(false);
+  const [editForm] = Form.useForm();
   const qc = useQueryClient();
+
+  const editFlight = useMutation({
+    mutationFn: (v) => apiService.put(`/api/v1/transport/flights/${flight.id}`, {
+      departure_location: v.departure_location, arrival_location: v.arrival_location,
+      departure_time: v.departure_time?.toISOString(),
+      arrival_time: v.arrival_time ? v.arrival_time.toISOString() : null,
+      notes: v.notes, notify: v.notify !== false,
+    }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['transport-flights'] });
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      message.success(res?.notified ? 'Flight updated — passengers notified' : 'Flight updated');
+      setShowEdit(false);
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Failed to update flight'),
+  });
 
   const { data, isLoading } = useQuery({
     queryKey: ['manifest', flight?.id],
@@ -423,8 +452,9 @@ function ManifestDrawer({ flight, onClose }) {
   });
 
   const updateEntry = useMutation({
-    mutationFn: ({ entryId, status, override_capacity }) =>
-      apiService.patch(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`, { status, override_capacity }),
+    mutationFn: ({ entryId, status, override_capacity, override_compliance, override_weight, remarks }) =>
+      apiService.patch(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`,
+        { status, override_capacity, override_compliance, override_weight, remarks }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
@@ -435,14 +465,28 @@ function ManifestDrawer({ flight, onClose }) {
       // Any safety hard-block (capacity / fitness-to-travel / weight-and-balance)
       // comes back as 409 — surface the reason and require an explicit override.
       if (e?.status === 409 && vars?.status === 'CONFIRMED' && !alreadyOverridden) {
+        // An override is an accountable decision: a reason is required and recorded
+        // on the passenger (and needs the transport.override permission).
+        let reason = '';
         modal.confirm({
           title: 'Boarding blocked',
           icon: <WarningOutlined style={{ color: '#dc2626' }} />,
-          content: e.message,
+          content: (
+            <div>
+              <div style={{ marginBottom: 8 }}>{e.message}</div>
+              <Input.TextArea rows={2} placeholder="Reason for overriding (required)"
+                onChange={(ev) => { reason = ev.target.value; }} />
+            </div>
+          ),
           okType: 'danger', okText: 'Override & confirm',
-          onOk: () => updateEntry.mutate({
-            ...vars, override_capacity: true, override_compliance: true, override_weight: true,
-          }),
+          onOk: () => {
+            if (!reason.trim()) { message.error('Enter a reason for the override'); return Promise.reject(); }
+            updateEntry.mutate({
+              ...vars, override_capacity: true, override_compliance: true, override_weight: true,
+              remarks: reason.trim(),
+            });
+            return undefined;
+          },
         });
       } else {
         message.error(e.message || 'Failed to update');
@@ -515,12 +559,17 @@ function ManifestDrawer({ flight, onClose }) {
   const updateFlightStatus = useMutation({
     mutationFn: (newStatus) =>
       apiService.patch(`/api/v1/transport/flights/${flight.id}/status`, { status: newStatus }),
-    onSuccess: () => {
+    onSuccess: (_r, newStatus) => {
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       qc.invalidateQueries({ queryKey: ['pob-summary'] });
-      message.success('Flight status updated');
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      message.success(
+        newStatus === 'IN_TRANSIT' ? 'Departed — outbound passengers taken off POB'
+        : newStatus === 'COMPLETED' ? 'Completed — inbound passengers added to POB'
+        : newStatus === 'CANCELLED' ? 'Cancelled — any POB changes undone'
+        : 'Flight status updated');
     },
-    onError: (e) => message.error(e.message || 'Failed to update flight status'),
+    onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Failed to update flight status'),
   });
 
   const runReconcile = async () => {
@@ -674,12 +723,38 @@ function ManifestDrawer({ flight, onClose }) {
           >
             Reconcile
           </Button>
+          {['SCHEDULED', 'CONFIRMED'].includes(flight?.status) && (
+            <Button size="small" onClick={() => {
+              editForm.setFieldsValue({
+                departure_location: flight.departure_location, arrival_location: flight.arrival_location,
+                departure_time: flight.departure_time ? dayjs(flight.departure_time) : null,
+                arrival_time: flight.arrival_time ? dayjs(flight.arrival_time) : null,
+                notify: true,
+              });
+              setShowEdit(true);
+            }}>Reschedule</Button>
+          )}
           <Select
             size="small"
             value={flight?.status}
             style={{ width: 130 }}
-            onChange={(v) => updateFlightStatus.mutate(v)}
-            options={Object.entries(FLIGHT_STATUS_CFG).map(([v, c]) => ({ value: v, label: c.label }))}
+            onChange={(v) => {
+              if (v === 'IN_TRANSIT' || v === 'COMPLETED' || v === 'CANCELLED') {
+                modal.confirm({
+                  title: `Mark flight ${FLIGHT_STATUS_CFG[v]?.label}?`,
+                  content: v === 'IN_TRANSIT'
+                    ? 'Boarded OUTBOUND passengers will be taken off POB.'
+                    : v === 'COMPLETED'
+                      ? 'Boarded INBOUND passengers will be added to POB (and outbound taken off if not already).'
+                      : 'Any POB changes already made for this flight will be undone.',
+                  onOk: () => updateFlightStatus.mutate(v),
+                });
+              } else {
+                updateFlightStatus.mutate(v);
+              }
+            }}
+            options={[flight?.status, ...(FLIGHT_NEXT[flight?.status] || [])].filter(Boolean)
+              .map(v => ({ value: v, label: FLIGHT_STATUS_CFG[v]?.label || v }))}
           />
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setShowAdd(true)}>
             Add PAX
@@ -1030,6 +1105,28 @@ function ManifestDrawer({ flight, onClose }) {
             )}
           </>
         )}
+      </Modal>
+      <Modal
+        title="Reschedule / edit flight"
+        open={showEdit}
+        onCancel={() => setShowEdit(false)}
+        onOk={() => editForm.validateFields().then(v => editFlight.mutate(v)).catch(() => {})}
+        confirmLoading={editFlight.isPending}
+        okText="Save"
+      >
+        <Form form={editForm} layout="vertical">
+          <Form.Item name="departure_location" label="From" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="arrival_location" label="To" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="departure_time" label="Departure" rules={[{ required: true }]}>
+            <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="arrival_time" label="Arrival (optional)">
+            <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
+          </Form.Item>
+          <Form.Item name="notify" valuePropName="checked">
+            <Checkbox>Tell passengers if the departure time changes (email / SMS when configured)</Checkbox>
+          </Form.Item>
+        </Form>
       </Modal>
     </Drawer>
   );
