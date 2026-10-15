@@ -122,6 +122,11 @@ _DEFAULT_OPTIONS: Dict[str, Any] = {
     # pause between them, and patient retries (see _get_with_retry).
     "employee_limit":       25,
     "employee_page_delay":  2.0,                 # seconds between pages
+    # SeamlessHR's GET /v1/employees returns the HOLDING company (all subsidiaries) when
+    # no `company` is sent. Set this to a company NAME to pull only that company
+    # (verified in the sandbox: "Integration Company" = 81 staff vs 345 for the holding
+    # company). Blank = whole holding company, which is right for a single-company tenant.
+    "employee_company":     "",
     "employee_status_field": "status",           # 'active'|'inactive' → drives is_active
     # Field names below are SeamlessHR's DOCUMENTED GET /v1/employees response.
     # NOTE: SeamlessHR returns `staff_name` + `staff_other_names` rather than a
@@ -771,12 +776,14 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str, headers: Dict[str
 
 
 async def _fetch_page_resilient(client, url, headers, page_param, page, limit_param, limit_val,
-                                 unreadable: List[int]):
+                                 unreadable: List[int], company: str = ""):
     """Fetch one page; if SeamlessHR keeps rejecting it, fall back to one record at a time
     so a single record their API cannot serialise (observed in the sandbox: it answers
     400 for that record alone, deterministically) does not hide every other employee on
     the page. Positions of records that cannot be read are appended to `unreadable`."""
     params = {}
+    if company:
+        params["company"] = company
     if page_param:
         params[page_param] = page
     if limit_param:
@@ -790,7 +797,8 @@ async def _fetch_page_resilient(client, url, headers, page_param, page, limit_pa
                    page, resp.status_code, first, first + int(limit_val) - 1)
     rows, last_body = [], {}
     for pos in range(first, first + int(limit_val)):
-        r = await _get_with_retry(client, url, headers, {page_param: pos, limit_param: 1}, attempts=3)
+        r = await _get_with_retry(client, url, headers,
+                                  {**({"company": company} if company else {}), page_param: pos, limit_param: 1}, attempts=3)
         if r.status_code >= 400:
             unreadable.append(pos)
             continue
@@ -848,7 +856,8 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
             while True:
                 bad_before = len(unreadable_positions)
                 body = await _fetch_page_resilient(client, url, headers, page_param, page,
-                                                   limit_param, limit_val, unreadable_positions)
+                                                   limit_param, limit_val, unreadable_positions,
+                                                   str(opts.get("employee_company") or "").strip())
                 if isinstance(body, list):
                     rows = body
                 elif isinstance(body, dict):
