@@ -134,8 +134,23 @@ def queue_clock_sync(sn: str, db: Session) -> int:
     the command id. ALWAYS use this for ADMS clock sync — never queue the ZKLib-style
     "DATE TIME <str>" form, which push firmware rejects as UNKNOWN CMD (it sets its
     clock from SET OPTIONS DateTime=<encoded> instead)."""
+    # Only the newest clock command matters. Older ones still pending/sent are
+    # superseded, so a backlog of stale times can never build up in the queue.
+    db.execute(text("""
+        UPDATE iclock_devcmd SET status = 2, cmd_return = 'Superseded by newer clock sync',
+               cmd_return_time = NOW()
+        WHERE sn = :sn AND status IN (0, 1) AND cmd_content LIKE 'SET OPTIONS DateTime=%'
+    """), {'sn': sn})
+    db.commit()
     enc = _encode_adms_datetime(datetime.now())
     return queue_command(sn, f"SET OPTIONS DateTime={enc}", db)
+
+
+_CLOCK_CMD_PREFIX = "SET OPTIONS DateTime="
+
+
+def _is_clock_cmd(cmd: str) -> bool:
+    return (cmd or "").startswith(_CLOCK_CMD_PREFIX)
 
 # state values on iclock_terminal
 STATE_PENDING  = 0
@@ -1723,16 +1738,16 @@ def _recover_stale_commands(sn: str, db: Session) -> None:
     db.execute(text("""
         UPDATE iclock_devcmd
         SET status = CASE
-            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)' THEN 2
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME|SET OPTIONS DATETIME=)' THEN 2
             ELSE 0
         END,
         cmd_return = CASE
-            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)'
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME|SET OPTIONS DATETIME=)'
             THEN 'Auto-completed (no ack expected)'
             ELSE NULL
         END,
         cmd_return_time = CASE
-            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)'
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME|SET OPTIONS DATETIME=)'
             THEN NOW()
             ELSE NULL
         END
@@ -1801,6 +1816,18 @@ async def adms_getrequest(request: Request, db: Session = Depends(get_db)):
     if not pending:
         return PlainTextResponse(ADMS_NONE)
 
+    # The F18 (fw 6.80) silently drops a whole batch that contains a clock command —
+    # no ack for any line — which stalled every enrolment queued behind it. So a clock
+    # command always travels ALONE, after the real work, and carries the time at the
+    # moment of delivery (a value encoded when it was queued could be hours stale and
+    # would wind the reader's clock back).
+    work = [c for c in pending if not _is_clock_cmd(c['cmd_content'])]
+    if work:
+        pending = work
+    else:
+        latest = pending[-1]
+        pending = [{'id': latest['id'],
+                    'cmd_content': f"{_CLOCK_CMD_PREFIX}{_encode_adms_datetime(datetime.now())}"}]
     cmd_ids   = [c['id'] for c in pending]
     cmd_lines = [f"C:{c['id']}:{c['cmd_content']}" for c in pending]
     mark_commands_sent(cmd_ids, db)
@@ -1821,7 +1848,7 @@ async def adms_devicecmd(request: Request, db: Session = Depends(get_db)):
 
     from urllib.parse import parse_qs
     raw = data_str.strip()
-    logger.debug(f"devicecmd body from {sn}: {raw[:200]}")
+    logger.info(f"devicecmd body from {sn}: {raw[:500]!r}")
 
     # ZKTeco devices batch multiple command acks in one POST, one per line.
     # Each line is URL-encoded: ID=123&Return=0&CMD=REBOOT
@@ -2525,9 +2552,8 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
             "This reader is Direct-only and does not poll for ADMS commands, so nothing "
             "was queued. Check that it is online/reachable on the LAN, or set its "
             "Connection Mode to 'adms'/'both'."))
-    enc = _encode_adms_datetime(correct_time)
-    cmd_id = queue_command(body.sn, f"SET OPTIONS DateTime={enc}", db)
-    logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (DateTime={enc}, cmd_id={cmd_id})")
+    cmd_id = queue_clock_sync(body.sn, db)   # supersedes any older clock command
+    logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (cmd_id={cmd_id})")
     return {
         "success":     True,
         "sn":          body.sn,

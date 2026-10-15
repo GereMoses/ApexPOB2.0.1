@@ -59,12 +59,25 @@ def _to_time(val) -> Optional[time]:
     return val
 
 
+# Shift times (07:00-19:00) are SITE wall-clock times, but punches are stored as UTC
+# instants (readers run on UTC). Every punch must be converted to site time before it
+# is compared with a shift, bucketed into a day, or measured for lateness — stripping
+# the tz from the UTC value (the previous behaviour) put every Lagos punch an hour
+# early: wrong late/early/overtime, and evening punches on the wrong day near midnight.
+import os as _os
+from zoneinfo import ZoneInfo as _ZoneInfo
+try:
+    SITE_TZ = _ZoneInfo(_os.getenv("SITE_TIME_ZONE", "Africa/Lagos"))
+except Exception:  # bad value must not stop attendance; fall back to Lagos
+    SITE_TZ = _ZoneInfo("Africa/Lagos")
+
+
 def _naive(ts) -> Optional[datetime]:
-    """Strip timezone from a datetime."""
+    """Site-local wall-clock time, tz stripped. Naive input is assumed already local."""
     if ts is None:
         return None
     if hasattr(ts, 'tzinfo') and ts.tzinfo is not None:
-        return ts.replace(tzinfo=None)
+        return ts.astimezone(SITE_TZ).replace(tzinfo=None)
     return ts
 
 
@@ -181,6 +194,21 @@ def _classify_punches(
             last_in_time = None  # reset: next IN starts a new pair
 
     return result
+
+
+def _first_in_last_out(punches, min_work_minutes: int = 30) -> List[Tuple]:
+    """The site standard: the day's FIRST punch is the clock-in and its LAST punch the
+    clock-out, whatever In/Out key the reader recorded. A last punch closer than
+    min_work_minutes to the first is a repeat tap, not a clock-out."""
+    if not punches:
+        return []
+    first, last = punches[0], punches[-1]
+    out = [(first.punch_time, DIR_IN)]
+    if last is not first:
+        gap = (_naive(last.punch_time) - _naive(first.punch_time)).total_seconds() / 60
+        if gap >= min_work_minutes:
+            out.append((last.punch_time, DIR_OUT))
+    return out
 
 
 def _pair_punches(classified: List[Tuple]) -> List[Tuple]:
@@ -432,7 +460,8 @@ class AttendanceCalculationService:
             FROM iclock_transaction t
             LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
             WHERE t.emp_code = :emp_code
-              AND t.punch_time::date BETWEEN :start_date AND :end_date
+              AND t.punch_time BETWEEN CAST(:start_date AS date) - INTERVAL '1 day'
+                                   AND CAST(:end_date AS date) + INTERVAL '1 day'
               AND COALESCE(NULLIF(term.reader_purpose, ''), 'ATTENDANCE') = 'ATTENDANCE'
             ORDER BY t.punch_time
         """), {"emp_code": emp_code, "start_date": start_dt,
@@ -443,7 +472,7 @@ class AttendanceCalculationService:
 
         punches_by_date: Dict[date, list] = {}
         for p in punch_rows:
-            d = p.punch_time.date()
+            d = _naive(p.punch_time).date()     # site-local calendar day
             punches_by_date.setdefault(d, []).append(p)
 
         # Use pre-fetched ID when available (injected by batch caller); fall back to query
@@ -469,8 +498,10 @@ class AttendanceCalculationService:
         # New rules: grace-period-based punch direction + duplicate suppression
         min_work_mins   = int(r.get('min_work_minutes_for_checkout')  or 30)
         allow_multi_ci  = str(r.get('allow_multiple_checkins') or 'true').lower() != 'false'
-        # 'device' (default) = trust the reader's In/Out state; 'auto' = ignore it.
-        ignore_state    = str(r.get('punch_state_mode') or 'device').lower() == 'auto'
+        # first_last (default) = first punch IN, last punch OUT;
+        # device = trust the reader's In/Out key; auto = shift-window detection.
+        state_mode      = str(r.get('punch_state_mode') or 'first_last').lower()
+        ignore_state    = state_mode == 'auto'
         # Global grace fallbacks (used when the shift/timetable doesn't specify)
         global_late_grace  = int(r.get('grace_period_minutes')        or 15)
         global_early_grace = int(r.get('early_departure_threshold')   or 30)
@@ -543,12 +574,15 @@ class AttendanceCalculationService:
                 day_punches.sort(key=lambda p: p.punch_time)
 
             # ── Classify and pair punches ─────────────────────────────────────
-            classified = _classify_punches(
-                day_punches, ci_begin, ci_end, co_begin, co_end,
-                min_work_minutes=min_work_mins,
-                allow_multiple_checkins=allow_multi_ci,
-                ignore_device_state=ignore_state,
-            )
+            if state_mode == 'first_last':
+                classified = _first_in_last_out(day_punches, min_work_mins)
+            else:
+                classified = _classify_punches(
+                    day_punches, ci_begin, ci_end, co_begin, co_end,
+                    min_work_minutes=min_work_mins,
+                    allow_multiple_checkins=allow_multi_ci,
+                    ignore_device_state=ignore_state,
+                )
             pairs = _pair_punches(classified)
 
             # First IN and last OUT across all pairs → stored as check_in/check_out
