@@ -110,6 +110,7 @@ def _classify_punches(
     co_end:   time,
     min_work_minutes: int = 30,
     allow_multiple_checkins: bool = True,
+    ignore_device_state: bool = False,
 ) -> List[Tuple]:
     """
     Classify each punch as DIR_IN or DIR_OUT.
@@ -136,7 +137,10 @@ def _classify_punches(
     last_in_time: Optional[datetime] = None
 
     for p in punches:
-        state    = p.punch_state
+        # ignore_device_state: the reader's In/Out key is not trusted (staff don't press
+        # it, or the reader auto-switches state by time of day), so every punch goes
+        # through auto-detect: first tap = IN, a tap after the minimum gap = OUT.
+        state    = None if ignore_device_state else p.punch_state
         pt_naive = _naive(p.punch_time)
 
         if state in _EXPLICIT_DIR:
@@ -465,6 +469,8 @@ class AttendanceCalculationService:
         # New rules: grace-period-based punch direction + duplicate suppression
         min_work_mins   = int(r.get('min_work_minutes_for_checkout')  or 30)
         allow_multi_ci  = str(r.get('allow_multiple_checkins') or 'true').lower() != 'false'
+        # 'device' (default) = trust the reader's In/Out state; 'auto' = ignore it.
+        ignore_state    = str(r.get('punch_state_mode') or 'device').lower() == 'auto'
         # Global grace fallbacks (used when the shift/timetable doesn't specify)
         global_late_grace  = int(r.get('grace_period_minutes')        or 15)
         global_early_grace = int(r.get('early_departure_threshold')   or 30)
@@ -541,6 +547,7 @@ class AttendanceCalculationService:
                 day_punches, ci_begin, ci_end, co_begin, co_end,
                 min_work_minutes=min_work_mins,
                 allow_multiple_checkins=allow_multi_ci,
+                ignore_device_state=ignore_state,
             )
             pairs = _pair_punches(classified)
 
