@@ -50,3 +50,15 @@ def superuser_headers():
         db.close()
     token = create_access_token({"sub": "test_super"}, timedelta(minutes=15))
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def db_session():
+    """A session on the throwaway test database (rolled back and closed after)."""
+    from app.core.database import SessionLocal
+    s = SessionLocal()
+    try:
+        yield s
+    finally:
+        s.rollback()
+        s.close()

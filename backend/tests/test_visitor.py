@@ -5,6 +5,7 @@ Comprehensive test coverage for visitor management functionality
 """
 
 import pytest
+import uuid
 from datetime import date, datetime, time, timedelta
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -15,11 +16,19 @@ from app.models.visitor import (
     VisitorType, Visitor, VisitorPreRegistration, 
     VisitorVisitLog, VisitorBlacklist
 )
-from app.models.personnel import PersonnelEmployee
+from app.models.biotime_models import PersonnelEmployee
 from app.models.user import User
 from app.services.visitor_service import VisitorService
 
 client = TestClient(app)
+
+BL_ID = 'BL-' + uuid.uuid4().hex[:8]
+
+
+def _uniq_phone():
+    # Each test creates its own visitor: tests share one database per run, and a
+    # repeated phone/ID is (correctly) rejected as a duplicate visitor.
+    return '+234' + str(uuid.uuid4().int)[:10]
 
 
 class TestVisitorService:
@@ -52,11 +61,11 @@ class TestVisitorService:
         
         visitor_data = {
             'full_name': 'John Doe',
-            'phone': '+1234567890',
+            'phone': _uniq_phone(),
             'email': 'john@example.com',
             'company': 'Test Company',
             'id_type': 0,
-            'id_no': 'ID123456',
+            'id_no': 'ID123456-' + uuid.uuid4().hex[:6],
             'visitor_type_id': sample_visitor_type.id
         }
         
@@ -66,10 +75,10 @@ class TestVisitorService:
         assert visitor.id is not None
         assert visitor.visitor_code.startswith('VIS')
         assert visitor.full_name == 'John Doe'
-        assert visitor.phone == '+1234567890'
+        assert visitor.phone == visitor_data['phone']
         assert visitor.email == 'john@example.com'
         assert visitor.company == 'Test Company'
-        assert visitor.id_no == 'ID123456'
+        assert visitor.id_no == visitor_data['id_no']
     
     def test_create_pre_registration(self, db_session, sample_visitor, sample_employee):
         """Test pre-registration creation"""
@@ -169,12 +178,12 @@ class TestVisitorAPI:
         }
         
         response = client.post(
-            '/api/visitor/types/',
+            '/api/visitor/types',
             json=visitor_type_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['type_name'] == 'Test Type'
@@ -183,7 +192,7 @@ class TestVisitorAPI:
         """Test get visitor types API"""
         response = client.get('/api/visitor/types/', headers=auth_headers)
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert isinstance(data['data'], list)
@@ -192,20 +201,20 @@ class TestVisitorAPI:
         """Test visitor creation API"""
         visitor_data = {
             'full_name': 'API Test Visitor',
-            'phone': '+1234567890',
+            'phone': _uniq_phone(),
             'email': 'apitest@example.com',
             'company': 'API Test Company',
             'id_type': 0,
-            'id_no': 'API123456'
+            'id_no': 'API123456-' + uuid.uuid4().hex[:6]
         }
         
         response = client.post(
-            '/api/visitor/visitors/',
+            '/api/visitor/visitors',
             json=visitor_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['full_name'] == 'API Test Visitor'
@@ -214,7 +223,7 @@ class TestVisitorAPI:
         """Test get visitors API"""
         response = client.get('/api/visitor/visitors/', headers=auth_headers)
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert isinstance(data['data'], list)
@@ -224,11 +233,11 @@ class TestVisitorAPI:
         pre_reg_data = {
             'visitor_data': {
                 'full_name': 'Pre-reg Test',
-                'phone': '+1234567890',
+                'phone': _uniq_phone(),
                 'email': 'prereg@example.com',
                 'company': 'Pre-reg Company',
                 'id_type': 0,
-                'id_no': 'PR123456'
+                'id_no': 'PR123456-' + uuid.uuid4().hex[:6]
             },
             'host_emp_id': sample_employee.id,
             'visit_date': (date.today() + timedelta(days=1)).isoformat(),
@@ -238,12 +247,12 @@ class TestVisitorAPI:
         }
         
         response = client.post(
-            '/api/visitor/pre-register/',
+            '/api/visitor/pre-register',
             json=pre_reg_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['status'] == 0  # pending
@@ -256,12 +265,12 @@ class TestVisitorAPI:
         }
         
         response = client.post(
-            '/api/visitor/check-in/',
+            '/api/visitor/check-in',
             json=check_in_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['status'] == 0  # checked in
@@ -273,12 +282,12 @@ class TestVisitorAPI:
         }
         
         response = client.post(
-            '/api/visitor/check-out/',
+            '/api/visitor/check-out',
             json=check_out_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['status'] == 1  # checked out
@@ -287,7 +296,7 @@ class TestVisitorAPI:
         """Test get on-site visitors API"""
         response = client.get('/api/visitor/records/on-site/', headers=auth_headers)
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert isinstance(data['data'], list)
@@ -296,28 +305,28 @@ class TestVisitorAPI:
         """Test add to blacklist API"""
         blacklist_data = {
             'full_name': 'Blacklisted Person',
-            'id_no': 'BL123456',
-            'phone': '+1234567890',
+            'id_no': BL_ID,
+            'phone': _uniq_phone(),
             'email': 'blacklisted@example.com',
             'reason': 'Security violation'
         }
         
         response = client.post(
-            '/api/visitor/blacklist/',
+            '/api/visitor/blacklist',
             json=blacklist_data,
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
-        assert data['data']['id_no'] == 'BL123456'
+        assert data['data']['id_no'] == BL_ID
     
     def test_get_blacklist_api(self, auth_headers):
         """Test get blacklist API"""
         response = client.get('/api/visitor/blacklist/', headers=auth_headers)
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert isinstance(data['data'], list)
@@ -326,11 +335,11 @@ class TestVisitorAPI:
         """Test daily report API"""
         report_date = date.today().isoformat()
         response = client.get(
-            f'/api/visitor/reports/daily/?date={report_date}',
+            f'/api/visitor/reports/daily/?report_date={report_date}',
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert 'data' in data
@@ -343,16 +352,19 @@ class TestVisitorAPI:
             headers=auth_headers
         )
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert isinstance(data['data'], list)
     
-    def test_qr_scan_public_api(self, sample_pre_registration):
-        """Test QR code scan public API (no auth required)"""
-        response = client.get(f'/api/visitor/qr/{sample_pre_registration.qr_code}')
+    def test_qr_scan_api(self, sample_pre_registration, auth_headers):
+        """QR lookup returns visitor personal data, so it requires a login (used by
+        the staff Check-In screen); anonymous lookups are refused."""
+        anon = client.get(f'/api/visitor/qr/{sample_pre_registration.qr_code}')
+        assert anon.status_code == 401
+        response = client.get(f'/api/visitor/qr/{sample_pre_registration.qr_code}', headers=auth_headers)
         
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         data = response.json()
         assert data['success'] is True
         assert data['data']['qr_code'] == sample_pre_registration.qr_code
@@ -365,7 +377,7 @@ class TestVisitorIntegration:
         """Test complete visitor flow: pre-reg -> check-in -> check-out"""
         # 1. Create visitor type
         visitor_type_response = client.post(
-            '/api/visitor/types/',
+            '/api/visitor/types',
             json={
                 'type_name': 'Integration Test',
                 'induction_required': False,
@@ -374,20 +386,20 @@ class TestVisitorIntegration:
             },
             headers=auth_headers
         )
-        assert visitor_type_response.status_code == 200
+        assert visitor_type_response.status_code == 200, visitor_type_response.text
         visitor_type_id = visitor_type_response.json()['data']['id']
         
         # 2. Pre-register visitor
         pre_reg_response = client.post(
-            '/api/visitor/pre-register/',
+            '/api/visitor/pre-register',
             json={
                 'visitor_data': {
                     'full_name': 'Integration Visitor',
-                    'phone': '+1234567890',
+                    'phone': _uniq_phone(),
                     'email': 'integration@example.com',
                     'company': 'Integration Company',
                     'id_type': 0,
-                    'id_no': 'INT123456',
+                    'id_no': 'INT123456-' + uuid.uuid4().hex[:6],
                     'visitor_type_id': visitor_type_id
                 },
                 'host_emp_id': 1,
@@ -398,7 +410,7 @@ class TestVisitorIntegration:
             },
             headers=auth_headers
         )
-        assert pre_reg_response.status_code == 200
+        assert pre_reg_response.status_code == 200, pre_reg_response.text
         pre_reg_data = pre_reg_response.json()['data']
         
         # 3. Approve pre-registration
@@ -407,34 +419,33 @@ class TestVisitorIntegration:
             json={'status': 1, 'note': 'Approved for test'},
             headers=auth_headers
         )
-        assert approve_response.status_code == 200
-        
+        assert approve_response.status_code == 200, approve_response.text
         # 4. Check-in visitor
         check_in_response = client.post(
-            '/api/visitor/check-in/',
+            '/api/visitor/check-in',
             json={
                 'pre_reg_id': pre_reg_data['id'],
                 'host_emp_id': 1
             },
             headers=auth_headers
         )
-        assert check_in_response.status_code == 200
+        assert check_in_response.status_code == 200, check_in_response.text
         visit_data = check_in_response.json()['data']
         
         # 5. Verify visitor is on-site
         on_site_response = client.get('/api/visitor/records/on-site/', headers=auth_headers)
-        assert on_site_response.status_code == 200
+        assert on_site_response.status_code == 200, on_site_response.text
         on_site_visitors = on_site_response.json()['data']
         visitor_codes = [v['visitor']['visitor_code'] for v in on_site_visitors]
         assert visit_data['visitor']['visitor_code'] in visitor_codes
         
         # 6. Check-out visitor
         check_out_response = client.post(
-            '/api/visitor/check-out/',
+            '/api/visitor/check-out',
             json={'visitor_code': visit_data['visitor']['visitor_code']},
             headers=auth_headers
         )
-        assert check_out_response.status_code == 200
+        assert check_out_response.status_code == 200, check_out_response.text
         check_out_data = check_out_response.json()['data']
         
         # 7. Verify check-out
@@ -443,28 +454,15 @@ class TestVisitorIntegration:
 
 
 # Fixtures for test data
-@pytest.fixture
-def db_session():
-    """Create test database session"""
-    Base.metadata.create_all(bind=get_db().bind)
-    session = next(get_db())
-    try:
-        yield session
-    finally:
-        session.close()
-        Base.metadata.drop_all(bind=get_db().bind)
+# db_session comes from tests/conftest.py (throwaway test database). The fixture that
+# used to be here ran Base.metadata.drop_all() — DROPPING EVERY TABLE of whatever
+# database the app was connected to, i.e. the live one if run on the live stack.
 
 
 @pytest.fixture
-def auth_headers():
-    """Create authentication headers"""
-    # Create test user and get token
-    login_response = client.post('/api/auth/login', json={
-        'username': 'admin',
-        'password': 'admin'
-    })
-    token = login_response.json()['access_token']
-    return {'Authorization': f'Bearer {token}'}
+def auth_headers(superuser_headers):
+    """Real superuser token (was a login with admin/admin)."""
+    return superuser_headers
 
 
 @pytest.fixture
@@ -484,11 +482,12 @@ def sample_visitor_type(db_session):
 @pytest.fixture
 def sample_employee(db_session):
     """Create sample employee"""
+    import uuid
     employee = PersonnelEmployee(
-        full_name='Test Employee',
-        email='employee@example.com',
-        phone='+1234567890',
-        is_active=True
+        emp_code='VH' + uuid.uuid4().hex[:8].upper(),
+        first_name='Test',
+        last_name='Employee',
+        status=0,
     )
     db_session.add(employee)
     db_session.commit()
@@ -499,13 +498,13 @@ def sample_employee(db_session):
 def sample_visitor(db_session, sample_visitor_type):
     """Create sample visitor"""
     visitor = Visitor(
-        visitor_code='VIS20240101001',
+        visitor_code='VIS' + uuid.uuid4().hex[:10].upper(),
         full_name='Test Visitor',
-        phone='+1234567890',
+        phone=_uniq_phone(),
         email='visitor@example.com',
         company='Test Company',
         id_type=0,
-        id_no='TEST123',
+        id_no='TEST123-' + uuid.uuid4().hex[:6],
         visitor_type_id=sample_visitor_type.id
     )
     db_session.add(visitor)
@@ -523,7 +522,7 @@ def sample_pre_registration(db_session, sample_visitor, sample_employee):
         visit_time_start=time(9, 0),
         visit_time_end=time(17, 0),
         purpose='Test Meeting',
-        qr_code='test-qr-code-123',
+        qr_code='test-qr-' + uuid.uuid4().hex,
         status=1  # approved
     )
     db_session.add(pre_reg)

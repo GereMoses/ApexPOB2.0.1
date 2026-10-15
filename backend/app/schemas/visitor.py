@@ -327,10 +327,9 @@ class VisitorBlacklistListResponse(APIResponse):
     data: Optional[List[VisitorBlacklist]] = None
 
 
-class VisitorQRResponse(APIResponse):
-    data: Optional[VisitorQRResponse] = None
-
-
+# (A second "class VisitorQRResponse(APIResponse)" stood here and SHADOWED the
+# pass-details model above: the API then built the details with the wrapper class,
+# pydantic dropped every field, and the Check-In screen received an empty pass.)
 class VisitorQRResponseWrapper(APIResponse):
     data: Optional[VisitorQRResponse] = None
 

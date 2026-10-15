@@ -7,7 +7,7 @@ host approval, and mustering integration.
 import uuid
 import logging
 import threading
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func
@@ -671,7 +671,11 @@ class VisitorService:
         
         results = []
         for visit in overstays:
-            hours_overdue = (datetime.utcnow() - visit.check_in_time).total_seconds() / 3600 - hours
+            ci = visit.check_in_time
+            if ci.tzinfo is None:
+                ci = ci.replace(tzinfo=timezone.utc)
+            # (aware - naive raised TypeError: the report crashed whenever anyone overstayed)
+            hours_overdue = (datetime.now(timezone.utc) - ci).total_seconds() / 3600 - hours
             
             results.append({
                 'visitor_id': visit.visitor_id,

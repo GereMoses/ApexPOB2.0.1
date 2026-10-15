@@ -16,6 +16,8 @@ docker exec pob_postgres sh -c "pg_dump --schema-only -U $PGU \${POSTGRES_DB:-po
 # A valid licence inside the throwaway DB only (schema-only = no licence row, and
 # the licence middleware would answer every request with 402).
 docker exec pob_postgres sh -c "psql -q -U $PGU -d $DB -c \"INSERT INTO sys_subscription (installation_id, org_name, tier, max_users, max_employees, max_devices, issue_date, expiry_date, is_active, created_by) VALUES ('TEST', 'Test suite', 'standard', 50, 500, 20, now(), now() + interval '1 year', TRUE, 'tests')\""
+# Test superuser as auth_user #1 (tests record created_by=1).
+docker exec pob_postgres sh -c "psql -q -U $PGU -d $DB -c \"INSERT INTO auth_user (id, username, email, password, is_active, is_superuser) VALUES (1, 'test_super', 'test_super@example.test', '!unusable', TRUE, TRUE); SELECT setval('auth_user_id_seq', 1);\"" >/dev/null
 ENVF=$(mktemp)
 cleanup() { rm -f "$ENVF"; docker exec pob_postgres sh -c "dropdb --if-exists -U $PGU $DB" >/dev/null 2>&1 || true; }
 trap cleanup EXIT

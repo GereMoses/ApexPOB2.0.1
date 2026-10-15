@@ -20,9 +20,9 @@ class TestDeviceManagement:
     """Test suite for Device Management API"""
     
     @pytest.fixture
-    def client(self):
-        """Test client fixture"""
-        return TestClient(app)
+    def client(self, superuser_headers):
+        """Client authenticated as a real superuser (real JWT + RBAC path)."""
+        return TestClient(app, headers=superuser_headers)
     
     @pytest.fixture
     def db_session(self):
@@ -40,18 +40,18 @@ class TestDeviceManagement:
             sn="TEST001",
             alias="Test Terminal 1",
             ip_address="192.168.1.100",
-            area_id=1,
+            area_id=None,
             comm_key="0",
             device_name="MB20",
             device_model="MB20",
-            fw_version="2.3.1",
+            fw_ver="2.3.1",
             user_count=10,
             fp_count=8,
             face_count=5,
             palm_count=0,
             log_count=100,
             device_type=0,
-            zone_id=1,
+            zone_id=None,
             is_auto_reg=False,
             state=1,
             last_activity=datetime.utcnow(),
@@ -61,22 +61,27 @@ class TestDeviceManagement:
         db_session.add(terminal)
         db_session.commit()
         db_session.refresh(terminal)
-        return terminal
+        yield terminal
+        # Each test gets a fresh terminal (the serial is unique).
+        db_session.execute(text("DELETE FROM iclock_devcmd WHERE sn = 'TEST001'"))
+        db_session.execute(text("DELETE FROM iclock_terminal WHERE sn = 'TEST001'"))
+        db_session.commit()
     
     @pytest.fixture
     def sample_personnel(self, db_session):
         """Sample personnel fixture"""
         personnel = PersonnelEmployee(
             emp_code="EMP001",
-            name="Test User",
-            badge_id="123456",
-            area_id=1,
-            deleted=0
+            first_name="Test",
+            last_name="User",
+            status=0,
         )
         db_session.add(personnel)
         db_session.commit()
         db_session.refresh(personnel)
-        return personnel
+        yield personnel
+        db_session.execute(text("DELETE FROM personnel_employee WHERE emp_code = 'EMP001'"))
+        db_session.commit()
 
 
 class TestDeviceCRUD(TestDeviceManagement):
@@ -84,12 +89,12 @@ class TestDeviceCRUD(TestDeviceManagement):
     
     def test_get_terminals(self, client, sample_terminal):
         """Test getting all terminals"""
-        response = client.get("/api/v1/device/terminals/")
+        response = client.get("/api/device/terminals/")
         assert response.status_code == 200
         data = response.json()
-        assert isinstance(data, list)
-        assert len(data) >= 1
-        assert data[0]["sn"] == sample_terminal.sn
+        items = data["data"] if isinstance(data, dict) else data   # paginated {data, total}
+        assert len(items) >= 1
+        assert any(t["sn"] == sample_terminal.sn for t in items)
     
     def test_create_terminal(self, client):
         """Test creating a new terminal"""
@@ -97,13 +102,13 @@ class TestDeviceCRUD(TestDeviceManagement):
             "sn": "TEST002",
             "alias": "Test Terminal 2",
             "ip_address": "192.168.1.101",
-            "area_id": 1,
+            "area_id": None,
             "device_type": 0,
             "device_name": "MB560",
             "device_model": "MB560"
         }
         
-        response = client.post("/api/v1/device/terminals/", json=terminal_data)
+        response = client.post("/api/device/terminals", json=terminal_data)
         assert response.status_code == 200
         data = response.json()
         assert data["sn"] == "TEST002"
@@ -117,12 +122,12 @@ class TestDeviceCRUD(TestDeviceManagement):
             "ip_address": "192.168.1.102"
         }
         
-        response = client.post("/api/v1/device/terminals/", json=terminal_data)
+        response = client.post("/api/device/terminals", json=terminal_data)
         assert response.status_code == 409
     
     def test_get_terminal_by_id(self, client, sample_terminal):
         """Test getting terminal by ID"""
-        response = client.get(f"/api/v1/device/terminals/{sample_terminal.id}")
+        response = client.get(f"/api/device/terminals/{sample_terminal.id}")
         assert response.status_code == 200
         data = response.json()
         assert data["sn"] == sample_terminal.sn
@@ -134,7 +139,7 @@ class TestDeviceCRUD(TestDeviceManagement):
             "ip_address": "192.168.1.103"
         }
         
-        response = client.put(f"/api/v1/device/terminals/{sample_terminal.id}", json=update_data)
+        response = client.put(f"/api/device/terminals/{sample_terminal.id}", json=update_data)
         assert response.status_code == 200
         data = response.json()
         assert data["alias"] == "Updated Terminal"
@@ -142,11 +147,11 @@ class TestDeviceCRUD(TestDeviceManagement):
     
     def test_delete_terminal(self, client, sample_terminal):
         """Test deleting terminal"""
-        response = client.delete(f"/api/v1/device/terminals/{sample_terminal.id}")
+        response = client.delete(f"/api/device/terminals/{sample_terminal.id}")
         assert response.status_code == 200
         
         # Verify deletion
-        get_response = client.get(f"/api/v1/device/terminals/{sample_terminal.id}")
+        get_response = client.get(f"/api/device/terminals/{sample_terminal.id}")
         assert get_response.status_code == 404
     
     def test_batch_import_terminals(self, client):
@@ -157,22 +162,27 @@ class TestDeviceCRUD(TestDeviceManagement):
                     "sn": "BATCH001",
                     "alias": "Batch Terminal 1",
                     "ip_address": "192.168.1.200",
-                    "area_id": 1
+                    "area_id": None
                 },
                 {
                     "sn": "BATCH002", 
                     "alias": "Batch Terminal 2",
                     "ip_address": "192.168.1.201",
-                    "area_id": 2
+                    "area_id": 999999   # does not exist: this row alone is skipped
                 }
             ]
         }
         
-        response = client.post("/api/v1/device/terminals/batch-import/", json=import_data)
+        response = client.post("/api/device/terminals/batch-import", json=import_data)
         assert response.status_code == 200
         data = response.json()
-        assert data["imported"] == 2
-        assert data["skipped"] == 0
+        assert data["imported"] == 1
+        assert data["skipped"] == 1
+        assert any("999999" in e for e in data["errors"])
+
+    def test_create_terminal_unknown_area_is_400_not_500(self, client):
+        resp = client.post("/api/device/terminals", json={"sn": "BADAREA1", "alias": "x", "area_id": 999999})
+        assert resp.status_code == 400 and "does not exist" in resp.json()["detail"]
 
 
 class TestDeviceCommands(TestDeviceManagement):
@@ -180,7 +190,7 @@ class TestDeviceCommands(TestDeviceManagement):
     
     def test_get_device_commands(self, client, sample_terminal):
         """Test getting device commands"""
-        response = client.get("/api/v1/device/devcmd/")
+        response = client.get("/api/device/devcmd/")
         assert response.status_code == 200
         data = response.json()
         assert isinstance(data, list)
@@ -192,7 +202,7 @@ class TestDeviceCommands(TestDeviceManagement):
             "cmd": "REBOOT"
         }
         
-        response = client.post("/api/v1/device/devcmd/", json=command_data)
+        response = client.post("/api/device/devcmd", json=command_data)
         assert response.status_code == 200
         data = response.json()
         assert data["sn"] == sample_terminal.sn
@@ -202,15 +212,16 @@ class TestDeviceCommands(TestDeviceManagement):
     def test_sync_user_to_device(self, client, sample_terminal, sample_personnel):
         """Test syncing user to device"""
         response = client.post(
-            f"/api/v1/device/devcmd/sync-user/?sn={sample_terminal.sn}&emp_code={sample_personnel.emp_code}"
+            f"/api/device/devcmd/sync-user/?sn={sample_terminal.sn}&emp_code={sample_personnel.emp_code}"
         )
         assert response.status_code == 200
         data = response.json()
-        assert "synced" in data["message"].lower()
+        msg = data["message"].lower()
+        assert "synced" in msg or "queued" in msg   # ADMS readers get it on their next poll
     
     def test_sync_all_users_to_device(self, client, sample_terminal):
         """Test syncing all users to device"""
-        response = client.post(f"/api/v1/device/devcmd/sync-all-users/?sn={sample_terminal.sn}")
+        response = client.post(f"/api/device/devcmd/sync-all-users?sn={sample_terminal.sn}")
         assert response.status_code == 200
         data = response.json()
         assert "sync" in data["message"].lower()
@@ -218,9 +229,9 @@ class TestDeviceCommands(TestDeviceManagement):
     def test_emergency_command(self, client, sample_terminal):
         """Test emergency device command"""
         # Update terminal to emergency type
-        client.put(f"/api/v1/device/terminals/{sample_terminal.id}", json={"device_type": 3})
+        client.put(f"/api/device/terminals/{sample_terminal.id}", json={"device_type": 3})
         
-        response = client.post(f"/api/v1/device/devcmd/emergency/?sn={sample_terminal.sn}&action=ON")
+        response = client.post(f"/api/device/devcmd/emergency?sn={sample_terminal.sn}&action=ON")
         assert response.status_code == 200
         data = response.json()
         assert "emergency" in data["message"].lower()
@@ -232,7 +243,7 @@ class TestRealTimeMonitoring(TestDeviceManagement):
     
     def test_get_real_time_devices(self, client, sample_terminal):
         """Test getting real-time device data"""
-        response = client.get("/api/v1/device/real-time/")
+        response = client.get("/api/device/real-time/")
         assert response.status_code == 200
         data = response.json()
         assert "devices" in data
@@ -243,7 +254,7 @@ class TestRealTimeMonitoring(TestDeviceManagement):
     
     def test_device_health_check(self, client):
         """Test device health check"""
-        response = client.get("/api/v1/device/health")
+        response = client.get("/api/device/health")
         assert response.status_code == 200
         data = response.json()
         assert "status" in data
@@ -258,7 +269,7 @@ class TestFirmwareManagement(TestDeviceManagement):
         """Test firmware upload (mock)"""
         # This would test file upload in real implementation
         # For now, we'll test the endpoint exists
-        response = client.post("/api/v1/device/firmware/upload/")
+        response = client.post("/api/device/firmware/upload")
         # Should return 422 for missing file
         assert response.status_code in [422, 200]
     
@@ -269,7 +280,7 @@ class TestFirmwareManagement(TestDeviceManagement):
             "sn_list": [sample_terminal.sn]
         }
         
-        response = client.post("/api/v1/device/firmware/push/", json=push_data)
+        response = client.post("/api/device/firmware/push", json=push_data)
         assert response.status_code == 200
         data = response.json()
         assert "firmware_id" in data
@@ -284,7 +295,10 @@ class TestADMSProtocol(TestDeviceManagement):
         # Test device heartbeat
         response = client.get(f"/iclock/cdata?SN={sample_terminal.sn}&options=UserCount=10,FpCount=5")
         assert response.status_code == 200
-        assert response.text == "OK"
+        # A GET with options= is the reader's registration: the reply is the options
+        # block (stamps, intervals), not a bare "OK".
+        assert response.text.startswith("GET OPTION FROM")
+        assert "ATTLOGStamp=" in response.text
     
     def test_adms_cdata_with_attendance(self, client, sample_terminal, sample_personnel):
         """Test ADMS cdata with attendance data"""
@@ -386,7 +400,7 @@ class TestWebSocketFunctionality(TestDeviceManagement):
     
     def test_websocket_stats(self, client):
         """Test WebSocket statistics endpoint"""
-        response = client.get("/api/v1/device/websocket/stats")
+        response = client.get("/api/device/websocket/stats")
         assert response.status_code == 200
         data = response.json()
         assert "status" in data
@@ -404,7 +418,7 @@ class TestDeviceValidation(TestDeviceManagement):
             # Missing SN
         }
         
-        response = client.post("/api/v1/device/terminals/", json=invalid_data)
+        response = client.post("/api/device/terminals", json=invalid_data)
         assert response.status_code == 422
     
     def test_device_type_validation(self, client):
@@ -415,7 +429,7 @@ class TestDeviceValidation(TestDeviceManagement):
             "device_type": 99  # Invalid device type
         }
         
-        response = client.post("/api/v1/device/terminals/", json=invalid_data)
+        response = client.post("/api/device/terminals", json=invalid_data)
         # Should handle gracefully (either accept or reject based on validation)
         assert response.status_code in [200, 422]
     
@@ -427,7 +441,7 @@ class TestDeviceValidation(TestDeviceManagement):
             # Missing SN
         }
         
-        response = client.post("/api/v1/device/devcmd/", json=invalid_command)
+        response = client.post("/api/device/devcmd", json=invalid_command)
         assert response.status_code == 422
 
 
@@ -447,7 +461,7 @@ class TestDevicePerformance(TestDeviceManagement):
         
         import_data = {"devices": devices}
         
-        response = client.post("/api/v1/device/terminals/batch-import/", json=import_data)
+        response = client.post("/api/device/terminals/batch-import", json=import_data)
         assert response.status_code == 200
         data = response.json()
         assert data["imported"] == 10
@@ -458,11 +472,11 @@ class TestDevicePerformance(TestDeviceManagement):
         
         for cmd in commands:
             command_data = {"sn": sample_terminal.sn, "cmd": cmd}
-            response = client.post("/api/v1/device/devcmd/", json=command_data)
+            response = client.post("/api/device/devcmd", json=command_data)
             assert response.status_code == 200
         
         # Verify all commands are queued
-        response = client.get("/api/v1/device/devcmd/")
+        response = client.get("/api/device/devcmd/")
         assert response.status_code == 200
         data = response.json()
         assert len(data) >= len(commands)

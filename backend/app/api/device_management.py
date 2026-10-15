@@ -465,6 +465,9 @@ async def create_terminal(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Terminal with SN {terminal_data.sn} already exists"
             )
+        bad = _bad_reference(db, getattr(terminal_data, "area_id", None), getattr(terminal_data, "zone_id", None))
+        if bad:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=bad)
         
         # Create new terminal
         new_terminal = IClockTerminal(
@@ -810,6 +813,12 @@ async def batch_import_terminals(
                 if existing:
                     skipped_count += 1
                     continue
+                bad = _bad_reference(db, device_data.get('area_id'), device_data.get('zone_id'))
+                if bad:
+                    # Skip just this row — one bad row used to fail the whole import.
+                    errors.append(f"{device_data['sn']}: {bad}")
+                    skipped_count += 1
+                    continue
                 
                 # Create terminal
                 new_terminal = IClockTerminal(
@@ -855,6 +864,18 @@ async def batch_import_terminals(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to import terminals"
         )
+
+def _bad_reference(db: Session, area_id, zone_id) -> Optional[str]:
+    """An unknown area/zone id used to surface as a database FK error — a 500 for a
+    single reader and a failed import for a whole batch."""
+    if area_id is not None and not db.execute(
+            text("SELECT 1 FROM personnel_area WHERE id = :i"), {"i": area_id}).first():
+        return f"Area {area_id} does not exist"
+    if zone_id is not None and not db.execute(
+            text("SELECT 1 FROM zones WHERE id = :i"), {"i": zone_id}).first():
+        return f"Zone {zone_id} does not exist"
+    return None
+
 
 # Device Commands Endpoints
 

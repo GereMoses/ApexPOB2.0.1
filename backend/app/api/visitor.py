@@ -411,14 +411,15 @@ async def resend_pre_registration(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# Public QR Scan Endpoint (No auth required)
+# QR scan lookup — requires a logged-in user (used by the staff Check-In screen;
+# returns visitor personal data). Self-service kiosk uses /kiosk/* instead.
 @router.get("/qr/{qr_code}", response_model=VisitorQRResponseWrapper)
 async def scan_qr_code(
     qr_code: str,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Public endpoint to scan QR code — validates expiry before returning data."""
+    """Look up a pre-registration by QR code (authenticated) — validates expiry."""
     from ..core.rate_limiter import rate_limiter
     from datetime import date as _date, datetime as _dt, timezone as _tz
 
@@ -438,15 +439,18 @@ async def scan_qr_code(
         if not pre_reg:
             raise HTTPException(status_code=404, detail="QR code not found")
 
-        # Validate visit date — reject expired passes
-        today = _date.today()
+        # Visit dates/times are SITE wall-clock values. The check used the UTC date and
+        # UTC time (an hour off in Lagos), and applied the time window on ANY date — so
+        # tomorrow's 09:00–17:00 pass scanned this evening was "expired".
+        from ..services.attendance_calculation_service import SITE_TZ
+        now_site = _dt.now(SITE_TZ)
+        today = now_site.date()
         if pre_reg.visit_date and pre_reg.visit_date < today:
             raise HTTPException(status_code=403, detail="QR code expired — visit date has passed")
 
-        # Validate time window if specified
-        if pre_reg.visit_time_end:
-            now_time = _dt.now(_tz.utc).time()
-            if now_time > pre_reg.visit_time_end:
+        # The time window only closes the pass on the visit day itself.
+        if pre_reg.visit_time_end and (pre_reg.visit_date is None or pre_reg.visit_date == today):
+            if now_site.time().replace(tzinfo=None) > pre_reg.visit_time_end:
                 raise HTTPException(status_code=403, detail="QR code expired — visit time window has closed")
 
         # Reject already-used or explicitly expired registrations (status 4=checked_out, 5=expired)

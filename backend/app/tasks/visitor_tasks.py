@@ -5,7 +5,7 @@ Auto-checkout, overstay alerts, and notification tasks
 """
 
 from celery import Celery
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
@@ -129,7 +129,12 @@ def check_overstay_visitors():
             allowed_hours = type_hours.get(visit.visitor.visitor_type_id, 8)
             
             # Calculate time since check-in
-            time_since_checkin = datetime.utcnow() - visit.check_in_time
+            # check_in_time is timezone-aware; naive utcnow() raised TypeError for every
+            # visitor on site, so this task crashed and no overstay alert was ever sent.
+            ci = visit.check_in_time
+            if ci.tzinfo is None:
+                ci = ci.replace(tzinfo=timezone.utc)
+            time_since_checkin = datetime.now(timezone.utc) - ci
             hours_overdue = (time_since_checkin.total_seconds() / 3600) - allowed_hours
             
             if hours_overdue > 0 and not visit.overstay_alert_sent:

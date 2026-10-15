@@ -29,6 +29,13 @@ class PersonnelEmployee(Base):
     status = Column(SmallInteger, default=0, index=True)  # 0=active, 1=inactive
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    @property
+    def full_name(self) -> str:
+        """There is no full_name column, but visitor host names, QR passes and host
+        reminders/alerts all read one — every one of them raised AttributeError
+        whenever a visitor had a host."""
+        return f"{(self.first_name or '').strip()} {(self.last_name or '').strip()}".strip() or (self.emp_code or "")
     
     # Relationships
     department = relationship("PersonnelDepartment", back_populates="employees")
