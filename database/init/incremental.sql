@@ -337,3 +337,10 @@ ALTER TABLE public.base_operationlog ALTER COLUMN table_name TYPE varchar(255);
 SELECT setval(pg_get_serial_sequence('public.personnel_employee', 'id'),
               GREATEST((SELECT COALESCE(MAX(id), 1) FROM public.personnel_employee),
                        (SELECT last_value FROM public.personnel_employee_id_seq)));
+
+-- ── Long names from SeamlessHR were rejected by the ZKTeco mirror table ──────────
+-- personnel_employee (kept in step with personnel by trg_sync_personnel) had
+-- first_name varchar(20) / last_name varchar(25). SeamlessHR full names reach 27+
+-- characters, so those staff failed to sync. personnel itself is already varchar(100).
+ALTER TABLE public.personnel_employee ALTER COLUMN first_name TYPE varchar(100);
+ALTER TABLE public.personnel_employee ALTER COLUMN last_name  TYPE varchar(100);

@@ -116,15 +116,25 @@ _DEFAULT_OPTIONS: Dict[str, Any] = {
     "employee_list_key":    "data",              # response key holding the list ("" ⇒ body is the array)
     "employee_page_param":  "page",              # pagination page param ("" ⇒ single page)
     "employee_limit_param": "limit",             # SeamlessHR default page size is only 10
-    "employee_limit":       100,
+    # SeamlessHR's sandbox costs ~0.3s per record and answers calls made too soon after
+    # one another with a bare 400 (no 429). Measured: limit 25/50 succeeded 9/9; limit 10
+    # and 100 failed whenever they followed another call closely. So: modest pages with a
+    # pause between them, and patient retries (see _get_with_retry).
+    "employee_limit":       25,
+    "employee_page_delay":  2.0,                 # seconds between pages
     "employee_status_field": "status",           # 'active'|'inactive' → drives is_active
     # Field names below are SeamlessHR's DOCUMENTED GET /v1/employees response.
     # NOTE: SeamlessHR returns `staff_name` + `staff_other_names` rather than a
     # split first/last — confirm with them which carries the surname for this
     # tenant, then adjust here if their convention is the reverse.
+    # Verified against the sandbox: `staff_name` is the FULL name ("Oluwafemi Areogun")
+    # and `staff_other_names` is an extra given name (often null). So first/last are both
+    # derived from staff_name — see employee_name_split below.
+    "employee_name_split":  True,                # split staff_name → first token / remainder
+    "employee_other_names_field": "staff_other_names",   # appended to full_name only
     "employee_field_map": {                      # SeamlessHR field → ApexPOB personnel field
         "emp_code":        "staff_id",
-        "first_name":      "staff_other_names",
+        "first_name":      "staff_name",
         "last_name":       "staff_name",
         "email":           "staff_email",
         "phone":           "staff_phone",
@@ -653,8 +663,8 @@ async def test_connection(cfg: Dict) -> Dict[str, Any]:
     if cfg.get("org_id") and opts.get("org_header_name"):
         headers[opts["org_header_name"]] = cfg["org_id"]
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, headers=headers)
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await _get_with_retry(client, url, headers, attempts=4)
         if resp.status_code in (200, 201):
             return {"success": True,  "message": f"Connected — HTTP {resp.status_code}"}
         # SeamlessHR answers bad credentials with HTTP 400 {"message":"Unauthorized access"}
@@ -669,7 +679,7 @@ async def test_connection(cfg: Dict) -> Dict[str, Any]:
     except httpx.ConnectError:
         return {"success": False, "message": f"Cannot reach {cfg['api_base_url']} — check the URL and network"}
     except httpx.TimeoutException:
-        return {"success": False, "message": "Connection timed out — server did not respond within 10s"}
+        return {"success": False, "message": "Connection timed out — server did not respond within 30s"}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
@@ -732,6 +742,68 @@ def _link_department(db: Session, person, unmatched: set) -> None:
         unmatched.add(name)
 
 
+# SeamlessHR's sandbox intermittently answers a perfectly valid request with 400/500
+# ("An error occurred while processing the request") and the next identical call
+# succeeds. A single such blip must not abort a 345-employee pull, nor — worse — be
+# mistaken for "end of list" and silently truncate the master.
+_RETRY_STATUSES = {400, 408, 425, 429, 500, 502, 503, 504}
+
+
+async def _get_with_retry(client: httpx.AsyncClient, url: str, headers: Dict[str, str],
+                          params: Optional[Dict] = None, attempts: int = 6) -> httpx.Response:
+    """GET with backoff on transient failures. Raises on the final failure."""
+    last_exc: Optional[Exception] = None
+    resp: Optional[httpx.Response] = None
+    for n in range(attempts):
+        try:
+            resp = await client.get(url, headers=headers, params=params)
+            # A 400 "Unauthorized access" is a real credential/permission answer, not a blip.
+            if resp.status_code not in _RETRY_STATUSES or "unauthorized" in resp.text.lower():
+                return resp
+        except (httpx.TransportError, httpx.TimeoutException) as e:
+            last_exc = e
+            resp = None
+        if n < attempts - 1:
+            await asyncio.sleep(min(3.0 * (n + 1), 20))
+    if resp is not None:
+        return resp          # caller's raise_for_status reports the real status
+    raise last_exc or RuntimeError("SeamlessHR request failed")
+
+
+async def _fetch_page_resilient(client, url, headers, page_param, page, limit_param, limit_val,
+                                 unreadable: List[int]):
+    """Fetch one page; if SeamlessHR keeps rejecting it, fall back to one record at a time
+    so a single record their API cannot serialise (observed in the sandbox: it answers
+    400 for that record alone, deterministically) does not hide every other employee on
+    the page. Positions of records that cannot be read are appended to `unreadable`."""
+    params = {}
+    if page_param:
+        params[page_param] = page
+    if limit_param:
+        params[limit_param] = limit_val
+    resp = await _get_with_retry(client, url, headers, params)
+    if resp.status_code < 400 or not (page_param and limit_param) or int(limit_val or 1) <= 1:
+        resp.raise_for_status()
+        return resp.json()
+    first = (page - 1) * int(limit_val) + 1
+    logger.warning("pull_employees: page %s rejected (HTTP %s) — retrying records %s..%s singly",
+                   page, resp.status_code, first, first + int(limit_val) - 1)
+    rows, last_body = [], {}
+    for pos in range(first, first + int(limit_val)):
+        r = await _get_with_retry(client, url, headers, {page_param: pos, limit_param: 1}, attempts=3)
+        if r.status_code >= 400:
+            unreadable.append(pos)
+            continue
+        body = r.json()
+        last_body = body
+        got = body.get("data") if isinstance(body, dict) else body
+        if not got:
+            break                      # ran past the end of the list
+        rows.extend(got)
+        await asyncio.sleep(1.0)
+    return {"data": rows} if rows or unreadable else last_body
+
+
 async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str, Any]:
     """Pull the employee master from SeamlessHR and upsert into `personnel`, marking
     each record hr_source='SEAMLESSHR' so its master fields become read-only in ApexPOB.
@@ -765,22 +837,18 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
     seen = 0
     now = datetime.utcnow()
     unmatched_departments: set = set()
+    unreadable_positions: List[int] = []
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             limit_param = opts.get("employee_limit_param")
             limit_val = opts.get("employee_limit", 100)
             status_field = opts.get("employee_status_field")
             page = 1
             while True:
-                params = {}
-                if page_param:
-                    params[page_param] = page
-                if limit_param:
-                    params[limit_param] = limit_val
-                resp = await client.get(url, headers=headers, params=params)
-                resp.raise_for_status()
-                body = resp.json()
+                bad_before = len(unreadable_positions)
+                body = await _fetch_page_resilient(client, url, headers, page_param, page,
+                                                   limit_param, limit_val, unreadable_positions)
                 if isinstance(body, list):
                     rows = body
                 elif isinstance(body, dict):
@@ -790,7 +858,7 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                 else:
                     rows = []
 
-                if not rows:
+                if not rows and not unreadable_positions:
                     break
 
                 for emp in rows:
@@ -815,7 +883,16 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                             val = emp.get(sfield)
                             if val is not None and hasattr(person, pfield):
                                 setattr(person, pfield, val)
-                        person.full_name = f"{person.first_name or ''} {person.last_name or ''}".strip()
+                        if opts.get("employee_name_split", False):
+                            full = " ".join(str(emp.get(fmap.get("first_name") or "") or "").split())
+                            if full:
+                                first, _, rest = full.partition(" ")
+                                person.first_name = first
+                                person.last_name = rest or first
+                            other = str(emp.get(opts.get("employee_other_names_field") or "") or "").strip()
+                            person.full_name = f"{full} {other}".strip() if other and other.lower() not in full.lower() else full
+                        else:
+                            person.full_name = f"{person.first_name or ''} {person.last_name or ''}".strip()
                         # Employment status / exit → drives is_active (offboards leavers).
                         if status_field:
                             sval = str(emp.get(status_field) or "").lower()
@@ -842,11 +919,19 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                 # attendance push, and if it were the larger of the two a full page
                 # would look short and the employee master would silently truncate.
                 page_size = int(limit_val or batch)
-                if not page_param or len(rows) < page_size:
+                if not page_param or len(rows) + (len(unreadable_positions) - bad_before) < page_size:
                     break
                 page += 1
+                await asyncio.sleep(float(opts.get("employee_page_delay", 0) or 0))
 
         result = {"created": created, "updated": updated, "skipped": skipped, "total": seen}
+        if unreadable_positions:
+            skipped += len(unreadable_positions)
+            result["skipped"] = skipped
+            result["unreadable_record_positions"] = unreadable_positions
+            logger.warning("pull_employees: SeamlessHR could not return list positions %s "
+                           "(HTTP 400 even when requested alone) — ask them to check those records",
+                           unreadable_positions)
         # Surface departments SeamlessHR sent that don't exist here. Those staff are
         # unlinked, so they inherit no department shift — the admin needs to create
         # the department and give it a Default Shift, then re-pull.
@@ -952,7 +1037,7 @@ async def adopt_attendance_ids(db: Session, days: int = 31) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=30) as client:
             page = 1
             while page <= 200:
-                resp = await client.get(url, headers=headers, params={
+                resp = await _get_with_retry(client, url, headers, {
                     "page": page, "perPage": per_page, "dateType": "custom",
                     "startDate": start.isoformat(), "endDate": end.isoformat()})
                 if resp.status_code != 200:
