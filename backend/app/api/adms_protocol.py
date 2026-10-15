@@ -543,12 +543,8 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 logger.debug(f"Zone access {direction}: {emp_code}@{sn} zone={terminal.zone_id}")
             except Exception as e:
                 logger.error(f"Zone access error {emp_code}@{sn}: {e}")
-            # Entering a zone → person is on site. Don't flip to off-board on a zone
-            # EXIT (could be moving between zones); ATTENDANCE check-out is the off signal.
-            try:
-                _mark_onboard(emp_code, True if direction == 'ENTRY' else None, db, location=zone_name)
-            except Exception as oe:
-                logger.warning(f"Onboard status non-fatal error: {oe}")
+            # On-board status is set inside _handle_zone_access (entry = on site,
+            # exit through a site-boundary zone = off site).
             # Force punch direction so T&A calculation is unambiguous
             forced_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
             if _punch_already_stored(emp_code, punch_time, sn, db):
@@ -671,7 +667,15 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
 
             # Maintain on-board status so the POB dashboard reflects reality.
             try:
-                _onb = True if punch_state in (0, 4) else (False if punch_state in (1, 5) else None)
+                # The reader's In/Out key is not trusted (the F18 stamps every tap
+                # Check-Out), so a tap at an attendance reader only ever says "this
+                # person is on site". Leaving site is an EXIT at a site-boundary
+                # reader, or the inactivity auto-checkout. punch_state_mode=device
+                # restores the old key-driven behaviour.
+                if _punch_state_mode(db) == 'device':
+                    _onb = True if punch_state in (0, 4) else (False if punch_state in (1, 5) else None)
+                else:
+                    _onb = True
                 _mark_onboard(emp_code, _onb, db, location=zone_name)
             except Exception as oe:
                 logger.warning(f"Onboard status non-fatal error: {oe}")
@@ -1378,6 +1382,22 @@ def _handle_zone_access(
                 "pri": "critical",
             })
             db.commit()
+        else:
+            # Outside a muster it is still a gap: nobody tapping here is being located.
+            # One alert per reader per day so it is seen without flooding.
+            db.execute(text("""
+                INSERT INTO sys_notifications
+                    (dedup_key, notification_type, title, message, priority, expires_at)
+                VALUES (:dk, 'reader_no_zone', :title, :msg, 'high', NOW() + INTERVAL '1 day')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {
+                "dk": f"reader_no_zone_{device_sn}_{datetime.now(timezone.utc).date()}",
+                "title": "Access Reader Not Assigned to a Zone",
+                "msg": (f"Reader {device_sn} is set as an access-control reader but has no zone, "
+                        f"so taps there do not update anyone's location. Assign it under "
+                        f"Zones → ADMS Readers."),
+            })
+            db.commit()
         return {}
 
     # Ensure acc_door/acc_zone/acc_zone_door exist so the ACZones UI can count occupancy
@@ -1395,64 +1415,97 @@ def _handle_zone_access(
     personnel_id    = person_row.id            if person_row else None
     current_zone_id = person_row.current_zone_id if person_row else None
 
+    zone_row = db.execute(text(
+        "SELECT name, parent_zone_id, COALESCE(is_site_boundary, FALSE) AS boundary "
+        "FROM zones WHERE id = :z"), {"z": zone_id}).fetchone()
+    zone_name  = zone_row.name if zone_row else None
+    parent_id  = zone_row.parent_zone_id if zone_row and zone_row.parent_zone_id != zone_id else None
+    boundary   = bool(zone_row.boundary) if zone_row else False
+
     zone_updates: Dict[int, int] = {}
+    access_event = 'ACCESS_ENTRY' if direction == 'ENTRY' else 'ACCESS_EXIT'
+
+    # A reader that was offline uploads its buffer when it reconnects. Those taps are
+    # history: applying them as "now" would move the person back to where they were
+    # hours ago. Record them, but leave live location and on-board status alone.
+    latest = db.execute(text(
+        "SELECT MAX(punch_time) FROM zone_personnel_tracking WHERE emp_code = :ec"
+    ), {"ec": emp_code}).scalar()
+    if latest is not None and punch_time < latest:
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, :et, :pt, NULL)
+        """), {"zid": zone_id, "ec": emp_code, "sn": device_sn,
+               "et": 'CLOCK_IN' if direction == 'ENTRY' else 'CLOCK_OUT', "pt": punch_time})
+        db.execute(text("""
+            INSERT INTO access_logs
+                (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
+            VALUES (:pid, :ev, true, :pt, :zid, :dir)
+        """), {"pid": personnel_id, "ev": access_event, "pt": punch_time,
+               "zid": zone_id, "dir": direction})
+        db.commit()
+        logger.info("Late upload %s@%s %s (older than last move %s) — history only",
+                    emp_code, device_sn, punch_time, latest)
+        return {}
+
+    def _track(zid, event_type, prev):
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, :et, :pt, :pzid)
+        """), {"zid": zid, "ec": emp_code, "sn": device_sn, "et": event_type,
+               "pt": punch_time, "pzid": prev})
 
     if direction == 'ENTRY':
-        # Auto-exit from previous zone if different
+        # Auto-exit from previous zone if different (self-corrects missed exits)
         if current_zone_id and current_zone_id != zone_id:
-            db.execute(text("""
-                INSERT INTO zone_personnel_tracking
-                    (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
-                VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :pzid)
-            """), {"zid": current_zone_id, "ec": emp_code, "sn": device_sn,
-                   "pt": punch_time, "pzid": current_zone_id})
+            _track(current_zone_id, 'CLOCK_OUT', current_zone_id)
             zone_updates[current_zone_id] = _recalc_zone_occupancy(current_zone_id, db)
-            logger.debug(f"Auto-exit from zone {current_zone_id} for {emp_code}")
-
-        # Create entry record
-        db.execute(text("""
-            INSERT INTO zone_personnel_tracking
-                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
-            VALUES (:zid, :ec, :sn, 'CLOCK_IN', :pt, :pzid)
-        """), {"zid": zone_id, "ec": emp_code, "sn": device_sn,
-               "pt": punch_time, "pzid": current_zone_id})
+        _track(zone_id, 'CLOCK_IN', current_zone_id)
         zone_updates[zone_id] = _recalc_zone_occupancy(zone_id, db)
-
-        # Update personnel current zone
-        if personnel_id:
-            db.execute(text(
-                "UPDATE personnel SET current_zone_id = :zid WHERE id = :id"
-            ), {"zid": zone_id, "id": personnel_id})
-
-        # Write access log
-        db.execute(text("""
-            INSERT INTO access_logs
-                (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
-            VALUES (:pid, 'ACCESS_ENTRY', true, :pt, :zid, 'ENTRY')
-        """), {"pid": personnel_id, "pt": punch_time, "zid": zone_id})
-
-    elif direction == 'EXIT':
-        # Create exit record
-        db.execute(text("""
-            INSERT INTO zone_personnel_tracking
-                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
-            VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :pzid)
-        """), {"zid": zone_id, "ec": emp_code, "sn": device_sn,
-               "pt": punch_time, "pzid": zone_id})
+        new_zone = zone_id
+    else:
+        # Walking out of zone X means they are not wherever else we last had them
+        # (e.g. recorded in Site, now leaving through the Gate): close that stay too.
+        if current_zone_id and current_zone_id != zone_id:
+            _track(current_zone_id, 'CLOCK_OUT', current_zone_id)
+            zone_updates[current_zone_id] = _recalc_zone_occupancy(current_zone_id, db)
+        _track(zone_id, 'CLOCK_OUT', zone_id)
         zone_updates[zone_id] = _recalc_zone_occupancy(zone_id, db)
+        # Leaving a room puts you in the area around it (Control Room -> Main Deck),
+        # not "nowhere": the person stays on the map and the muster keeps a last
+        # known zone. Only a zone with no parent leaves the person unplaced.
+        new_zone = parent_id
+        if parent_id:
+            _track(parent_id, 'CLOCK_IN', zone_id)
+            zone_updates[parent_id] = _recalc_zone_occupancy(parent_id, db)
 
-        # Clear current zone
-        if personnel_id:
-            db.execute(text(
-                "UPDATE personnel SET current_zone_id = NULL WHERE id = :id"
-            ), {"id": personnel_id})
+    if personnel_id:
+        db.execute(text(
+            "UPDATE personnel SET current_zone_id = :zid WHERE id = :id"
+        ), {"zid": new_zone, "id": personnel_id})
 
-        # Write access log
-        db.execute(text("""
-            INSERT INTO access_logs
-                (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
-            VALUES (:pid, 'ACCESS_EXIT', true, :pt, :zid, 'EXIT')
-        """), {"pid": personnel_id, "pt": punch_time, "zid": zone_id})
+    db.execute(text("""
+        INSERT INTO access_logs
+            (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
+        VALUES (:pid, :ev, true, :pt, :zid, :dir)
+    """), {"pid": personnel_id, "ev": access_event, "pt": punch_time,
+           "zid": zone_id, "dir": direction})
+
+    # On-board status: any entry means the person is on site; only an EXIT through a
+    # SITE BOUNDARY zone (gate, helideck, jetty) means they have left. Moving between
+    # rooms never takes anyone off board.
+    if direction == 'ENTRY':
+        onboard = True
+    elif boundary and not parent_id:
+        onboard = False
+    else:
+        onboard = None
+    _mark_onboard(emp_code, onboard, db, location=zone_name if direction == 'ENTRY' else None)
+    if onboard is False and personnel_id:
+        db.execute(text("UPDATE personnel SET current_zone_id = NULL WHERE id = :id"),
+                   {"id": personnel_id})
 
     db.commit()
     return zone_updates
@@ -1545,6 +1598,15 @@ def _update_zone_personnel_count(
     logger.debug(f"Zone {zone_id} updated after {event_type} by {emp_code}")
 
 
+def _punch_state_mode(db: Session) -> str:
+    try:
+        v = db.execute(text("SELECT rule_value FROM att_rules WHERE rule_key = 'punch_state_mode'")).scalar()
+    except Exception:
+        db.rollback()
+        v = None
+    return str(v or 'first_last').lower()
+
+
 def _mark_onboard(emp_code: str, onboard, db: Session, location: "Optional[str]" = None) -> None:
     """
     Maintain personnel.is_onboard from an attendance/access punch so the POB
@@ -1554,6 +1616,16 @@ def _mark_onboard(emp_code: str, onboard, db: Session, location: "Optional[str]"
       onboard = None  → leave unchanged (break punches, zone-to-zone exits, unknown state)
     """
     if onboard is None:
+        # No status change, but it IS activity: keep last_seen current so the
+        # inactivity auto-checkout never evicts someone moving between rooms.
+        try:
+            db.execute(text("UPDATE personnel SET last_seen = NOW() "
+                            "WHERE (emp_code = :ec OR badge_id = :ec) AND is_active = TRUE"),
+                       {"ec": emp_code})
+            db.commit()
+        except Exception as e:
+            logger.warning("last_seen update failed for %s: %s", emp_code, e)
+            db.rollback()
         return
     try:
         if onboard:

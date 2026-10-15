@@ -62,6 +62,9 @@ class Zone(Base):
     map_x = Column(Float, nullable=True)                  # position on facility map diagram
     map_y = Column(Float, nullable=True)
     map_connections = Column(Text, nullable=True)         # JSON: "[zone_id, ...]" connected zones
+    # Site boundary (gate, helideck, jetty): an EXIT here means the person has left
+    # site, so they come off POB. Exits anywhere else only move them between zones.
+    is_site_boundary = Column(Boolean, default=False, server_default='false', nullable=False)
 
     # Metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)

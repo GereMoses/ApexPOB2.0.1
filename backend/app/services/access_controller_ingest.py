@@ -169,6 +169,11 @@ def ingest_event(controller: AccessController, event: C3Event, db: Session) -> D
         return {}
 
     emp_code = event.pin or event.card_no
+    if emp_code:
+        # The panel reports the reader PIN (SeamlessHR Attendance ID) — map it back
+        # to the employee code, exactly as the ADMS path does.
+        from .device_pin import resolve_emp_code
+        emp_code = resolve_emp_code(db, emp_code)
     if not emp_code:
         logger.debug("Controller %s event has no pin/cardno — cannot identify person", controller.id)
         return {}

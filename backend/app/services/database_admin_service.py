@@ -15,6 +15,7 @@ button always behave identically.
 
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -142,42 +143,73 @@ def get_overview(db: Session) -> dict:
 
 # ── Occupancy control ──────────────────────────────────────────────────────────
 
-def _checkout_query(where_extra: str = "") -> str:
-    """Insert a CHECK_OUT for every employee whose latest punch is an entry at a
-    zone reader (optionally only those older than a cutoff). Mirrors zones.reset_occupancy."""
-    return f"""
-        INSERT INTO iclock_transaction (emp_code, punch_time, punch_state, verify_type, terminal_sn)
-        SELECT latest.emp_code, now(), 1, 0, latest.terminal_sn
-        FROM (SELECT DISTINCT ON (t.emp_code) t.emp_code, t.punch_state, t.terminal_sn, t.punch_time
-              FROM iclock_transaction t ORDER BY t.emp_code, t.punch_time DESC) latest
-        JOIN iclock_terminal term ON term.sn = latest.terminal_sn
-        WHERE latest.punch_state IN (0, 4) AND term.zone_id IS NOT NULL
-        {where_extra}
-    """
+def _off_board(db: Session, where_sql: str = "TRUE", params: Optional[dict] = None) -> int:
+    """Take the matching on-board people off site: close their open zone stay in
+    zone_personnel_tracking (so the occupancy recount agrees), clear their zone and
+    POB flags. Deliberately writes NO punch to iclock_transaction — a synthetic
+    'check-out' there would be read by the attendance engine as a real tap (with
+    first-in/last-out, a 03:00 fake punch becomes the next day's clock-in)."""
+    params = params or {}
+    rows = db.execute(text(f"""
+        SELECT id, emp_code, current_zone_id FROM personnel
+        WHERE is_onboard = TRUE AND {where_sql}
+    """), params).fetchall()
+    zones = set()
+    for r in rows:
+        if r.current_zone_id:
+            db.execute(text("""
+                INSERT INTO zone_personnel_tracking
+                    (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+                VALUES (:z, :ec, 'SYSTEM', 'CLOCK_OUT', NOW(), :z)
+            """), {"z": r.current_zone_id, "ec": r.emp_code})
+            zones.add(r.current_zone_id)
+    if rows:
+        db.execute(text("""
+            UPDATE personnel SET is_onboard = FALSE, is_pob = FALSE, pob_since = NULL,
+                   current_zone_id = NULL, updated_at = NOW()
+            WHERE id = ANY(:ids)
+        """), {"ids": [r.id for r in rows]})
+    for z in zones:
+        db.execute(text("""
+            UPDATE zones SET current_personnel_count = sub.cnt, current_occupancy = sub.cnt
+            FROM (SELECT COUNT(*) AS cnt FROM (
+                    SELECT DISTINCT ON (emp_code) event_type FROM zone_personnel_tracking
+                    WHERE zone_id = :z ORDER BY emp_code, punch_time DESC) l
+                  WHERE l.event_type = 'CLOCK_IN') sub
+            WHERE zones.id = :z
+        """), {"z": z})
+    return len(rows)
 
 
 def reset_all_occupancy(db: Session) -> dict:
-    """Instant full reset: check everyone out, clear onboard flags, zone pointers,
-    and stored counters. For use when the facility is known to be empty."""
-    checked_out = db.execute(text(_checkout_query())).rowcount or 0
-    onboard = db.execute(text(
-        "UPDATE personnel SET is_onboard=FALSE, is_pob=FALSE, pob_since=NULL WHERE is_onboard=TRUE"
-    )).rowcount or 0
+    """Instant full reset: everyone off site, zone pointers and counters cleared.
+    For use when the facility is known to be empty."""
+    # Close every open zone stay too — otherwise the next tap's recount (which reads
+    # the tracking history) would put everybody straight back in.
+    db.execute(text("""
+        INSERT INTO zone_personnel_tracking
+            (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+        SELECT l.zone_id, l.emp_code, 'SYSTEM', 'CLOCK_OUT', NOW(), l.zone_id
+        FROM (SELECT DISTINCT ON (zone_id, emp_code) zone_id, emp_code, event_type
+              FROM zone_personnel_tracking ORDER BY zone_id, emp_code, punch_time DESC) l
+        WHERE l.event_type = 'CLOCK_IN'
+    """))
+    onboard = _off_board(db)
     db.execute(text("UPDATE personnel SET current_zone_id=NULL WHERE current_zone_id IS NOT NULL"))
     db.execute(text("UPDATE zones SET current_personnel_count=0, current_occupancy=0 "
                     "WHERE current_personnel_count<>0 OR current_occupancy<>0"))
     db.commit()
-    logger.info("reset_all_occupancy: checked_out=%s, onboard_cleared=%s", checked_out, onboard)
-    return {"checked_out": checked_out, "onboard_cleared": onboard}
+    logger.info("reset_all_occupancy: onboard_cleared=%s", onboard)
+    return {"checked_out": onboard, "onboard_cleared": onboard}
 
 
 def auto_checkout_stale(db: Session, days: int) -> dict:
-    """Check out anyone whose LAST punch was an entry more than `days` days ago
-    (a forgotten check-in with no activity since). Does not touch people with any
-    recent activity, so it never evicts someone legitimately still on site."""
+    """Take off site anyone still on board with NO activity (attendance tap, door,
+    zone move) for more than `days` days — a person who left without passing a
+    site-boundary reader. Anyone with recent activity is never touched."""
     days = max(0, int(days))
-    where = "AND latest.punch_time < now() - (:days || ' days')::interval"
-    n = db.execute(text(_checkout_query(where)), {"days": days}).rowcount or 0
+    n = _off_board(db, "(last_seen IS NULL OR last_seen < now() - (:days || ' days')::interval)",
+                   {"days": days})
     db.commit()
     logger.info("auto_checkout_stale(days=%s): checked_out=%s", days, n)
     return {"checked_out": n, "days": days}

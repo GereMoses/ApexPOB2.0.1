@@ -344,3 +344,12 @@ SELECT setval(pg_get_serial_sequence('public.personnel_employee', 'id'),
 -- characters, so those staff failed to sync. personnel itself is already varchar(100).
 ALTER TABLE public.personnel_employee ALTER COLUMN first_name TYPE varchar(100);
 ALTER TABLE public.personnel_employee ALTER COLUMN last_name  TYPE varchar(100);
+
+-- ── Zones: site boundary + occupancy recount speed ──────────────────────────────
+-- An EXIT through a site-boundary zone (gate, helideck, jetty) takes a person off POB;
+-- exits elsewhere only move them between zones.
+ALTER TABLE public.zones ADD COLUMN IF NOT EXISTS is_site_boundary boolean NOT NULL DEFAULT false;
+-- _recalc_zone_occupancy / late-upload guard read the latest event per person; without
+-- this they scan the whole tracking history on every tap.
+CREATE INDEX IF NOT EXISTS idx_zpt_zone_emp_time ON public.zone_personnel_tracking (zone_id, emp_code, punch_time DESC);
+CREATE INDEX IF NOT EXISTS idx_zpt_emp_time ON public.zone_personnel_tracking (emp_code, punch_time DESC);

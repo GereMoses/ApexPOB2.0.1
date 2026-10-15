@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Card, Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Select, Dropdown,
   Popconfirm, Row, Col, Tabs, Progress, Segmented,
-  Drawer, Descriptions, Alert, Empty, Spin, App, Tooltip, Divider, Badge, DatePicker,
+  Drawer, Descriptions, Alert, Empty, Spin, App, Tooltip, Divider, Badge, DatePicker, Switch,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined,
@@ -2811,6 +2811,7 @@ const ZoneManagement = () => {
       reader_sn: zone.reader_sn,
       evac_point: zone.evac_point,
       evac_gps: zone.evac_gps,
+      is_site_boundary: !!zone.is_site_boundary,
     });
     setIsModalOpen(true);
   };
@@ -3667,6 +3668,11 @@ const ZoneManagement = () => {
               </Form.Item>
             </Col>
           </Row>
+          <Form.Item name="is_site_boundary" label="Site boundary (gate / helideck / jetty)"
+            valuePropName="checked"
+            tooltip="An EXIT through this zone takes the person off POB. Exits from any other zone only move them to the parent zone.">
+            <Switch />
+          </Form.Item>
         </Form>
       </Modal>
 

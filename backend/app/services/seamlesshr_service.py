@@ -734,6 +734,9 @@ def _link_department(db: Session, person, unmatched: set) -> None:
     """
     name = (getattr(person, "department", None) or "").strip()
     if not name:
+        # SeamlessHR no longer gives them a department: unlink, rather than leave
+        # them on the old one (and its shift).
+        person.department_id = None
         return
     row = db.execute(text(
         "SELECT id FROM departments "
@@ -742,6 +745,9 @@ def _link_department(db: Session, person, unmatched: set) -> None:
     ), {"n": name}).fetchone()
     if row:
         person.department_id = row[0]
+        # A SeamlessHR department hidden earlier because it emptied is back in use.
+        db.execute(text("UPDATE departments SET is_active = TRUE WHERE id = :i AND is_active = FALSE"),
+                   {"i": row[0]})
         return
     # SeamlessHR is the master for the org structure, so its departments are created
     # here rather than leaving every employee unlinked. A new department has no
@@ -912,6 +918,9 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                             val = emp.get(sfield)
                             if val is not None and hasattr(person, pfield):
                                 setattr(person, pfield, val)
+                            elif pfield == "department" and sfield in emp:
+                                # Explicitly empty in SeamlessHR = no department now.
+                                person.department = None
                         if opts.get("employee_name_split", False):
                             full = " ".join(str(emp.get(fmap.get("first_name") or "") or "").split())
                             if full:
@@ -954,6 +963,19 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                 await asyncio.sleep(float(opts.get("employee_page_delay", 0) or 0))
 
         result = {"created": created, "updated": updated, "skipped": skipped, "total": seen}
+        # After a COMPLETE pull, a department that SeamlessHR created here and that no
+        # employee is in any more was renamed or deleted in SeamlessHR. Hide it (not
+        # delete: a shift or history may reference it); it comes back if used again.
+        if not unreadable_positions:
+            retired = db.execute(text("""
+                UPDATE departments d SET is_active = FALSE, updated_at = NOW()
+                WHERE d.description = 'Created from SeamlessHR' AND d.is_active = TRUE
+                  AND NOT EXISTS (SELECT 1 FROM personnel p WHERE p.department_id = d.id)
+                RETURNING d.name
+            """)).fetchall()
+            db.commit()
+            if retired:
+                result["retired_departments"] = sorted(r[0] for r in retired)
         if unreadable_positions:
             skipped += len(unreadable_positions)
             result["skipped"] = skipped

@@ -104,6 +104,11 @@ def _to_dict(zone: Zone, db: Session) -> dict:
         "parent_zone_id": zone.parent_zone_id,
         "display_color": zone.display_color or DEFAULT_TILE_COLORS.get(ztype),
         "tile_position": zone.tile_position or "auto",
+        "is_site_boundary": bool(getattr(zone, "is_site_boundary", False)),
+        # Mustering fields — without these the edit form showed them blank.
+        "reader_sn": zone.reader_sn,
+        "evac_point": zone.evac_point,
+        "evac_gps": zone.evac_gps,
         "created_at": zone.created_at.isoformat() if zone.created_at else None,
         "updated_at": zone.updated_at.isoformat() if zone.updated_at else None,
     }
@@ -114,7 +119,7 @@ def _to_dict(zone: Zone, db: Session) -> dict:
 @router.get("/meta/summary")
 def get_summary(db: Session = Depends(get_db), _=Depends(get_current_user)):
     total = db.query(Zone).count()
-    active = db.query(Zone).filter(Zone.is_active == True, Zone.status == "ACTIVE").count()
+    active = db.query(Zone).filter(Zone.is_active == True, func.upper(Zone.status) == "ACTIVE").count()
 
     by_type = {}
     for zt, c in db.query(Zone.zone_type, func.count(Zone.id)).group_by(Zone.zone_type).all():
@@ -520,6 +525,7 @@ def create_zone(
         parent_zone_id=body.get("parent_zone_id"),
         display_color=body.get("display_color"),
         tile_position=body.get("tile_position", "auto"),
+        is_site_boundary=bool(body.get("is_site_boundary", False)),
     )
     db.add(zone)
     db.commit()
@@ -537,6 +543,16 @@ def update_zone(
     zone = db.query(Zone).filter(Zone.id == zone_id).first()
     if not zone:
         raise HTTPException(status_code=404, detail="Zone not found")
+
+    # An exit moves a person to the parent zone, so the hierarchy must be a tree.
+    if body.get("parent_zone_id"):
+        seen, cur = {zone_id}, int(body["parent_zone_id"])
+        while cur:
+            if cur in seen:
+                raise HTTPException(status_code=400,
+                                    detail="Parent zone would create a loop (a zone cannot sit inside itself)")
+            seen.add(cur)
+            cur = db.execute(text("SELECT parent_zone_id FROM zones WHERE id = :z"), {"z": cur}).scalar()
 
     upper_fields = {"zone_type", "status", "hazard_level", "safety_level", "access_level"}
     for field, value in body.items():
@@ -1043,48 +1059,19 @@ def reset_occupancy(
     _=Depends(get_current_user),
 ):
     """
-    Force-reset a zone's occupancy to 0.
-
-    For every employee whose last global punch was a CHECK_IN on a reader assigned
-    to this zone, insert a CHECK_OUT record on that same reader so the live count
-    query immediately drops them from the zone.  Also clears personnel.current_zone_id
-    for anyone who was pointing at this zone, and resets the zone's stored count.
+    Force-reset a zone's occupancy to 0: close every open stay in this zone in
+    zone_personnel_tracking, clear personnel.current_zone_id for anyone pointing at
+    it, and reset the stored count. Attendance punches are never touched.
     """
     zone = db.query(Zone).filter(Zone.id == zone_id).first()
     if not zone:
         raise HTTPException(status_code=404, detail="Zone not found")
 
-    # Find terminals assigned to this zone
-    terminals = db.execute(text(
-        "SELECT sn FROM iclock_terminal WHERE zone_id = :zid"
-    ), {"zid": zone_id}).fetchall()
-    terminal_sns = [t.sn for t in terminals]
-
+    # Location lives in zone_personnel_tracking. This used to also insert a fake
+    # CHECK-OUT punch into iclock_transaction, which the attendance engine then read
+    # as a real tap (corrupting that person's hours) — removed.
     cleared = []
     now = datetime.utcnow()
-
-    if terminal_sns:
-        # Find employees whose most recent punch (globally) is a check-in on one of our terminals
-        phantom_rows = db.execute(text("""
-            SELECT DISTINCT latest.emp_code, latest.terminal_sn
-            FROM (
-                SELECT DISTINCT ON (t.emp_code)
-                    t.emp_code, t.punch_state, t.terminal_sn, t.punch_time
-                FROM iclock_transaction t
-                ORDER BY t.emp_code, t.punch_time DESC
-            ) latest
-            WHERE latest.punch_state IN (0, 4)
-              AND latest.terminal_sn = ANY(:sns)
-        """), {"sns": terminal_sns}).fetchall()
-
-        for row in phantom_rows:
-            db.execute(text("""
-                INSERT INTO iclock_transaction
-                    (emp_code, punch_time, punch_state, verify_type, terminal_sn)
-                VALUES (:ec, :pt, 1, 0, :sn)
-                ON CONFLICT DO NOTHING
-            """), {"ec": row.emp_code, "pt": now, "sn": row.terminal_sn})
-            cleared.append(row.emp_code)
 
     # Also clear any zone_personnel_tracking CLOCK_INs for this zone
     # by inserting CLOCK_OUTs so _recalc_zone_occupancy returns 0
@@ -1105,6 +1092,7 @@ def reset_occupancy(
                 (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
             VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :zid)
         """), {"zid": zone_id, "ec": row.emp_code, "sn": row.device_sn, "pt": now})
+        cleared.append(row.emp_code)
 
     # Clear personnel.current_zone_id for anyone still pointing here
     db.execute(text(
