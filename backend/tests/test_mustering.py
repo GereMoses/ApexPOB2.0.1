@@ -1,483 +1,146 @@
 """
-Mustering System Tests
-Comprehensive test suite for mustering functionality
+Mustering — the most safety-critical flow in ApexPOB.
+
+Replaces the legacy suite, which targeted a MusteringZone model and /zones API that
+were merged into Zones long ago (the file could not even be imported). These tests use
+the real paths: who is EXPECTED at a muster, a scan at a muster-point reader marking
+someone SAFE, MISSING people reported with their last known zone, manual marking, and
+the HTTP API with real authentication. Runs on the throwaway database (tests/conftest.py).
 """
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
-import sys
-import os
-from datetime import datetime, timedelta
 from fastapi.testclient import TestClient
-
-# Add backend path
-backend_path = os.path.join(os.path.dirname(__file__), '..')
-if backend_path not in sys.path:
-    sys.path.insert(0, backend_path)
+from sqlalchemy import text
 
 from app.main import app
-from app.core.database import get_database_url, engine
-from sqlalchemy.orm import sessionmaker
-from app.models.biotime_models import MusteringZone, MusteringEvent, MusteringLog, PersonnelEmployee
 
-# Test database session
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-class TestMusteringAPI:
-    """Test suite for mustering API endpoints"""
-    
-    def setup_method(self):
-        """Setup test database"""
-        self.db = SessionLocal()
-        self.client = TestClient(app)
-        
-        # Create test zone
-        self.test_zone = MusteringZone(
-            name="Test Zone",
-            capacity=100,
-            evac_point="Test Assembly Point",
-            evac_gps="6.5244,3.3792",
-            zone_type=0,
-            area_id=1
-        )
-        self.db.add(self.test_zone)
-        self.db.commit()
-        self.db.refresh(self.test_zone)
-        
-        # Create test employee
-        self.test_employee = PersonnelEmployee(
-            emp_code="TEST001",
-            name="Test Employee",
-            dept_id=1,
-            status=0
-        )
-        self.db.add(self.test_employee)
-        self.db.commit()
-        self.db.refresh(self.test_employee)
-    
-    def teardown_method(self):
-        """Cleanup test database"""
-        self.db.close()
-    
-    def test_create_zone_success(self):
-        """Test successful zone creation"""
-        zone_data = {
-            "name": "New Test Zone",
-            "capacity": 50,
-            "evac_point": "New Assembly Point",
-            "zone_type": 0
-        }
-        
-        response = self.client.post(
-            "/api/mustering/zones/",
-            json=zone_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert "id" in data["data"]
-    
-    def test_create_zone_validation_error(self):
-        """Test zone creation with validation error"""
-        zone_data = {
-            "name": "",  # Empty name should fail
-            "capacity": -10,  # Negative capacity should fail
-            "zone_type": 5  # Invalid zone type
-        }
-        
-        response = self.client.post(
-            "/api/mustering/zones/",
-            json=zone_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 422  # Validation error
-    
-    def test_start_mustering_event_success(self):
-        """Test successful mustering event start"""
-        event_data = {
-            "zone_id": self.test_zone.id,
-            "event_type": 1,  # Drill
-            "notify_sms": False,
-            "notify_email": False,
-            "notify_whatsapp": False,
-            "notify_siren": False,
-            "notes": "Test event"
-        }
-        
-        response = self.client.post(
-            "/api/mustering/events/start/",
-            json=event_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert "event_id" in data["data"]
-        
-        # Store event ID for subsequent tests
-        self.event_id = data["data"]["event_id"]
-    
-    def test_start_event_invalid_zone(self):
-        """Test event start with invalid zone"""
-        event_data = {
-            "zone_id": 99999,  # Non-existent zone
-            "event_type": 1
-        }
-        
-        response = self.client.post(
-            "/api/mustering/events/start/",
-            json=event_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 404
-    
-    def test_get_event_headcount(self):
-        """Test getting event headcount"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        response = self.client.get(
-            f"/api/mustering/events/{self.event_id}/headcount/",
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert "total_expected" in data["data"]
-        assert "total_safe" in data["data"]
-        assert "total_missing" in data["data"]
-        assert "completion_percentage" in data["data"]
-    
-    def test_get_event_logs(self):
-        """Test getting event logs"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        response = self.client.get(
-            f"/api/mustering/events/{self.event_id}/logs/",
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert "logs" in data["data"]
-        assert isinstance(data["data"]["logs"], list)
-    
-    def test_mark_person_safe(self):
-        """Test marking person as safe"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        mark_data = {
-            "emp_code": "TEST001",
-            "status": 1  # Safe
-        }
-        
-        response = self.client.post(
-            f"/api/mustering/events/{self.event_id}/mark/",
-            json=mark_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-    
-    def test_end_mustering_event(self):
-        """Test ending mustering event"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        end_data = {
-            "reason": "Test completed"
-        }
-        
-        response = self.client.post(
-            f"/api/mustering/events/{self.event_id}/end/",
-            json=end_data,
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert "duration" in data["data"]
-        assert "final_headcount" in data["data"]
-    
-    def test_list_zones(self):
-        """Test listing zones"""
-        response = self.client.get(
-            "/api/mustering/zones/",
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert isinstance(data["data"], list)
-        
-        # Check if our test zone is in the list
-        zone_ids = [zone["id"] for zone in data["data"]]
-        assert self.test_zone.id in zone_ids
-    
-    def test_list_events(self):
-        """Test listing events"""
-        response = self.client.get(
-            "/api/mustering/events/",
-            headers={"Authorization": "Bearer test-token"}
-        )
-        
-        assert response.status_code == 200
-        data = response.json()
-        assert data["success"] == True
-        assert isinstance(data["data"], list)
-    
-    def test_unauthorized_access(self):
-        """Test unauthorized access"""
-        response = self.client.get(
-            "/api/mustering/zones/"
-            # No authorization header
-        )
-        
-        assert response.status_code == 401
+def _zone(db, name, zone_type="WORK_AREA"):
+    zid = db.execute(text("""
+        INSERT INTO zones (name, code, zone_type, status) VALUES (:n, :c, :t, 'active') RETURNING id
+    """), {"n": name, "c": uuid.uuid4().hex[:10].upper(), "t": zone_type}).scalar()
+    db.commit()
+    return zid
 
-class TestMusteringService:
-    """Test suite for mustering service layer"""
-    
-    def setup_method(self):
-        """Setup test database"""
-        self.db = SessionLocal()
-        
-        # Create test zone
-        self.test_zone = MusteringZone(
-            name="Test Zone",
-            capacity=100,
-            evac_point="Test Assembly Point",
-            zone_type=0,
-            area_id=1
-        )
-        self.db.add(self.test_zone)
-        self.db.commit()
-        self.db.refresh(self.test_zone)
-        
-        # Create test employee
-        self.test_employee = PersonnelEmployee(
-            emp_code="TEST001",
-            name="Test Employee",
-            dept_id=1,
-            status=0
-        )
-        self.db.add(self.test_employee)
-        self.db.commit()
-        self.db.refresh(self.test_employee)
-    
-    def teardown_method(self):
-        """Cleanup test database"""
-        self.db.close()
-    
-    def test_start_mustering_event(self):
-        """Test mustering service start event"""
-        from app.services.mustering_service import MusteringService
-        
-        service = MusteringService(self.db)
-        
-        result = service.start_mustering_event(
-            zone_id=self.test_zone.id,
-            event_type=1,  # Drill
-            initiated_by=1,
-            notify_sms=False,
-            notify_email=False,
-            notify_whatsapp=False,
-            notify_siren=False,
-            notes="Test event"
-        )
-        
-        assert "event_id" in result
-        assert result["total_expected"] >= 0
-        assert result["status"] == "started"
-        
-        # Store event ID for subsequent tests
-        self.event_id = result["event_id"]
-    
-    def test_get_event_headcount(self):
-        """Test getting event headcount"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        from app.services.mustering_service import MusteringService
-        service = MusteringService(self.db)
-        
-        headcount = service.get_event_headcount(self.event_id)
-        
-        assert "event_id" in headcount
-        assert "total_expected" in headcount
-        assert "total_safe" in headcount
-        assert "total_missing" in headcount
-        assert "completion_percentage" in headcount
-    
-    def test_mark_person_status(self):
-        """Test marking person status"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        from app.services.mustering_service import MusteringService
-        service = MusteringService(self.db)
-        
-        result = service.mark_person_status(
-            event_id=self.event_id,
-            emp_code="TEST001",
-            status=1,  # Safe
-            marked_by=1
-        )
-        
-        assert "event_id" in result
-        assert result["emp_code"] == "TEST001"
-        assert result["new_status"] == 1
-        assert result["marked_by"] == 1
-    
-    def test_end_mustering_event(self):
-        """Test ending mustering event"""
-        if not hasattr(self, 'event_id'):
-            pytest.skip("No event ID available")
-        
-        from app.services.mustering_service import MusteringService
-        service = MusteringService(self.db)
-        
-        result = service.end_mustering_event(
-            event_id=self.event_id,
-            ended_by=1,
-            reason="Test completed"
-        )
-        
-        assert "event_id" in result
-        assert result["status"] == "completed"
-        assert "duration" in result
-        assert "final_headcount" in result
-    
-    def test_process_mustering_punch(self):
-        """Test processing mustering punch"""
-        from app.services.mustering_service import MusteringService
-        
-        # First, start an event
-        service = MusteringService(self.db)
-        event_result = service.start_mustering_event(
-            zone_id=self.test_zone.id,
-            event_type=1,
-            initiated_by=1,
-            notify_sms=False,
-            notify_email=False,
-            notify_whatsapp=False,
-            notify_siren=False,
-            notes="Punch test"
-        )
-        event_id = event_result["event_id"]
-        
-        # Process a punch
-        punch_result = service.process_mustering_punch(
-            emp_code="TEST001",
-            device_sn="TEST001",
-            check_time=datetime.utcnow()
-        )
-        
-        assert "event_id" in punch_result
-        assert punch_result["emp_code"] == "TEST001"
-        assert punch_result["status"] == "safe"
-        
-        # Check that headcount updated
-        updated_headcount = service.get_event_headcount(event_id)
-        assert updated_headcount["total_safe"] > 0
 
-class TestMusteringIntegration:
-    """Integration tests for mustering system"""
-    
-    def setup_method(self):
-        """Setup integration test"""
-        self.db = SessionLocal()
-        
-        # Create test zone
-        self.test_zone = MusteringZone(
-            name="Integration Test Zone",
-            capacity=50,
-            evac_point="Integration Assembly Point",
-            zone_type=0,
-            area_id=1
-        )
-        self.db.add(self.test_zone)
-        self.db.commit()
-        self.db.refresh(self.test_zone)
-    
-    def teardown_method(self):
-        """Cleanup integration test"""
-        self.db.close()
-    
-    def test_complete_mustering_workflow(self):
-        """Test complete mustering workflow"""
-        from app.services.mustering_service import MusteringService
-        
-        service = MusteringService(self.db)
-        
-        # 1. Start event
-        event_result = service.start_mustering_event(
-            zone_id=self.test_zone.id,
-            event_type=1,  # Drill
-            initiated_by=1,
-            notify_sms=False,
-            notify_email=False,
-            notify_whatsapp=False,
-            notify_siren=False,
-            notes="Integration test"
-        )
-        event_id = event_result["event_id"]
-        
-        # 2. Get initial headcount
-        initial_headcount = service.get_event_headcount(event_id)
-        assert initial_headcount["total_missing"] > 0
-        assert initial_headcount["total_safe"] == 0
-        
-        # 3. Process multiple punches
-        test_employees = ["TEST001", "TEST002", "TEST003"]
-        for i, emp_code in enumerate(test_employees):
-            service.process_mustering_punch(
-                emp_code=emp_code,
-                device_sn=f"TEST{i:03d}",
-                check_time=datetime.utcnow()
-            )
-        
-        # 4. Get updated headcount
-        updated_headcount = service.get_event_headcount(event_id)
-        assert updated_headcount["total_safe"] == len(test_employees)
-        assert updated_headcount["total_missing"] == 0
-        
-        # 5. Mark one person as injured
-        service.mark_person_status(
-            event_id=event_id,
-            emp_code="TEST001",
-            status=2,  # Injured
-            marked_by=1
-        )
-        
-        # 6. Get final headcount
-        final_headcount = service.get_event_headcount(event_id)
-        assert final_headcount["total_safe"] == 2
-        assert final_headcount["total_injured"] == 1
-        
-        # 7. End event
-        end_result = service.end_mustering_event(
-            event_id=event_id,
-            ended_by=1,
-            reason="Integration test completed"
-        )
-        
-        assert end_result["status"] == "completed"
-        assert end_result["final_headcount"]["total_safe"] == 2
-        assert end_result["final_headcount"]["total_injured"] == 1
+def _person(db, zone_id=None, onboard=True):
+    code = "M" + uuid.uuid4().hex[:8].upper()
+    pin = str(uuid.uuid4().int)[:8]
+    db.execute(text("""
+        INSERT INTO personnel (emp_code, first_name, last_name, is_active, is_onboard, is_pob,
+                               current_zone_id, attendance_id, status)
+        VALUES (:c, 'Muster', :c, TRUE, :ob, :ob, :z, :pin, 'ACTIVE')
+    """), {"c": code, "ob": onboard, "z": zone_id, "pin": pin})
+    db.commit()
+    return {"emp_code": code, "pin": pin}
 
-if __name__ == "__main__":
-    # Run tests directly
-    pytest.main([__file__, "-v"])
+
+def _muster_reader(db, zone_id):
+    sn = "MSTR" + uuid.uuid4().hex[:8].upper()
+    db.execute(text("""
+        INSERT INTO iclock_terminal (sn, alias, state, reader_purpose, zone_id)
+        VALUES (:sn, 'Muster reader', 1, 'MUSTERING', :z)
+    """), {"sn": sn, "z": zone_id})
+    db.commit()
+    return sn
+
+
+def _status(db, event_id, emp_code):
+    return db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                      {"e": event_id, "c": emp_code}).scalar()
+
+
+@pytest.fixture
+def site(db_session):
+    """A work zone with one person in it, one on board elsewhere, one off site,
+    and a muster point with its reader. Any event left active is ended afterwards."""
+    db = db_session
+    work = _zone(db, "Deck " + uuid.uuid4().hex[:4])
+    other = _zone(db, "Galley " + uuid.uuid4().hex[:4])
+    muster = _zone(db, "Muster " + uuid.uuid4().hex[:4], "MUSTER_POINT")
+    s = {
+        "db": db, "work": work, "other": other, "muster": muster,
+        "in_zone": _person(db, work), "elsewhere": _person(db, other), "ashore": _person(db, None, onboard=False),
+        "reader": _muster_reader(db, muster),
+    }
+    yield s
+    db.execute(text("UPDATE mustering_event SET status = 1, end_time = now() WHERE status = 0"))
+    db.commit()
+
+
+def _start(site, zones=None):
+    from app.services.mustering_service import MusteringService
+    r = MusteringService(site["db"]).start_mustering_event(
+        zone_ids=zones or [site["work"]], event_type=1, initiated_by=1, muster_zone_ids=[site["muster"]])
+    return r["event_id"]
+
+
+def test_expected_roster_is_people_in_the_affected_zone(site):
+    ev = _start(site)
+    db = site["db"]
+    assert _status(db, ev, site["in_zone"]["emp_code"]) == 0          # expected, not yet safe
+    assert _status(db, ev, site["elsewhere"]["emp_code"]) is None      # different zone
+    assert _status(db, ev, site["ashore"]["emp_code"]) is None         # off site
+
+
+def test_scan_at_muster_reader_marks_person_safe(site):
+    """The real reader path: a tap on a MUSTERING-purpose reader at the muster point."""
+    from app.api.adms_protocol import handle_attlog
+    from app.services.mustering_service import MusteringService
+    ev = _start(site)
+    db = site["db"]
+    t = (datetime.now(timezone.utc) - timedelta(seconds=30)).strftime("%Y-%m-%d %H:%M:%S")
+    handle_attlog([{"PIN": site["in_zone"]["pin"], "Time": t, "Status": "0"}], site["reader"], db)
+    assert _status(db, ev, site["in_zone"]["emp_code"]) == 1
+    hc = MusteringService(db).get_event_headcount(ev)
+    assert (hc["total_safe"], hc["total_missing"]) == (1, 0)
+
+
+def test_missing_person_reported_with_last_known_zone(site):
+    from app.services.mustering_service import MusteringService
+    ev = _start(site)
+    missing = MusteringService(site["db"]).get_event_logs(ev, status=0)
+    row = next(m for m in missing if m["emp_code"] == site["in_zone"]["emp_code"])
+    assert row.get("last_known_zone_id") == site["work"]          # where rescue should look
+
+
+def test_fallback_roster_is_everyone_on_board_when_nobody_is_located(site):
+    """A zone with nobody tracked in it must not produce an EMPTY muster."""
+    empty = _zone(site["db"], "Empty " + uuid.uuid4().hex[:4])
+    ev = _start(site, zones=[empty])
+    db = site["db"]
+    assert _status(db, ev, site["elsewhere"]["emp_code"]) == 0     # on board -> expected
+    assert _status(db, ev, site["ashore"]["emp_code"]) is None      # off site -> not expected
+
+
+def test_manual_mark_and_end_event(site):
+    from app.services.mustering_service import MusteringService
+    svc = MusteringService(site["db"])
+    ev = _start(site)
+    svc.mark_person_status(ev, site["in_zone"]["emp_code"], status=1, marked_by=1)
+    assert _status(site["db"], ev, site["in_zone"]["emp_code"]) == 1
+    svc.end_mustering_event(ev, ended_by=1, reason="drill complete")
+    assert site["db"].execute(text("SELECT status FROM mustering_event WHERE id = :e"), {"e": ev}).scalar() != 0
+
+
+def test_api_start_headcount_missing_and_end(site, superuser_headers):
+    client = TestClient(app, headers=superuser_headers)
+    r = client.post("/api/mustering/events/start",
+                    json={"zone_ids": [site["work"]], "muster_zone_ids": [site["muster"]], "event_type": 1})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    ev = (body.get("data") or body)["event_id"]
+    hc = client.get(f"/api/mustering/events/{ev}/headcount/")
+    assert hc.status_code == 200, hc.text
+    missing = client.get(f"/api/mustering/events/{ev}/missing-persons/")
+    assert missing.status_code == 200, missing.text
+    assert site["in_zone"]["emp_code"] in missing.text
+    end = client.post(f"/api/mustering/events/{ev}/end", json={"reason": "test"})
+    assert end.status_code == 200, end.text
+
+
+def test_api_requires_login():
+    r = TestClient(app).post("/api/mustering/events/start", json={"zone_ids": [1], "event_type": 1})
+    assert r.status_code == 401

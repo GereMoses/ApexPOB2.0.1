@@ -83,7 +83,7 @@ docker exec -i pob_postgres pg_restore -U pob_user -d pob_system --clean --if-ex
 - [ ] Validate Business Central + SeamlessHR against vendor sandboxes (`docs/INTEGRATIONS.md`)
 - [ ] Confirm backup destination + test restore
 - [ ] Configure Alertmanager recipients
-- [ ] Run the **go-live safety suite** on the release build: `./scripts/run_safety_tests.sh` (must be 16 passed; uses a throwaway database). The older suite in `backend/tests/*.py` is largely out of date (≈37 failures / 22 errors predating Oct 2026) and needs its own repair.
+- [ ] Run the **full test suite** on the release build: `./scripts/run_tests.sh` (expected: 173 passed, 1 skipped). `./scripts/run_safety_tests.sh` runs just the 16 go-live safety tests. Both use a throwaway database and a throwaway container — never the live data — and the suite **refuses to run** against any database whose name lacks "test".
 - [ ] **Renew the licence** (expired 2026-08-31 — unauthenticated requests get 402)
 - [ ] Complete §10 (SeamlessHR → Marconi switch-over) and §11 (site setup)
 

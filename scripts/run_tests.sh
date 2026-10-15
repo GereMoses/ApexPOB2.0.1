@@ -24,7 +24,9 @@ trap cleanup EXIT
 
 docker exec pob_backend env | grep -v -E '^(PATH|HOSTNAME|HOME|PWD|SHLVL|_)=' > "$ENVF"
 URL=$(docker exec pob_backend sh -c 'echo $DATABASE_URL' | sed -E "s#/[^/?]+(\?|\$)#/$DB\1#")
-NET=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' pob_backend | awk '{print $1}')
+# Join the DATABASE's network (the backend is on several; the first one listed is not
+# necessarily the one that can reach postgres).
+NET=$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}' pob_postgres | awk '{print $1}')
 IMG=$(docker inspect -f '{{.Config.Image}}' pob_backend)
 
 docker run --rm --network "$NET" --env-file "$ENVF" -e TEST_DATABASE_URL="$URL" -e DATABASE_URL="$URL" \

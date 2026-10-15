@@ -383,3 +383,44 @@ WHERE NOT EXISTS (SELECT 1 FROM public.auth_role_permission x
 ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_movement varchar(10) DEFAULT 'NONE';
 ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_applied_ids jsonb;
 ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_applied_at timestamptz;
+
+-- ── personnel -> personnel_employee mirror: keep the id sequence in step ──────────
+-- The trigger copies personnel.id as an EXPLICIT id, which never advances
+-- personnel_employee_id_seq. The next direct insert (reader USERINFO import, bulk
+-- import, BioTime sync) then drew an id already in use -> duplicate key. And if the
+-- mirror already had that id for a different person, the personnel insert itself
+-- failed (a SeamlessHR pull would skip that employee). Now: explicit id when it is
+-- free (and the sequence is advanced past it), otherwise a fresh sequence id.
+CREATE OR REPLACE FUNCTION public.sync_personnel_to_employee()
+ RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  IF (TG_OP = 'DELETE') THEN
+    DELETE FROM personnel_employee WHERE emp_code = OLD.emp_code;
+    RETURN OLD;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM personnel_employee WHERE id = NEW.id AND emp_code <> NEW.emp_code) THEN
+    INSERT INTO personnel_employee (emp_code, first_name, last_name, status, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.emp_code, NEW.first_name, NEW.last_name,
+            CASE WHEN NEW.status::text IN ('active','ACTIVE','onshore','offshore','transit','on_leave') THEN 0 ELSE 1 END,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+      status = EXCLUDED.status, card_no = EXCLUDED.card_no, updated_at = NOW();
+  ELSE
+    INSERT INTO personnel_employee (id, emp_code, first_name, last_name, status, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.id, NEW.emp_code, NEW.first_name, NEW.last_name,
+            CASE WHEN NEW.status::text IN ('active','ACTIVE','onshore','offshore','transit','on_leave') THEN 0 ELSE 1 END,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name,
+      status = EXCLUDED.status, card_no = EXCLUDED.card_no, updated_at = NOW();
+    PERFORM setval('public.personnel_employee_id_seq',
+                   GREATEST((SELECT last_value FROM public.personnel_employee_id_seq), NEW.id));
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+SELECT setval('public.personnel_employee_id_seq',
+              GREATEST((SELECT COALESCE(MAX(id), 1) FROM public.personnel_employee),
+                       (SELECT last_value FROM public.personnel_employee_id_seq)));
