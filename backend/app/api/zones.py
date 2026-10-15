@@ -246,17 +246,18 @@ def _live_zone_occupancy(db: Session):
     add them (see _muster_occupancy_context). Returns (counts, safe_by_zone, active)."""
     safe_codes, safe_by_zone, muster_active = _muster_occupancy_context(db)
     _exclude_safe = "AND latest.emp_code <> ALL(:safe_codes)" if safe_codes else ""
+    # Source of truth = personnel.current_zone_id, maintained by every door / zone
+    # reader tap (_handle_zone_access) and read by mustering for "last known zone".
+    # The previous source — "last attendance punch is a check-in at a zoned reader" —
+    # never counted F18 taps (stamped Check-Out), ignored exits to the parent zone and
+    # boundary exits, and could disagree with what a muster reported.
+    _exclude_safe = "AND p.emp_code <> ALL(:safe_codes)" if safe_codes else ""
     rows = db.execute(text(f"""
-        SELECT term.zone_id, COUNT(DISTINCT latest.emp_code) AS cnt
-        FROM (
-            SELECT DISTINCT ON (t.emp_code) t.emp_code, t.punch_state, t.terminal_sn
-            FROM iclock_transaction t
-            ORDER BY t.emp_code, t.punch_time DESC
-        ) latest
-        JOIN iclock_terminal term ON term.sn = latest.terminal_sn
-        WHERE latest.punch_state IN (0, 4) AND term.zone_id IS NOT NULL
+        SELECT p.current_zone_id AS zone_id, COUNT(*) AS cnt
+        FROM personnel p
+        WHERE p.current_zone_id IS NOT NULL AND p.is_active = TRUE
           {_exclude_safe}
-        GROUP BY term.zone_id
+        GROUP BY p.current_zone_id
     """), ({"safe_codes": list(safe_codes)} if safe_codes else {})).fetchall()
     counts = {r.zone_id: r.cnt for r in rows}
     for zid, cnt in safe_by_zone.items():     # move Safe people to the muster zone
@@ -276,12 +277,11 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     # Last activity per zone (most recent punch on any terminal in that zone)
     last_activity_map = {}
     for row in db.execute(text("""
-        SELECT term.zone_id, MAX(t.punch_time) AS last_punch,
-               (array_agg(t.emp_code ORDER BY t.punch_time DESC))[1] AS last_emp
-        FROM iclock_transaction t
-        JOIN iclock_terminal term ON term.sn = t.terminal_sn
-        WHERE term.zone_id IS NOT NULL
-        GROUP BY term.zone_id
+        SELECT zone_id, MAX(punch_time) AS last_punch,
+               (array_agg(emp_code ORDER BY punch_time DESC))[1] AS last_emp
+        FROM zone_personnel_tracking
+        WHERE punch_time > NOW() - INTERVAL '30 days'
+        GROUP BY zone_id
     """)).fetchall():
         last_activity_map[row.zone_id] = (row.last_emp, row.last_punch)
 
@@ -317,6 +317,60 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     # here — a GET must not mutate the DB (avoids lock contention with live punches
     # and the dual-writer conflict with _recalc).
     return result
+
+
+@router.get("/map-live")
+def get_map_live(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Everything the GPS map needs in one call: every zone (with or without GPS)
+    and WHO is in it right now, plus on-board people whose zone is unknown — so no
+    one on board is ever invisible on the map screen."""
+    zones = {z.id: z for z in db.query(Zone).all()}
+    people = db.execute(text("""
+        SELECT p.emp_code, p.full_name, p.first_name, p.last_name, p.department,
+               p.position, p.photo_url, p.current_zone_id, p.is_onboard, p.last_seen,
+               (SELECT MAX(t.punch_time) FROM zone_personnel_tracking t
+                 WHERE t.emp_code = p.emp_code AND t.zone_id = p.current_zone_id
+                   AND t.event_type = 'CLOCK_IN') AS in_zone_since
+        FROM personnel p
+        WHERE p.is_active = TRUE AND (p.current_zone_id IS NOT NULL OR p.is_onboard = TRUE)
+        ORDER BY p.full_name NULLS LAST, p.emp_code
+    """)).fetchall()
+
+    def _person(r):
+        return {
+            "emp_code": r.emp_code,
+            "name": (r.full_name or f"{r.first_name or ''} {r.last_name or ''}").strip() or r.emp_code,
+            "department": r.department,
+            "position": r.position,
+            "photo_url": r.photo_url,
+            "in_zone_since": r.in_zone_since.isoformat() if r.in_zone_since else None,
+            "last_seen": r.last_seen.isoformat() if r.last_seen else None,
+        }
+
+    by_zone: dict = {}
+    unlocated = []
+    for r in people:
+        if r.current_zone_id and r.current_zone_id in zones:
+            by_zone.setdefault(r.current_zone_id, []).append(_person(r))
+        else:
+            unlocated.append(_person(r))
+
+    out = []
+    for zid, z in zones.items():
+        d = _to_dict(z, db)
+        d["personnel"] = by_zone.get(zid, [])
+        d["current_personnel_count"] = len(d["personnel"])
+        d["has_gps"] = z.latitude is not None and z.longitude is not None
+        out.append(d)
+    out.sort(key=lambda d: (-d["current_personnel_count"], d["name"]))
+    onboard_total = sum(1 for r in people if r.is_onboard)
+    return {
+        "zones": out,
+        "unlocated": unlocated,
+        "onboard_total": onboard_total,
+        "located_total": sum(len(v) for v in by_zone.values()),
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+    }
 
 
 @router.get("/available-devices")

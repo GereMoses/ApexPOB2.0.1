@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap, ZoomControl } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, useMap, useMapEvents, ZoomControl } from 'react-leaflet';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import apiService from '../../services/api';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { Input, Space, Empty, Tooltip } from 'antd';
+import { Input, Space, Empty, Tooltip, App } from 'antd';
 import {
   SearchOutlined, EnvironmentOutlined, ApiOutlined,
   FullscreenOutlined, FullscreenExitOutlined,
@@ -177,6 +179,56 @@ const MapController = ({ zone, allZones }) => {
   return null;
 };
 
+/* ── People list (who is in a zone right now) ─────────────────────────────── */
+const fmtSince = (iso) => {
+  if (!iso) return '';
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  return h < 24 ? `${h}h ${mins % 60}m` : `${Math.floor(h / 24)}d ${h % 24}h`;
+};
+
+const PeopleList = ({ people, dark, highlight, limit }) => {
+  const list = limit ? people.slice(0, limit) : people;
+  const q = (highlight || '').toLowerCase();
+  if (!people.length) {
+    return <div style={{ fontSize: 11, color: dark ? '#475569' : '#9CA3AF', padding: '4px 0' }}>Nobody here right now</div>;
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+      {list.map(p => {
+        const hit = q && (p.name.toLowerCase().includes(q) || p.emp_code.toLowerCase().includes(q));
+        return (
+          <div key={p.emp_code} style={{
+            display: 'flex', justifyContent: 'space-between', gap: 6, fontSize: 11,
+            padding: '3px 6px', borderRadius: 5,
+            background: hit ? (dark ? 'rgba(250,204,21,0.18)' : '#FEF9C3') : 'transparent',
+          }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: dark ? '#E2E8F0' : '#111827', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</div>
+              <div style={{ color: dark ? '#64748B' : '#6B7280', fontSize: 10, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {p.emp_code}{p.department ? ` · ${p.department}` : ''}
+              </div>
+            </div>
+            <div style={{ color: dark ? '#64748B' : '#9CA3AF', fontSize: 10, flexShrink: 0 }}>
+              {fmtSince(p.in_zone_since || p.last_seen)}
+            </div>
+          </div>
+        );
+      })}
+      {limit && people.length > limit && (
+        <div style={{ fontSize: 10.5, color: dark ? '#64748B' : '#6B7280', paddingLeft: 6 }}>+{people.length - limit} more — select the zone for the full list</div>
+      )}
+    </div>
+  );
+};
+
+/* ── Map click → place a zone ─────────────────────────────────────────────── */
+const PlaceOnClick = ({ active, onPlace }) => {
+  useMapEvents({ click: (e) => { if (active) onPlace(e.latlng); } });
+  return null;
+};
+
 /* ── Rich popup ───────────────────────────────────────────────────────────── */
 const ZonePopup = ({ zone }) => {
   const color = zoneColor(zone);
@@ -245,6 +297,10 @@ const ZonePopup = ({ zone }) => {
         )}
       </div>
 
+      <div style={{ borderTop: '1px solid #F3F4F6', marginTop: 10, paddingTop: 8, maxHeight: 180, overflowY: 'auto' }}>
+        <PeopleList people={zone.personnel || []} limit={8} />
+      </div>
+
       <div style={{ borderTop: '1px solid #F3F4F6', marginTop: 10, paddingTop: 8 }}>
         <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
           style={{ fontSize: 11, color: '#0078D4', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -298,6 +354,7 @@ const SidebarCard = ({ zone, isSelected, onClick }) => {
         <div style={{ fontSize: 10.5, color: '#64748B', marginTop: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{ color: '#64748B', fontFamily: 'monospace' }}>{zone.code}</span>
           {zone.state && <span style={{ color: '#475569' }}>· {zone.state}</span>}
+          {!zone.has_gps && !zone.virtual && <span style={{ color: '#F59E0B', fontWeight: 700 }}>· not on map</span>}
         </div>
       </div>
 
@@ -308,7 +365,7 @@ const SidebarCard = ({ zone, isSelected, onClick }) => {
 };
 
 /* ── Selected zone info panel (sidebar bottom) ────────────────────────────── */
-const SelectedPanel = ({ zone, onClose }) => {
+const SelectedPanel = ({ zone, onClose, onPlace, placing, highlight }) => {
   if (!zone) return null;
   const color = zoneColor(zone);
   const count = zone.current_personnel_count ?? 0;
@@ -364,27 +421,62 @@ const SelectedPanel = ({ zone, onClose }) => {
           </div>
         )}
 
-        {/* OSM link */}
-        <a
-          href={`https://www.openstreetmap.org/?mlat=${zone.latitude}&mlon=${zone.longitude}#map=14/${zone.latitude}/${zone.longitude}`}
-          target="_blank" rel="noopener noreferrer"
-          style={{ fontSize: 11, color: '#38BDF8', display: 'flex', alignItems: 'center', gap: 4 }}
-        >
-          <EnvironmentOutlined style={{ fontSize: 11 }} />
-          {parseFloat(zone.latitude).toFixed(4)}°N, {parseFloat(zone.longitude).toFixed(4)}°E · Open Map ↗
-        </a>
+        {/* Who is here */}
+        <div style={{ maxHeight: 220, overflowY: 'auto' }} className="map-sidebar-scroll">
+          <PeopleList people={zone.personnel || []} dark highlight={highlight} />
+        </div>
+
+        {/* Location */}
+        {zone.has_gps ? (
+          <a
+            href={`https://www.openstreetmap.org/?mlat=${zone.latitude}&mlon=${zone.longitude}#map=14/${zone.latitude}/${zone.longitude}`}
+            target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 11, color: '#38BDF8', display: 'flex', alignItems: 'center', gap: 4 }}
+          >
+            <EnvironmentOutlined style={{ fontSize: 11 }} />
+            {parseFloat(zone.latitude).toFixed(4)}°N, {parseFloat(zone.longitude).toFixed(4)}°E · Open Map ↗
+          </a>
+        ) : null}
+        {!zone.virtual && (
+          <button onClick={onPlace} style={{
+            all: 'unset', cursor: 'pointer', textAlign: 'center', fontSize: 11.5, fontWeight: 700,
+            padding: '6px 8px', borderRadius: 6,
+            background: placing ? '#F59E0B' : 'rgba(56,189,248,0.15)',
+            color: placing ? '#111827' : '#38BDF8', border: '1px solid rgba(56,189,248,0.35)',
+          }}>
+            {placing ? 'Click on the map to place this zone… (click here to cancel)'
+              : zone.has_gps ? 'Move on map' : 'Place on map'}
+          </button>
+        )}
       </div>
     </div>
   );
 };
 
 /* ── Main ZoneMapView ─────────────────────────────────────────────────────── */
-const ZoneMapView = ({ zones }) => {
+const UNLOCATED_ID = 'unlocated';
+
+const ZoneMapView = ({ zones: zonesProp = [] }) => {
+  const { message } = App.useApp();
+  const qc = useQueryClient();
   const [selectedId,  setSelectedId]  = useState(null);
   const [search,      setSearch]      = useState('');
   const [tileKey,     setTileKey]     = useState('light');
   const [isFullscreen,setIsFullscreen]= useState(false);
+  const [placingId,   setPlacingId]   = useState(null);
   const containerRef = useRef(null);
+
+  // Live feed: zones + WHO is in each + on-board people with no known zone.
+  const { data: live } = useQuery({
+    queryKey: ['zones-map-live'],
+    queryFn:  () => apiService.get('/api/v1/zones/map-live'),
+    refetchInterval: 5000,
+  });
+  const zones = useMemo(() => {
+    const list = live?.zones || zonesProp.map(z => ({ ...z, personnel: [], has_gps: !!(z.latitude && z.longitude) }));
+    return list.map(z => ({ ...z, has_gps: z.has_gps && !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude)) }));
+  }, [live, zonesProp]);
+  const unlocated = live?.unlocated || [];
 
   useEffect(() => {
     const onChange = () => setIsFullscreen(!!document.fullscreenElement);
@@ -397,48 +489,49 @@ const ZoneMapView = ({ zones }) => {
     else document.exitFullscreen();
   };
 
-  const geoZones = useMemo(
-    () => zones.filter(z => z.latitude && z.longitude && !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude))),
-    [zones]
-  );
-  const noGeoCount   = zones.length - geoZones.length;
-  const totalPOB     = useMemo(() => zones.reduce((s, z) => s + (z.current_personnel_count ?? 0), 0), [zones]);
-  const activeCount  = useMemo(() => geoZones.filter(z => z.status === 'ACTIVE').length, [geoZones]);
-  const alertCount   = useMemo(() => geoZones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length, [geoZones]);
-  const selectedZone = useMemo(() => geoZones.find(z => z.id === selectedId) || null, [geoZones, selectedId]);
+  const geoZones     = useMemo(() => zones.filter(z => z.has_gps), [zones]);
+  const totalPOB     = live?.onboard_total ?? zones.reduce((s, z) => s + (z.current_personnel_count ?? 0), 0);
+  const located      = live?.located_total ?? 0;
+  const alertCount   = useMemo(() => zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length, [zones]);
 
+  const unlocatedZone = useMemo(() => ({
+    id: UNLOCATED_ID, virtual: true, name: 'On board — location unknown', code: 'NO ZONE',
+    zone_type: 'OUTSIDE', hazard_level: 'LOW', display_color: '#94A3B8',
+    personnel: unlocated, current_personnel_count: unlocated.length, has_gps: false,
+  }), [unlocated]);
+
+  const selectedZone = useMemo(
+    () => selectedId === UNLOCATED_ID ? unlocatedZone : (zones.find(z => z.id === selectedId) || null),
+    [zones, selectedId, unlocatedZone]);
+
+  // Search matches zone names/codes AND people (name / employee code) inside zones.
+  const q = search.trim().toLowerCase();
+  const personHit = (p) => p.name.toLowerCase().includes(q) || p.emp_code.toLowerCase().includes(q);
   const filtered = useMemo(() => {
-    const q = search.toLowerCase();
-    return geoZones.filter(z =>
-      z.name.toLowerCase().includes(q) ||
-      (z.state || '').toLowerCase().includes(q) ||
-      z.code.toLowerCase().includes(q)
-    );
-  }, [geoZones, search]);
+    if (!q) return zones;
+    return zones.filter(z =>
+      z.name.toLowerCase().includes(q) || (z.state || '').toLowerCase().includes(q) ||
+      z.code.toLowerCase().includes(q) || (z.personnel || []).some(personHit));
+  }, [zones, q]); // eslint-disable-line
+  const showUnlocated = unlocated.length > 0 && (!q || unlocated.some(personHit) || 'location unknown'.includes(q));
+
+  const placeZone = async ({ lat, lng }) => {
+    const id = placingId;
+    setPlacingId(null);
+    try {
+      await apiService.put(`/api/v1/zones/${id}/`, {
+        latitude: Number(lat.toFixed(6)), longitude: Number(lng.toFixed(6)),
+      });
+      message.success('Zone placed on the map');
+      qc.invalidateQueries({ queryKey: ['zones-map-live'] });
+      qc.invalidateQueries({ queryKey: ['zones-dashboard'] });
+    } catch (e) {
+      message.error(e?.response?.data?.detail || e?.message || 'Could not save the location');
+    }
+  };
 
   const tile = TILE_LAYERS[tileKey];
   const isDark = tileKey === 'dark' || tileKey === 'satellite';
-
-  if (geoZones.length === 0) {
-    return (
-      <div style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-        minHeight: 400, padding: 48, background: '#F8FAFC', borderRadius: 14,
-        border: '2px dashed #E5E7EB',
-      }}>
-        <div style={{
-          width: 72, height: 72, borderRadius: 18, marginBottom: 16,
-          background: 'linear-gradient(135deg,#E5E7EB,#F3F4F6)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontSize: 32, color: '#D1D5DB',
-        }}>🗺️</div>
-        <div style={{ fontWeight: 700, fontSize: 16, color: '#374151', marginBottom: 8 }}>No GPS coordinates</div>
-        <div style={{ fontSize: 13, color: '#9CA3AF', textAlign: 'center', maxWidth: 360 }}>
-          Add latitude and longitude when creating or editing a zone to see it on the map.
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div
@@ -470,9 +563,11 @@ const ZoneMapView = ({ zones }) => {
         }}>
           <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
             {[
-              { label: 'TOTAL POB',   value: totalPOB,      color: '#0078D4', bg: 'rgba(0,120,212,0.15)' },
-              { label: 'ON MAP',      value: geoZones.length,color: '#10B981', bg: 'rgba(16,185,129,0.12)' },
-              { label: alertCount > 0 ? 'ALERTS' : 'ACTIVE', value: alertCount > 0 ? alertCount : activeCount, color: alertCount > 0 ? '#EF4444' : '#10B981', bg: alertCount > 0 ? 'rgba(239,68,68,0.12)' : 'rgba(16,185,129,0.12)' },
+              { label: 'ON BOARD',    value: totalPOB,           color: '#0078D4', bg: 'rgba(0,120,212,0.15)' },
+              { label: 'IN A ZONE',   value: located,            color: '#10B981', bg: 'rgba(16,185,129,0.12)' },
+              alertCount > 0
+                ? { label: 'ALERTS', value: alertCount, color: '#EF4444', bg: 'rgba(239,68,68,0.12)' }
+                : { label: 'NO ZONE', value: unlocated.length, color: unlocated.length ? '#F59E0B' : '#64748B', bg: 'rgba(245,158,11,0.12)' },
             ].map(s => (
               <div key={s.label} style={{
                 flex: 1, background: s.bg, borderRadius: 8,
@@ -488,7 +583,7 @@ const ZoneMapView = ({ zones }) => {
           <Input
             size="small"
             prefix={<SearchOutlined style={{ color: '#475569' }} />}
-            placeholder="Search zones…"
+            placeholder="Search zone or person…"
             value={search}
             onChange={e => setSearch(e.target.value)}
             allowClear
@@ -501,9 +596,16 @@ const ZoneMapView = ({ zones }) => {
 
         {/* Zone list */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '8px 8px 6px' }} className="map-sidebar-scroll">
-          {filtered.length === 0 ? (
+          {showUnlocated && (
+            <SidebarCard
+              zone={unlocatedZone}
+              isSelected={selectedId === UNLOCATED_ID}
+              onClick={() => setSelectedId(prev => prev === UNLOCATED_ID ? null : UNLOCATED_ID)}
+            />
+          )}
+          {filtered.length === 0 && !showUnlocated ? (
             <div style={{ textAlign: 'center', padding: '24px 0', color: '#475569', fontSize: 12 }}>
-              No zones match
+              No zone or person matches
             </div>
           ) : (
             filtered.map(z => (
@@ -517,18 +619,14 @@ const ZoneMapView = ({ zones }) => {
           )}
         </div>
 
-        {/* No-GPS notice */}
-        {noGeoCount > 0 && (
-          <div style={{
-            padding: '6px 12px', borderTop: '1px solid rgba(255,255,255,0.06)',
-            fontSize: 10.5, color: '#475569', textAlign: 'center',
-          }}>
-            {noGeoCount} zone{noGeoCount !== 1 ? 's' : ''} hidden — no GPS
-          </div>
-        )}
-
         {/* Selected zone panel */}
-        <SelectedPanel zone={selectedZone} onClose={() => setSelectedId(null)} />
+        <SelectedPanel
+          zone={selectedZone}
+          highlight={q}
+          placing={!!placingId && placingId === selectedZone?.id}
+          onPlace={() => setPlacingId(p => (p === selectedZone?.id ? null : selectedZone?.id))}
+          onClose={() => { setSelectedId(null); setPlacingId(null); }}
+        />
       </div>
 
       {/* ══ Map ══ */}
@@ -536,12 +634,13 @@ const ZoneMapView = ({ zones }) => {
         <MapContainer
           center={[9.082, 8.675]}
           zoom={6}
-          style={{ width: '100%', height: '100%' }}
+          style={{ width: '100%', height: '100%', cursor: placingId ? 'crosshair' : undefined }}
           zoomControl={false}
         >
+          <PlaceOnClick active={!!placingId} onPlace={placeZone} />
           <TileLayer url={tile.url} attribution={tile.attribution} maxZoom={19} key={tileKey} />
           <ZoomControl position="bottomright" />
-          <MapController zone={selectedZone} allZones={geoZones} />
+          <MapController zone={selectedZone?.has_gps ? selectedZone : null} allZones={geoZones} />
 
           {geoZones.map(z => (
             <Marker
@@ -557,6 +656,19 @@ const ZoneMapView = ({ zones }) => {
             </Marker>
           ))}
         </MapContainer>
+
+        {(placingId || geoZones.length === 0) && (
+          <div style={{
+            position: 'absolute', top: 52, left: '50%', transform: 'translateX(-50%)', zIndex: 1000,
+            background: placingId ? '#F59E0B' : 'rgba(15,25,39,0.9)', color: placingId ? '#111827' : '#E2E8F0',
+            padding: '8px 14px', borderRadius: 8, fontSize: 12, fontWeight: 600,
+            boxShadow: '0 4px 16px rgba(0,0,0,0.3)', maxWidth: 460, textAlign: 'center',
+          }}>
+            {placingId
+              ? `Click on the map where "${zones.find(z => z.id === placingId)?.name}" is.`
+              : 'No zone has a map location yet. Select a zone on the left and press "Place on map", then click its spot on the map.'}
+          </div>
+        )}
 
         {/* ── Map layer switcher ── */}
         <div style={{
