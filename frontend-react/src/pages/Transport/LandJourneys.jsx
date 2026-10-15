@@ -66,6 +66,14 @@ export default function LandJourneys() {
   const [selected, setSelected] = useState(null);   // journey id for drawer
   const [paxOptions, setPaxOptions] = useState([]);  // staff search results
   const [paxStaff, setPaxStaff] = useState({});      // emp_code -> {name, emp_code}
+  const [driverOptions, setDriverOptions] = useState([]);
+  const searchDriver = async (q) => {
+    if (!q || q.length < 2) return;
+    try {
+      const res = await apiService.get('/api/v1/transport/personnel-search', { q });
+      setDriverOptions((Array.isArray(res) ? res : []).map(p => ({ value: p.id, label: `${p.name} (${p.emp_code})`, name: p.name })));
+    } catch (_) { /* best-effort */ }
+  };
 
   const searchPax = async (q) => {
     if (!q || q.length < 2) return;
@@ -137,10 +145,12 @@ export default function LandJourneys() {
     setEditingId(jj.id);
     const staff = Object.fromEntries((jj.passengers || []).filter(p => p.emp_code).map(p => [p.emp_code, p]));
     setPaxStaff(prev => ({ ...prev, ...staff }));
+    setDriverOptions(jj.driver_personnel_id ? [{ value: jj.driver_personnel_id, label: jj.driver_name || `Staff #${jj.driver_personnel_id}`, name: jj.driver_name }] : []);
     setPaxOptions((jj.passengers || []).filter(p => p.emp_code).map(p => ({ value: p.emp_code, label: `${p.name} (${p.emp_code})` })));
     createForm.setFieldsValue({
       origin: jj.origin, destination: jj.destination, distance_km: jj.distance_km, purpose: jj.purpose,
       driver_name: jj.driver_name, driver_license: jj.driver_license,
+      driver_personnel_id: jj.driver_personnel_id || undefined,
       vehicle_reg: jj.vehicle_reg, vehicle_type: jj.vehicle_type,
       planned_departure: jj.planned_departure ? dayjs(jj.planned_departure) : null,
       planned_arrival: jj.planned_arrival ? dayjs(jj.planned_arrival) : null,
@@ -256,7 +266,13 @@ export default function LandJourneys() {
             <Form.Item name="destination" label="Destination" rules={[{ required: true }]}><Input placeholder="Warri" /></Form.Item>
             <Form.Item name="distance_km" label="Distance (km)"><InputNumber min={0} style={{ width: '100%' }} placeholder="Auto-scores risk" /></Form.Item>
             <Form.Item name="purpose" label="Purpose"><Input placeholder="Crew change" /></Form.Item>
-            <Form.Item name="driver_name" label="Driver"><Input /></Form.Item>
+            <Form.Item name="driver_personnel_id" label="Driver (staff)"
+              tooltip="Pick the driver from staff so they are counted on POB when the trip crosses the site boundary. Leave empty for an external driver and just type the name below.">
+              <Select allowClear showSearch filterOption={false} onSearch={searchDriver} options={driverOptions}
+                placeholder="Search staff…"
+                onChange={(v, opt) => { if (v && opt?.name) createForm.setFieldValue('driver_name', opt.name); }} />
+            </Form.Item>
+            <Form.Item name="driver_name" label="Driver name"><Input /></Form.Item>
             <Form.Item name="driver_license" label="Driver license"><Input /></Form.Item>
             <Form.Item name="vehicle_reg" label="Vehicle reg."><Input placeholder="ABC-123-XY" /></Form.Item>
             <Form.Item name="vehicle_type" label="Vehicle type"><Input placeholder="Toyota Hilux" /></Form.Item>

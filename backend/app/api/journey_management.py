@@ -59,6 +59,7 @@ class JourneyUpdate(BaseModel):
     purpose: Optional[str] = None
     driver_name: Optional[str] = None
     driver_license: Optional[str] = None
+    driver_personnel_id: Optional[int] = None
     vehicle_reg: Optional[str] = None
     vehicle_type: Optional[str] = None
     passengers: Optional[List[Dict[str, Any]]] = None
