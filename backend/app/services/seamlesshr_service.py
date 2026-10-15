@@ -742,9 +742,22 @@ def _link_department(db: Session, person, unmatched: set) -> None:
     ), {"n": name}).fetchone()
     if row:
         person.department_id = row[0]
-    else:
-        person.department_id = None
-        unmatched.add(name)
+        return
+    # SeamlessHR is the master for the org structure, so its departments are created
+    # here rather than leaving every employee unlinked. A new department has no
+    # default shift of its own and uses the global default shift until an admin sets
+    # one — reported via `unmatched` so that is visible after the pull.
+    base = re.sub(r"[^A-Z0-9]", "", name.upper())[:16] or "DEPT"
+    code, n = base, 1
+    while db.execute(text("SELECT 1 FROM departments WHERE code = :c"), {"c": code}).fetchone():
+        n += 1
+        code = f"{base[:16]}{n}"
+    new_id = db.execute(text(
+        "INSERT INTO departments (name, code, description, is_active) "
+        "VALUES (:n, :c, 'Created from SeamlessHR', true) RETURNING id"
+    ), {"n": name[:100], "c": code}).scalar()
+    person.department_id = new_id
+    unmatched.add(name)
 
 
 # SeamlessHR's sandbox intermittently answers a perfectly valid request with 400/500
@@ -796,6 +809,7 @@ async def _fetch_page_resilient(client, url, headers, page_param, page, limit_pa
     logger.warning("pull_employees: page %s rejected (HTTP %s) — retrying records %s..%s singly",
                    page, resp.status_code, first, first + int(limit_val) - 1)
     rows, last_body = [], {}
+    bad_start = len(unreadable)
     for pos in range(first, first + int(limit_val)):
         r = await _get_with_retry(client, url, headers,
                                   {**({"company": company} if company else {}), page_param: pos, limit_param: 1}, attempts=3)
@@ -809,6 +823,12 @@ async def _fetch_page_resilient(client, url, headers, page_param, page, limit_pa
             break                      # ran past the end of the list
         rows.extend(got)
         await asyncio.sleep(1.0)
+    if not rows and len(unreadable) - bad_start >= int(limit_val):
+        # Not one record on the page could be read: SeamlessHR is failing, not a few
+        # bad records. Abort the run (logged as an error) rather than skipping on page
+        # after page forever.
+        del unreadable[bad_start:]
+        resp.raise_for_status()
     return {"data": rows} if rows or unreadable else last_body
 
 
@@ -945,10 +965,10 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
         # unlinked, so they inherit no department shift — the admin needs to create
         # the department and give it a Default Shift, then re-pull.
         if unmatched_departments:
-            result["unmatched_departments"] = sorted(unmatched_departments)
+            result["created_departments"] = sorted(unmatched_departments)
             logger.warning(
-                "pull_employees: no ApexPOB department matches %s — those employees "
-                "have no department shift until the department is created",
+                "pull_employees: created departments %s from SeamlessHR — they use the "
+                "global default shift until a Default Shift is set on each",
                 sorted(unmatched_departments),
             )
         _log_sync(db, {
