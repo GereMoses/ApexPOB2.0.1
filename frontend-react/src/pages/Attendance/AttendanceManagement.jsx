@@ -1,14 +1,13 @@
 import React, { useState } from 'react';
 import dayjs from 'dayjs';
-import { Tabs, Card, App, Space, Badge, Row, Col, Tooltip } from 'antd';
+import { Tabs, Card, App, Space, Badge } from 'antd';
 import {
   ClockCircleOutlined, ExceptionOutlined,
   SettingOutlined, UserAddOutlined, HistoryOutlined,
   BarChartOutlined, LineChartOutlined, CarryOutOutlined,
   ThunderboltOutlined, GiftOutlined, TagsOutlined, RetweetOutlined,
   EditOutlined, SafetyCertificateOutlined, EnvironmentOutlined,
-  TeamOutlined, CheckCircleOutlined, WarningOutlined,
-  LoginOutlined, LogoutOutlined,
+  TeamOutlined,
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -182,44 +181,6 @@ const AttendanceManagement = () => {
           </div>
         </Space>
       </div>
-
-      {/* ── KPI Strip ───────────────────────────────────────────────────── */}
-      <Row gutter={12} style={{ marginBottom: 16 }}>
-        {[
-          { label: 'Transactions', value: stats.today_count ?? 0, icon: <HistoryOutlined />, color: '#1890ff', bg: '#e6f4ff', tip: "Total punch records today" },
-          { label: 'Employees',    value: stats.unique_employees ?? 0, icon: <TeamOutlined />, color: '#13c2c2', bg: '#e6fffb', tip: "Unique employees with activity today" },
-          { label: 'Check-ins',   value: stats.checkin_count ?? 0, icon: <LoginOutlined />, color: '#52c41a', bg: '#f6ffed', tip: "Clock-in records today" },
-          { label: 'Check-outs',  value: stats.checkout_count ?? 0, icon: <LogoutOutlined />, color: '#8c8c8c', bg: '#fafafa', tip: "Clock-out records today" },
-          { label: 'Pending',     value: stats.pending_approvals ?? 0, icon: <CheckCircleOutlined />, color: '#fa8c16', bg: '#fff7e6', tip: "Leave/overtime requests awaiting approval" },
-          { label: 'Exceptions',  value: stats.exceptions_count ?? 0, icon: <WarningOutlined />, color: '#f5222d', bg: '#fff1f0', tip: "Missing punches or rule violations today" },
-        ].map(({ label, value, icon, color, bg, tip }) => (
-          <Col key={label} flex="1">
-            <Tooltip title={tip}>
-              <div style={{
-                background: '#fff', border: `1px solid ${color}30`,
-                borderTop: `3px solid ${color}`,
-                borderRadius: 8, padding: '10px 14px',
-                display: 'flex', alignItems: 'center', gap: 10,
-                cursor: 'default',
-              }}>
-                <div style={{
-                  width: 36, height: 36, borderRadius: 8, background: bg,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 16, color, flexShrink: 0,
-                }}>
-                  {icon}
-                </div>
-                <div>
-                  <div style={{ fontSize: 20, fontWeight: 700, lineHeight: 1.1, color: '#1f1f1f' }}>
-                    {value.toLocaleString()}
-                  </div>
-                  <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 2 }}>{label}</div>
-                </div>
-              </div>
-            </Tooltip>
-          </Col>
-        ))}
-      </Row>
 
       {/* ── Tab Panel ───────────────────────────────────────────────────── */}
       <Card styles={{ body: { padding: 0 } }}>
