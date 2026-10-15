@@ -322,3 +322,18 @@ BEGIN
     SELECT v_overtime, ROUND(v_overtime * 60)::integer, 1.5::double precision;
 END;
 $$;
+
+-- ── Audit log silently dropped entries for long URLs ──────────────────────────
+-- rbac.py writes request.url.path into base_operationlog.table_name, which was
+-- varchar(50). Paths such as /api/v1/device-management/discovery/approve/<serial> are
+-- longer, so those audit rows failed to insert ("value too long") and the action left
+-- no trail. Widening is metadata-only and a no-op when already wide.
+ALTER TABLE public.base_operationlog ALTER COLUMN table_name TYPE varchar(255);
+
+-- personnel_employee is also filled by trigger trg_sync_personnel with EXPLICIT ids
+-- (copied from personnel.id), which does not advance the serial sequence, so a later
+-- ORM insert could draw an id the trigger already used (duplicate key on the pkey).
+-- Keep the sequence at or beyond the highest id. Never moves it backwards.
+SELECT setval(pg_get_serial_sequence('public.personnel_employee', 'id'),
+              GREATEST((SELECT COALESCE(MAX(id), 1) FROM public.personnel_employee),
+                       (SELECT last_value FROM public.personnel_employee_id_seq)));

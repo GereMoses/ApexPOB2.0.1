@@ -770,6 +770,17 @@ def handle_operlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int]
     return saved, latest_ts
 
 
+def _hr_is_master(db: Session) -> bool:
+    """True when the SeamlessHR integration is enabled, i.e. employees come from HR."""
+    try:
+        row = db.execute(text(
+            "SELECT is_enabled FROM hr_integration_config ORDER BY id DESC LIMIT 1")).fetchone()
+        return bool(row and row[0])
+    except Exception:
+        db.rollback()
+        return False
+
+
 def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
     """
     Sync employee data pushed by device → personnel_employee.
@@ -781,6 +792,7 @@ def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
     created = 0
     # Track emp_codes added this batch to avoid duplicates within the same upload
     seen_this_batch: set = set()
+    unknown_pins: List[str] = []
 
     for rec in records:
         emp_code = resolve_emp_code(
@@ -807,6 +819,10 @@ def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
                 db.flush()
                 updated += 1
                 logger.debug(f"USERINFO updated emp_code={emp_code} card={card}")
+            elif _hr_is_master(db):
+                # SeamlessHR owns the employee master: an ID that exists only on a reader
+                # must not become a second, ghost employee record. Leave it for HR to add.
+                unknown_pins.append(emp_code)
             else:
                 parts      = name.split() if name else [emp_code]
                 first_name = parts[0]
@@ -840,7 +856,12 @@ def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
     ), {'sn': sn})
     db.commit()
 
-    logger.info(f"USERINFO {sn}: updated={updated} created={created} total={len(records)}")
+    if unknown_pins:
+        logger.warning(
+            "USERINFO %s: %d user ID(s) on the reader match no employee and were NOT created "
+            "(SeamlessHR is the employee master): %s",
+            sn, len(unknown_pins), ", ".join(unknown_pins[:20]) + (" ..." if len(unknown_pins) > 20 else ""))
+    logger.info(f"USERINFO {sn}: updated={updated} created={created} unknown={len(unknown_pins)} total={len(records)}")
     return updated + created
 
 
