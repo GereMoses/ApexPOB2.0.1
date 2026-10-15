@@ -136,13 +136,16 @@ class AttendanceValidationService:
             errors.append("Work days are required")
         
         # Validate work days format
-        work_days = shift_data.get('work_days', '')
-        if len(work_days) != 7:
-            errors.append("Work days must be 7 characters (one for each day)")
-        
-        for i, day in enumerate(work_days):
-            if day not in ['0', '1']:
-                errors.append(f"Invalid work day format at position {i}. Use 0 or 1")
+        # Same formats the screen saves and the attendance engine reads
+        # (_is_work_day): day digits '12345' (1 = Mon … 7 = Sun) or 'Mon,Tue,…'.
+        work_days = str(shift_data.get('work_days', '') or '')
+        names = {'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'}
+        if any(c.isalpha() for c in work_days):
+            bad = [d for d in (x.strip() for x in work_days.split(',')) if d and d not in names]
+            if bad:
+                errors.append(f"Unknown work day(s): {', '.join(bad)} — use Mon,Tue,…")
+        elif work_days and not all(c in '1234567' for c in work_days):
+            errors.append("Work days must be day numbers 1–7 (1 = Monday), e.g. 12345")
         
         # Validate cycle settings
         cycle_unit = shift_data.get('cycle_unit', 0)

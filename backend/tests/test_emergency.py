@@ -90,15 +90,12 @@ class TestLockdownPermission:
 
     @patch("app.api.emergency.get_current_user")
     @patch("app.api.emergency.get_db")
-    def test_lockdown_requires_reason(self, mock_db, mock_user, client):
-        """Lockdown with missing reason must return 400, not 500."""
-        mock_user.return_value = _make_user(is_superuser=True)
-        mock_db.return_value = Mock()
-
+    def test_lockdown_requires_reason(self, mock_db, mock_user, client, superuser_headers):
+        """Lockdown with missing reason must return 400, not 500 (real auth path)."""
         resp = client.post(
             "/api/emergency/lockdown/",
             json={"scope": "global", "action": "lock", "reason": ""},
-            headers=_auth_headers(),
+            headers=superuser_headers,
         )
         assert resp.status_code == 400, "Missing reason should be 400, not a crash."
 
@@ -204,7 +201,7 @@ class TestEmergencyWebSocketAuth:
             ) as ws:
                 ws.receive_text()
 
-    @patch("app.api.emergency.verify_token")
+    @patch("app.core.security.verify_token")   # imported inside the WS handler
     @patch("app.api.emergency.emergency_manager")
     def test_ws_accepts_valid_token(self, mock_manager, mock_verify):
         """A valid JWT must allow the WebSocket connection to proceed."""

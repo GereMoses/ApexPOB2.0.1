@@ -64,7 +64,7 @@ class PayrollFormulaEngine:
         self.formula_cache = {}
         self.calculation_history = []
     
-    def validate_formula(self, formula: str) -> Dict[str, Any]:
+    def validate_formula(self, formula: str, extra_variables: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Validate formula syntax and security
         
@@ -119,8 +119,12 @@ class PayrollFormulaEngine:
                 # Check for variable usage
                 if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
                     var_name = node.id
-                    if var_name not in self.ALLOWED_VARIABLES and var_name not in self.ALLOWED_FUNCTIONS:
-                        result['warnings'].append(f'Unknown variable: {var_name}')
+                    if (var_name not in self.ALLOWED_VARIABLES and var_name not in self.ALLOWED_FUNCTIONS
+                            and var_name not in (extra_variables or [])):
+                        # An error, not a warning: at payroll time only the known
+                        # variables (and earlier pay items) exist, so this formula
+                        # would fail on every payslip.
+                        result['errors'].append(f'Unknown variable: {var_name}')
                     elif var_name in self.ALLOWED_VARIABLES:
                         result['variables_used'].append(var_name)
             
@@ -162,7 +166,8 @@ class PayrollFormulaEngine:
         
         try:
             # Validate formula first
-            validation = self.validate_formula(formula)
+            # The variables actually supplied (incl. earlier pay items) are known here.
+            validation = self.validate_formula(formula, extra_variables=list(variables or {}))
             if not validation['is_valid']:
                 result['error'] = f'Invalid formula: {", ".join(validation["errors"])}'
                 return result
@@ -252,8 +257,9 @@ class PayrollFormulaEngine:
         safe_vars = {}
         
         for key, value in variables.items():
-            # Only allow predefined variables
-            if key not in self.ALLOWED_VARIABLES:
+            # Predefined variables plus earlier pay items (passed by the payroll
+            # service as identifiers, e.g. HRA) — values only, never code.
+            if key not in self.ALLOWED_VARIABLES and not str(key).isidentifier():
                 continue
             
             # Convert to safe types

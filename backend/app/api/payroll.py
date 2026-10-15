@@ -323,6 +323,23 @@ async def delete_pay_structure(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Pay Structure Items
+def _check_item_formula(db: Session, structure_id: int, calc_type: Optional[str], formula: Optional[str],
+                        sequence: Optional[int], item_id: Optional[int] = None) -> None:
+    """Reject a formula that would fail at payroll time. It may use the standard
+    variables and pay items that come EARLIER in the structure (lower sequence)."""
+    if (calc_type or "") != "formula":
+        return
+    import re as _re
+    earlier = [
+        _re.sub(r"\W", "_", r.item_name or "")
+        for r in db.query(PayItem).filter(PayItem.structure_id == structure_id).all()
+        if r.id != item_id and (sequence is None or (r.sequence or 0) < sequence)
+    ]
+    check = payroll_formula_engine.validate_formula(formula or "", extra_variables=earlier)
+    if not check["is_valid"]:
+        raise HTTPException(status_code=400, detail="Invalid formula: " + "; ".join(check["errors"]))
+
+
 @router.post("/structures/{structure_id}/items", response_model=Dict[str, Any])
 async def create_pay_item(
     structure_id: int,
@@ -336,6 +353,7 @@ async def create_pay_item(
         if not structure:
             raise HTTPException(status_code=404, detail="Salary structure not found")
         
+        _check_item_formula(db, structure_id, item_data.calc_type, item_data.formula, item_data.sequence)
         item = PayItem(
             structure_id=structure_id,
             item_name=item_data.item_name,
@@ -387,6 +405,9 @@ async def update_pay_item(
         
         # Update fields
         update_data = item_data.dict(exclude_unset=True)
+        _check_item_formula(db, structure_id, update_data.get("calc_type", item.calc_type),
+                            update_data.get("formula", item.formula),
+                            update_data.get("sequence", item.sequence), item_id=item.id)
         for field, value in update_data.items():
             setattr(item, field, value)
         

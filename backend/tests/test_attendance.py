@@ -43,11 +43,12 @@ class TestAttendanceValidation:
     
     @pytest.mark.asyncio
     async def test_validate_timetable_invalid_time(self):
-        """Test timetable validation with invalid time"""
+        """A 10-minute timetable is invalid. (17:00 -> 09:00 is NOT invalid: it is an
+        overnight shift, which 24-hour operations rely on.)"""
         timetable_data = {
             'alias': 'Regular Shift',
-            'checkin_time': '17:00:00',  # After checkout
-            'checkout_time': '09:00:00',
+            'checkin_time': '09:00:00',
+            'checkout_time': '09:10:00',
             'late_minutes': 15,
             'early_minutes': 15,
             'work_day': 1.0,
@@ -60,14 +61,14 @@ class TestAttendanceValidation:
         is_valid, errors = await attendance_validation_service.validate_timetable(timetable_data, db)
         
         assert is_valid == False
-        assert any('Check-in time must be before check-out time' in error for error in errors)
+        assert any('at least 30 minutes' in error for error in errors)
     
     @pytest.mark.asyncio
     async def test_validate_shift_success(self):
         """Test successful shift validation"""
         shift_data = {
             'alias': 'Morning Shift',
-            'work_days': '01234',  # Monday to Friday
+            'work_days': '12345',  # Monday to Friday (1 = Mon … 7 = Sun)
             'cycle_unit': 0,  # Daily
             'cycle_count': 1,
             'roster_type': 0,  # Regular
@@ -106,7 +107,7 @@ class TestAttendanceValidation:
             'emp_id': 1,
             'leave_type_id': 1,
             'start_time': '2024-12-01T09:00:00',
-            'end_time': '2024-02-15T17:00:00',  # More than 30 days
+            'end_time': '2025-01-30T17:00:00',  # More than 30 days
             'reason': 'Annual vacation',
         }
         
@@ -123,7 +124,7 @@ class TestAttendanceValidation:
         """Test successful overtime request validation"""
         ot_data = {
             'emp_id': 1,
-            'ot_date': '2024-12-01',
+            'ot_date': (date.today() - timedelta(days=2)).isoformat(),  # recent: >30 days old is rejected
             'minutes': 120,  # 2 hours
             'reason': 'Project deadline',
         }
@@ -157,9 +158,10 @@ class TestAttendanceValidation:
 class TestAttendanceAPI:
     """Test attendance API endpoints"""
     
-    def setup_method(self):
-        """Setup test client"""
-        self.client = TestClient(app)
+    @pytest.fixture(autouse=True)
+    def _client(self, superuser_headers):
+        """Client authenticated as a real superuser (passes JWT + RBAC for real)."""
+        self.client = TestClient(app, headers=superuser_headers)
     
     def test_get_timetables(self):
         """Test getting timetables"""
@@ -193,8 +195,8 @@ class TestAttendanceAPI:
         """Test creating timetable with validation error"""
         timetable_data = {
             "alias": "Test Shift",
-            "checkin_time": "17:00:00",  # Invalid: after checkout
-            "checkout_time": "09:00:00",
+            "checkin_time": "09:00:00",  # Invalid: 10 minutes (17:00->09:00 would be a valid overnight shift)
+            "checkout_time": "09:10:00",
             "late_minutes": 15,
             "early_minutes": 15,
             "work_day": 1.0,
@@ -206,7 +208,7 @@ class TestAttendanceAPI:
         response = self.client.post("/api/v1/attendance/timetables", json=timetable_data)
         assert response.status_code == 400
         data = response.json()
-        assert "errors" in data
+        assert "errors" in data.get("detail", data)   # FastAPI wraps errors in "detail"
     
     def test_get_shifts(self):
         """Test getting shifts"""
@@ -399,9 +401,9 @@ class TestAttendanceCalculation:
 class TestAttendanceIntegration:
     """Integration tests for attendance module"""
     
-    def test_end_to_end_attendance_flow(self):
+    def test_end_to_end_attendance_flow(self, superuser_headers):
         """Test complete attendance flow from timetable to timesheet"""
-        with TestClient(app) as client:
+        with TestClient(app, headers=superuser_headers) as client:
             # 1. Create timetable
             timetable_data = {
                 "alias": "Integration Test Shift",
@@ -422,7 +424,7 @@ class TestAttendanceIntegration:
             # 2. Create shift
             shift_data = {
                 "alias": "Integration Test Shift",
-                "work_days": "01234",
+                "work_days": "12345",
                 "cycle_unit": 0,
                 "cycle_count": 1,
                 "roster_type": 0,

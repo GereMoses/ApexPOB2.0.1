@@ -9,6 +9,7 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func, case, extract, Numeric, Date
 import logging
+import re
 
 from ..models.payroll import (
     PayStructure, PayItem, PayStructureAssign, PayPeriod, PaySalary, PaySalaryItem,
@@ -243,20 +244,29 @@ class PayrollService:
                 PayItem.structure_id == structure.id
             ).order_by(PayItem.sequence).all()
             
+            earlier_items: Dict[str, float] = {}   # e.g. {"HRA": 400.0} for later formulas
             for item in pay_items:
                 item_result = self._calculate_pay_item(
-                    item, attendance_data, emp, contractor_rates, structure
+                    item, attendance_data, emp, contractor_rates, structure, earlier_items
                 )
                 
                 if item_result['success']:
                     salary_items.append(item_result)
+                    key = re.sub(r'\W', '_', item.item_name or '')
+                    if key.isidentifier():
+                        earlier_items[key] = float(item_result['value'])
                     
                     if item.item_type == 'earning':
                         total_earnings += Decimal(str(item_result['value']))
                     else:
                         total_deductions += Decimal(str(item_result['value']))
                 else:
-                    logger.warning(f"Failed to calculate item {item.item_name}: {item_result['error']}")
+                    # A pay item that cannot be calculated must stop this payslip:
+                    # skipping a failed deduction (e.g. Tax) silently overpays.
+                    self.db.rollback()
+                    result['error'] = f"Pay item '{item.item_name}' could not be calculated: {item_result['error']}"
+                    logger.error("Payslip for emp %s stopped: %s", emp_id, result['error'])
+                    return result
             
             # Calculate POB zone allowances
             zone_allowances = self._calculate_zone_allowances(
@@ -354,7 +364,8 @@ class PayrollService:
     
     def _calculate_pay_item(self, item: PayItem, attendance_data: Dict[str, Any],
                            emp: Personnel, contractor_rates: Optional[PayContractorRate],
-                           structure: PayStructure) -> Dict[str, Any]:
+                           structure: PayStructure,
+                           earlier_items: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """Calculate a single payroll item"""
         
         result = {
@@ -404,6 +415,9 @@ class PayrollService:
                     'EmployeeType': emp.personnel_type,
                     'AreaID': attendance_data.get('area_id', 0)
                 }
+                # Values of pay items calculated earlier in the structure (by
+                # sequence), so e.g. Tax = (Basic + HRA) * 0.1 works.
+                variables.update(earlier_items or {})
                 
                 # Evaluate formula
                 formula_result = self.formula_engine.evaluate_formula(item.formula, variables)

@@ -117,10 +117,16 @@ class TestBuildDailyAttendance:
 
         # Sanity: the query must read att_report, NOT raw iclock_transaction.
         sql = db.execute.call_args[0][0].text
-        assert "att_report" in sql
-        assert "iclock_transaction" not in sql, (
-            "Exporter must source from computed att_report, not raw punches."
-        )
+        assert "FROM att_report" in sql, "Exporter must source from computed att_report."
+        # Raw punches may only be consulted to find WHICH reader recorded the computed
+        # check-in/out (SeamlessHR's deviceSN) — never as a source of times or hours.
+        import re
+        for m in re.finditer(r"SELECT\s+([\w.]+)\s+FROM\s+iclock_transaction", sql):
+            assert m.group(1).endswith("terminal_sn"), (
+                "iclock_transaction may only be read for the reader serial, not punches.")
+        assert sql.count("FROM iclock_transaction") == len(
+            re.findall(r"SELECT\s+[\w.]+terminal_sn\s+FROM\s+iclock_transaction", sql)), (
+            "Exporter must source from computed att_report, not raw punches.")
 
     def test_empty_when_no_computed_attendance(self):
         from app.services import attendance_export as ax

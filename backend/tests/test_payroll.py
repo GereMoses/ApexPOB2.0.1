@@ -28,7 +28,7 @@ class TestPayrollFormulaEngine:
         # Valid formulas
         valid_formulas = [
             "Basic * 0.4",
-            "Basic + (OTHours * Rate * 1.5)",
+            "Basic + (OTHours * WorkHours * 1.5)",
             "IF(Basic > 0, Basic * 0.1, 0)",
             "ROUND(Basic * 0.4, 2)"
         ]
@@ -55,16 +55,16 @@ class TestPayrollFormulaEngine:
     def test_formula_evaluation(self):
         """Test formula evaluation"""
         # Test basic arithmetic
-        variables = {"Basic": 1000, "OTHours": 10, "Rate": 1.5}
+        variables = {"Basic": 1000, "OTHours": 10, "WorkHours": 1.5}
         result = payroll_formula_engine.evaluate_formula("Basic * 0.4", variables)
         
         assert result['success'], "Formula evaluation should succeed"
         assert float(result['value']) == 400.0, "Basic * 0.4 should equal 400"
         
         # Test with OT calculation
-        result = payroll_formula_engine.evaluate_formula("Basic + (OTHours * Rate * 1.5)", variables)
+        result = payroll_formula_engine.evaluate_formula("Basic + (OTHours * WorkHours * 1.5)", variables)
         assert result['success'], "Complex formula evaluation should succeed"
-        assert float(result['value']) == 1015.0, "Basic + OT calculation should equal 1015"
+        assert float(result['value']) == 1022.5, "1000 + 10 * 1.5 * 1.5 should equal 1022.5"
         
         # Test IF function
         variables = {"Basic": 1000, "PresentDays": 20}
@@ -72,10 +72,17 @@ class TestPayrollFormulaEngine:
         assert result['success'], "IF function evaluation should succeed"
         assert float(result['value']) == 1100.0, "IF function should return 1100"
     
+    def test_formula_may_use_earlier_pay_items(self):
+        """The default template's Tax = (Basic + HRA) * 0.1 must validate (HRA comes
+        earlier in the structure) and evaluate with HRA's computed value."""
+        assert payroll_formula_engine.validate_formula("(Basic + HRA) * 0.1", extra_variables=["HRA"])["is_valid"]
+        r = payroll_formula_engine.evaluate_formula("(Basic + HRA) * 0.1", {"Basic": 1000, "HRA": 400})
+        assert r["success"] and float(r["value"]) == 140.0
+
     def test_formula_test_functionality(self):
         """Test formula test functionality"""
-        formula = "Basic * 0.4 + OT"
-        sample_data = {"Basic": 1000, "OT": 200}
+        formula = "Basic * 0.4 + OTHours"
+        sample_data = {"Basic": 1000, "OTHours": 200}
         
         result = payroll_formula_engine.test_formula(formula, sample_data)
         
