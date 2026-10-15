@@ -67,6 +67,11 @@ class JourneyPlan(Base):
     # DRAFT / SUBMITTED / APPROVED / REJECTED / IN_PROGRESS / COMPLETED / CANCELLED
     approved_by_id = Column(Integer, nullable=True)
     approved_at = Column(DateTime(timezone=True))
+    # POB effect of the trip: OUTBOUND = leaving site (staff come off POB at start),
+    # INBOUND = arriving at site (on POB at completion), NONE = between outside points.
+    pob_movement = Column(String(10), default="NONE")
+    pob_applied_ids = Column(JSONB)                     # personnel ids moved, for an exact undo
+    pob_applied_at = Column(DateTime(timezone=True))
     # HIGH-risk journeys need a second, different approver.
     second_approved_by_id = Column(Integer, nullable=True)
     second_approved_at = Column(DateTime(timezone=True))

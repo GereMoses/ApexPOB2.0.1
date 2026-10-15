@@ -48,6 +48,7 @@ class JourneyCreate(BaseModel):
     risk_notes: Optional[str] = None
     vehicle_check: Optional[Dict[str, Any]] = None
     notes: Optional[str] = None
+    pob_movement: Optional[str] = None   # NONE | OUTBOUND | INBOUND (suggested if omitted)
 
 
 class JourneyUpdate(BaseModel):
@@ -68,6 +69,7 @@ class JourneyUpdate(BaseModel):
     risk_notes: Optional[str] = None
     vehicle_check: Optional[Dict[str, Any]] = None
     notes: Optional[str] = None
+    pob_movement: Optional[str] = None
 
 
 class RejectBody(BaseModel):
@@ -190,6 +192,9 @@ def _to_dict(j: JourneyPlan, with_checkins: bool = False) -> Dict[str, Any]:
         "approvals_required": 2 if j.risk_level == "HIGH" else 1,
         "approvals_given": (1 if j.approved_by_id else 0) + (1 if j.second_approved_by_id else 0),
         "risk_manual_factors": j.risk_manual_factors or [],
+        "pob_movement": j.pob_movement or "NONE",
+        "pob_applied_at": j.pob_applied_at.isoformat() if j.pob_applied_at else None,
+        "pob_applied_count": len(j.pob_applied_ids or []),
         "created_by_id": j.created_by_id,
         "rejection_reason": j.rejection_reason,
         "notes": j.notes,
@@ -217,6 +222,76 @@ def _get(db: Session, journey_id: int) -> JourneyPlan:
     if not j:
         raise HTTPException(status_code=404, detail="Journey not found")
     return j
+
+
+# ─── POB effect (journeys that cross the site boundary) ─────────────────────────
+
+_MOVEMENTS = {"NONE", "OUTBOUND", "INBOUND"}
+
+
+def _is_site_point(db: Session, place: Optional[str]) -> bool:
+    if not place:
+        return False
+    return db.execute(text(
+        "SELECT 1 FROM zones WHERE lower(name) = lower(:p) OR lower(code) = lower(:p) LIMIT 1"
+    ), {"p": place.strip()}).first() is not None
+
+
+def suggest_movement(db: Session, origin: Optional[str], destination: Optional[str]) -> str:
+    """Leaving a place that is one of the site's zones = OUTBOUND, arriving at one =
+    INBOUND. Both or neither = NONE (the planner can still choose)."""
+    o, d = _is_site_point(db, origin), _is_site_point(db, destination)
+    return "OUTBOUND" if o and not d else "INBOUND" if d and not o else "NONE"
+
+
+def _check_movement(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    v = v.upper()
+    if v not in _MOVEMENTS:
+        raise HTTPException(status_code=400, detail=f"pob_movement must be one of {sorted(_MOVEMENTS)}")
+    return v
+
+
+def _journey_people(db: Session, j: JourneyPlan) -> List[Dict[str, Any]]:
+    """Registered staff on the trip (passengers with a staff code, plus the driver if
+    linked). Guests have no POB record and are skipped."""
+    codes = [p.get("emp_code") for p in (j.passengers or []) if isinstance(p, dict) and p.get("emp_code")]
+    rows = db.execute(text(
+        "SELECT id, emp_code FROM personnel WHERE emp_code = ANY(:c) OR id = :d"
+    ), {"c": codes or [""], "d": j.driver_personnel_id or -1}).fetchall()
+    return [{"id": r.id, "emp_code": r.emp_code} for r in rows]
+
+
+def _apply_journey_pob(db: Session, j: JourneyPlan, phase: str, user_id=None) -> int:
+    """phase: 'start' | 'complete' | 'undo'. Mirrors flights: leaving site takes staff
+    off POB when the trip STARTS; arriving puts them on when it COMPLETES; cancelling a
+    trip under way undoes what was applied. Returns how many people were moved."""
+    from .transport_manifest import _go_onboard, _go_offboard, _mark_departed_in_muster
+    mv = (j.pob_movement or "NONE").upper()
+    if phase == "undo":
+        ids = j.pob_applied_ids or []
+        for pid in ids:
+            if mv == "OUTBOUND":
+                _go_onboard(db, pid, j.origin)      # turned back: they are on site again
+            else:
+                _go_offboard(db, pid)
+        j.pob_applied_ids, j.pob_applied_at = None, None
+        return len(ids)
+    if j.pob_applied_at or mv == "NONE":
+        return 0
+    if (mv, phase) not in (("OUTBOUND", "start"), ("INBOUND", "complete")):
+        return 0
+    people = _journey_people(db, j)
+    for p in people:
+        if mv == "OUTBOUND":
+            _go_offboard(db, p["id"])
+            _mark_departed_in_muster(db, p["emp_code"], user_id)
+        else:
+            _go_onboard(db, p["id"], j.destination)
+    j.pob_applied_ids = [p["id"] for p in people]
+    j.pob_applied_at = _now()
+    return len(people)
 
 
 # ─── CRUD ─────────────────────────────────────────────────────────────────────
@@ -272,6 +347,7 @@ async def create_journey(payload: JourneyCreate, db: Session = Depends(get_db),
         vehicle_check=payload.vehicle_check,
         vehicle_check_ok=bool(payload.vehicle_check) and all(payload.vehicle_check.values()),
         status="DRAFT", notes=payload.notes,
+        pob_movement=_check_movement(payload.pob_movement) or suggest_movement(db, payload.origin, payload.destination),
         created_by_id=getattr(current_user, "id", None),
     )
     db.add(j)
@@ -297,6 +373,8 @@ async def update_journey(journey_id: int, payload: JourneyUpdate, db: Session = 
     if j.status not in ("DRAFT", "REJECTED", "SUBMITTED"):
         raise HTTPException(status_code=400, detail=f"Cannot edit a {j.status} journey")
     data = payload.dict(exclude_unset=True)
+    if "pob_movement" in data:
+        data["pob_movement"] = _check_movement(data["pob_movement"]) or "NONE"
     manual = data.pop("risk_factors", None)
     if manual is not None:
         j.risk_manual_factors = manual
@@ -417,6 +495,7 @@ async def start_journey(journey_id: int, db: Session = Depends(get_db), _=Depend
     j.actual_departure = now
     j.last_checkin_at = now
     j.next_checkin_due = now + timedelta(minutes=j.checkin_interval_min or 60)
+    _apply_journey_pob(db, j, "start", getattr(_, "id", None))
     db.commit()
     return _to_dict(j)
 
@@ -467,6 +546,7 @@ async def complete_journey(journey_id: int, db: Session = Depends(get_db), _=Dep
     j.status = "COMPLETED"
     j.actual_arrival = _now()
     j.next_checkin_due = None
+    _apply_journey_pob(db, j, "complete", getattr(_, "id", None))
     db.commit()
     return _to_dict(j)
 
@@ -478,6 +558,7 @@ async def cancel_journey(journey_id: int, db: Session = Depends(get_db), _=Depen
         raise HTTPException(status_code=400, detail=f"Journey already {j.status}")
     j.status = "CANCELLED"
     j.next_checkin_due = None
+    _apply_journey_pob(db, j, "undo")       # a trip abandoned under way: back on site
     db.commit()
     return _to_dict(j)
 

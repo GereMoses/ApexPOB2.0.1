@@ -378,3 +378,8 @@ JOIN public.auth_permission np ON
   OR (op.codename = 'pob.change'  AND np.codename IN ('transport.manage','journey.manage'))
 WHERE NOT EXISTS (SELECT 1 FROM public.auth_role_permission x
                   WHERE x.role_id = rp.role_id AND x.permission_id = np.id);
+
+-- Land journeys that cross the site boundary move POB like flights do.
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_movement varchar(10) DEFAULT 'NONE';
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_applied_ids jsonb;
+ALTER TABLE public.journey_plan ADD COLUMN IF NOT EXISTS pob_applied_at timestamptz;

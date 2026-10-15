@@ -42,6 +42,12 @@ const VEHICLE_CHECKS = [
   ['extinguisher', 'Fire extinguisher'], ['documents', 'Vehicle documents'], ['comms', 'Phone / radio charged'],
 ];
 
+const POB_MOVEMENT = {
+  NONE:     'No POB effect (between outside points)',
+  OUTBOUND: 'Leaving site — staff come off POB when the journey starts',
+  INBOUND:  'Arriving at site — staff go on POB when the journey completes',
+};
+
 const StatTile = ({ label, value, color }) => (
   <div style={{ flex: 1, background: '#fff', border: '1px solid #f0f0f0', borderTop: `3px solid ${color}`,
     borderRadius: 8, padding: '12px 16px' }}>
@@ -140,6 +146,7 @@ export default function LandJourneys() {
       planned_arrival: jj.planned_arrival ? dayjs(jj.planned_arrival) : null,
       checkin_interval_min: jj.checkin_interval_min,
       risk_factors: jj.risk_manual_factors || [],
+      pob_movement: jj.pob_movement || 'NONE',
       notes: jj.notes,
       passenger_codes: (jj.passengers || []).map(p => p.emp_code || p.name),
       vehicle_checks: Object.entries(jj.vehicle_check || {}).filter(([, ok]) => ok).map(([k]) => k),
@@ -266,6 +273,11 @@ export default function LandJourneys() {
               <Select mode="tags" placeholder="e.g. poor road, security" style={{ width: '100%' }} />
             </Form.Item>
           </div>
+          <Form.Item name="pob_movement" label="POB effect"
+            tooltip="Leave empty on a new plan to suggest it from the origin/destination (a place named like a site zone counts as the site). Only staff picked from search are moved — guests have no POB record.">
+            <Select allowClear placeholder="Suggest from origin / destination"
+              options={Object.entries(POB_MOVEMENT).map(([value, label]) => ({ value, label }))} />
+          </Form.Item>
           <Form.Item name="passenger_codes" label="Passengers"
             tooltip="Search staff by name or code; type a name and press Enter for a guest">
             <Select mode="tags" showSearch filterOption={false} onSearch={searchPax}
@@ -305,6 +317,10 @@ export default function LandJourneys() {
               <Descriptions.Item label="Next check-in">{j.next_checkin_due ? dayjs(j.next_checkin_due).format('DD MMM HH:mm') : '—'}</Descriptions.Item>
               <Descriptions.Item label="Passengers" span={2}>
                 {(j.passengers || []).length ? j.passengers.map(p => p.emp_code ? `${p.name} (${p.emp_code})` : `${p.name} (guest)`).join(', ') : `${j.passenger_count || 0}`}</Descriptions.Item>
+              <Descriptions.Item label="POB effect" span={2}>
+                {POB_MOVEMENT[j.pob_movement || 'NONE']}
+                {j.pob_applied_at && <Tag color="blue" style={{ marginLeft: 8 }}>{j.pob_applied_count} staff moved {dayjs(j.pob_applied_at).format('DD MMM HH:mm')}</Tag>}
+              </Descriptions.Item>
               <Descriptions.Item label="Vehicle check">
                 {j.vehicle_check_ok ? <Tag color="green">Passed</Tag> : <Tag color="red">Not complete</Tag>}</Descriptions.Item>
               <Descriptions.Item label="Approvals">
