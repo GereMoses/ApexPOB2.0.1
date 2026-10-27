@@ -1,21 +1,23 @@
 /**
- * Reports — a curated library grouped by purpose; opening a report gives one clean,
- * full-width page (filters → key figures → table, chart on demand, one Export menu).
+ * Reports — a curated library grouped by purpose; opening a report gives a full-screen
+ * page (report list rail, filters + saved views, key figures, table that fills the
+ * screen with column chooser / find / page totals / row details, chart, Export).
  * The catalogue lives in ./reportCatalog.js.
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Input, Button, Table, Tag, Select, DatePicker, Segmented, Dropdown, Empty, App,
-  Tooltip, Drawer, Skeleton, Modal, Form, TimePicker, Popconfirm, Switch,
+  Tooltip, Drawer, Skeleton, Modal, Form, TimePicker, Popconfirm, Switch, Checkbox, Popover,
 } from 'antd';
 import {
   SearchOutlined, StarOutlined, StarFilled, ArrowLeftOutlined, DownloadOutlined,
   ReloadOutlined, BarChartOutlined, FilePdfOutlined, FileExcelOutlined, FileTextOutlined,
   ToolOutlined, RightOutlined, ClockCircleOutlined, ScheduleOutlined, PlayCircleOutlined,
-  DeleteOutlined, LockOutlined,
+  DeleteOutlined, LockOutlined, AppstoreOutlined, UnorderedListOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
+  FullscreenOutlined, FullscreenExitOutlined, FilterOutlined, LinkOutlined, SaveOutlined, SettingOutlined, SyncOutlined, LineChartOutlined,
 } from '@ant-design/icons';
-import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import dayjs from 'dayjs';
 import apiService from '../../services/api';
 import { REPORT_GROUPS, ALL_REPORTS, findReport } from './reportCatalog';
@@ -33,6 +35,12 @@ const store = {
 };
 const PINS = 'apx.reports.pins';
 const RECENT = 'apx.reports.recent';
+const LAYOUT = 'apx.reports.layout';
+const DENSITY = 'apx.reports.density';
+const PAGESIZE = 'apx.reports.pagesize';
+const RAIL = 'apx.reports.rail';
+const COLS = 'apx.reports.cols';     // + .<code>: hidden columns
+const VIEWS = 'apx.reports.views';   // + .<code>: saved filter sets
 
 const humanize = (k) => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 const fmtNum = (v) => (typeof v === 'number' ? (Number.isInteger(v) ? v.toLocaleString() : v.toLocaleString(undefined, { maximumFractionDigits: 1 })) : v);
@@ -46,10 +54,32 @@ const statusColor = (v) => (STATUS_COLORS.find(([re]) => re.test(String(v))) || 
 
 /* ═══════════════════════════════════════════════════════════════════════════ */
 
+// Filters <-> plain JSON (for saved views and shareable links). Preset ranges are
+// stored by name so "Last 7 days" stays relative when the view is reopened later.
+function serializeFilters(f) {
+  const out = { ...f };
+  if (f._range) out._range = f._preset && f._preset !== 'custom' ? undefined : f._range.map(d => d.format('YYYY-MM-DD'));
+  if (f._date) out._date = f._date.format('YYYY-MM-DD');
+  if (f._month) out._month = f._month.format('YYYY-MM');
+  return out;
+}
+function deserializeFilters(o, report) {
+  if (!o || typeof o !== 'object') return null;
+  const f = { ...initialFilters(report), ...o };
+  if (o._preset && o._preset !== 'custom' && PRESETS[o._preset]) f._range = PRESETS[o._preset]();
+  else if (Array.isArray(o._range)) f._range = o._range.map(d => dayjs(d));
+  if (o._date) f._date = dayjs(o._date);
+  if (o._month) f._month = dayjs(o._month + '-01');
+  return f;
+}
+
 export default function Reports() {
   const [params, setParams] = useSearchParams();
   const code = params.get('r');
   const report = code ? findReport(code) : null;
+  const linked = useMemo(() => {
+    try { return report && params.get('f') ? deserializeFilters(JSON.parse(params.get('f')), report) : null; } catch { return null; }
+  }, [report, params]);
   const [builderOpen, setBuilderOpen] = useState(false);
   const [schedOpen, setSchedOpen] = useState(false);
   const [pins, setPins] = useState(() => store.get(PINS, []));
@@ -75,7 +105,7 @@ export default function Reports() {
   };
 
   return (
-    <div className="apx-reports" style={{ background: T.bg, minHeight: '100%', padding: '28px 32px 48px' }}>
+    <div className="apx-reports">
       {report && !canView(report.code) ? (
         <div style={{ maxWidth: 640, margin: '80px auto', textAlign: 'center' }}>
           <LockOutlined style={{ fontSize: 34, color: T.faint }} />
@@ -84,8 +114,9 @@ export default function Reports() {
           <Button style={{ marginTop: 18 }} onClick={() => setParams({})}>Back to reports</Button>
         </div>
       ) : report
-        ? <ReportView key={report.code} report={report} pinned={pins.includes(report.code)} canExport={canExport(report.code)}
-            onPin={() => togglePin(report.code)} onBack={() => setParams({})} />
+        ? <ReportView key={report.code + (params.get('f') || '')} report={report} initial={linked}
+            pinned={pins.includes(report.code)} canExport={canExport(report.code)} canView={canView}
+            onPin={() => togglePin(report.code)} onBack={() => setParams({})} onOpen={open} />
         : <Library pins={pins} onPin={togglePin} onOpen={open} onBuilder={() => setBuilderOpen(true)}
             onScheduled={() => setSchedOpen(true)} canView={canView} />}
 
@@ -104,66 +135,117 @@ export default function Reports() {
 
 function Library({ pins, onPin, onOpen, onBuilder, onScheduled, canView }) {
   const [q, setQ] = useState('');
+  const [layout, setLayout] = useState(() => store.get(LAYOUT, 'grid'));
+  const [active, setActive] = useState(null);
+  const searchRef = useRef(null);
   const recent = store.get(RECENT, []).map(findReport).filter(r => r && canView(r.code));
   const pinned = pins.map(findReport).filter(r => r && canView(r.code));
   const term = q.trim().toLowerCase();
   const visible = ALL_REPORTS.filter(r => canView(r.code)).length;
-  const groups = REPORT_GROUPS.map(g => ({
+  const allGroups = REPORT_GROUPS.map(g => ({ ...g, reports: g.reports.filter(r => canView(r.code)) })).filter(g => g.reports.length);
+  const groups = allGroups.map(g => ({
     ...g,
-    reports: g.reports.filter(r => canView(r.code) && (!term || `${r.title} ${r.desc} ${g.title}`.toLowerCase().includes(term))),
-  })).filter(g => g.reports.length);
+    reports: g.reports.filter(r => !term || `${r.title} ${r.desc} ${g.title}`.toLowerCase().includes(term)),
+  })).filter(g => g.reports.length && (!active || term || g.key === active));
+
+  // "/" jumps to search, like most dashboards.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === '/' && !/input|textarea/i.test(document.activeElement?.tagName || '')) { e.preventDefault(); searchRef.current?.focus(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  const setLayoutKeep = (v) => { setLayout(v); store.set(LAYOUT, v); };
 
   return (
-    <div style={{ maxWidth: 1240, margin: '0 auto' }}>
-      <div className="apx-lib-head">
-        <div>
-          <h1 className="apx-h1">Reports</h1>
-          <div className="apx-sub">{visible} reports · times shown in site time (Lagos)</div>
-        </div>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <Input allowClear size="large" prefix={<SearchOutlined style={{ color: T.faint }} />}
-            placeholder="Search reports…" value={q} onChange={e => setQ(e.target.value)} style={{ width: 300 }} />
-          <Button size="large" icon={<ScheduleOutlined />} onClick={onScheduled}>Scheduled</Button>
-          <Button size="large" icon={<ToolOutlined />} onClick={onBuilder}>Custom report</Button>
-        </div>
-      </div>
+    <div className="apx-lib">
+      <aside className="apx-rail">
+        <div className="apx-rail-title">Browse</div>
+        <button className={`apx-rail-item ${!active ? 'on' : ''}`} onClick={() => setActive(null)}>
+          <span className="apx-dot" style={{ background: T.ink }} /> All reports <span className="apx-count">{visible}</span>
+        </button>
+        {allGroups.map(g => (
+          <button key={g.key} className={`apx-rail-item ${active === g.key ? 'on' : ''}`} onClick={() => setActive(g.key)}>
+            <span className="apx-dot" style={{ background: g.color }} /> {g.title} <span className="apx-count">{g.reports.length}</span>
+          </button>
+        ))}
+        <div className="apx-rail-title" style={{ marginTop: 22 }}>Tools</div>
+        <button className="apx-rail-item" onClick={onScheduled}><ScheduleOutlined /> Scheduled reports</button>
+        <button className="apx-rail-item" onClick={onBuilder}><ToolOutlined /> Custom report</button>
+      </aside>
 
-      {!term && (pinned.length > 0 || recent.length > 0) && (
-        <div className="apx-quick">
-          {pinned.length > 0 && <QuickRow label="Pinned" items={pinned} onOpen={onOpen} icon={<StarFilled style={{ color: '#f59e0b' }} />} />}
-          {recent.length > 0 && <QuickRow label="Recent" items={recent} onOpen={onOpen} icon={<ClockCircleOutlined style={{ color: T.faint }} />} />}
-        </div>
-      )}
-
-      {groups.length === 0 && <Empty style={{ marginTop: 80 }} description={`No report matches “${q}”`} />}
-
-      {groups.map(g => (
-        <section key={g.key} className="apx-group">
-          <div className="apx-group-head">
-            <span className="apx-dot" style={{ background: g.color }} />
-            <h2>{g.title}</h2>
-            <span className="apx-blurb">{g.blurb}</span>
+      <div style={{ minWidth: 0 }}>
+        <div className="apx-lib-head">
+          <div>
+            <h1 className="apx-h1">Reports</h1>
+            <div className="apx-sub">{visible} reports · times shown in site time (Lagos) · press <kbd>/</kbd> to search</div>
           </div>
-          <div className="apx-grid">
-            {g.reports.map(r => (
-              <div key={r.code} className="apx-card" role="button" tabIndex={0}
-                onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}
-                style={{ '--accent': g.color }}>
-                <div className="apx-card-top">
-                  <span className="apx-card-title">{r.title}</span>
-                  <span className="apx-pin" onClick={e => { e.stopPropagation(); onPin(r.code); }}
-                    title={pins.includes(r.code) ? 'Unpin' : 'Pin'}>
-                    {pins.includes(r.code) ? <StarFilled style={{ color: '#f59e0b' }} /> : <StarOutlined />}
-                  </span>
-                </div>
-                <div className="apx-card-desc">{r.desc}</div>
-                <div className="apx-card-go">Open <RightOutlined style={{ fontSize: 10 }} /></div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Input ref={searchRef} allowClear size="large" prefix={<SearchOutlined style={{ color: T.faint }} />}
+              placeholder="Search reports…" value={q} onChange={e => setQ(e.target.value)} style={{ width: 340 }} />
+            <Segmented size="large" value={layout} onChange={setLayoutKeep}
+              options={[{ value: 'grid', icon: <AppstoreOutlined /> }, { value: 'list', icon: <UnorderedListOutlined /> }]} />
+            <Button size="large" className="apx-narrow-only" icon={<ScheduleOutlined />} onClick={onScheduled}>Scheduled</Button>
+          </div>
+        </div>
+
+        {!term && !active && (pinned.length > 0 || recent.length > 0) && (
+          <div className="apx-quick">
+            {pinned.length > 0 && <QuickRow label="Pinned" items={pinned} onOpen={onOpen} icon={<StarFilled style={{ color: '#f59e0b' }} />} />}
+            {recent.length > 0 && <QuickRow label="Recent" items={recent} onOpen={onOpen} icon={<ClockCircleOutlined style={{ color: T.faint }} />} />}
+          </div>
+        )}
+
+        {groups.length === 0 && <Empty style={{ marginTop: 80 }} description={`No report matches “${q}”`} />}
+
+        {groups.map(g => (
+          <section key={g.key} className="apx-group">
+            <div className="apx-group-head">
+              <span className="apx-dot" style={{ background: g.color }} />
+              <h2>{g.title}</h2>
+              <span className="apx-blurb">{g.blurb}</span>
+            </div>
+            {layout === 'grid' ? (
+              <div className="apx-grid">
+                {g.reports.map(r => (
+                  <div key={r.code} className="apx-card" role="button" tabIndex={0}
+                    onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}
+                    style={{ '--accent': g.color }}>
+                    <div className="apx-card-top">
+                      <span className="apx-card-title">{r.title}</span>
+                      <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
+                    </div>
+                    <div className="apx-card-desc">{r.desc}</div>
+                    <div className="apx-card-go">Open <RightOutlined style={{ fontSize: 10 }} /></div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </section>
-      ))}
+            ) : (
+              <div className="apx-panel">
+                {g.reports.map(r => (
+                  <div key={r.code} className="apx-list-row" role="button" tabIndex={0}
+                    onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}>
+                    <span className="apx-card-title" style={{ width: 260, flexShrink: 0 }}>{r.title}</span>
+                    <span className="apx-card-desc">{r.desc}</span>
+                    <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
+                    <RightOutlined style={{ fontSize: 11, color: T.faint }} />
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        ))}
+      </div>
     </div>
+  );
+}
+
+function PinStar({ on, onClick }) {
+  return (
+    <span className="apx-pin" onClick={e => { e.stopPropagation(); onClick(); }} title={on ? 'Unpin' : 'Pin'}>
+      {on ? <StarFilled style={{ color: '#f59e0b' }} /> : <StarOutlined />}
+    </span>
   );
 }
 
@@ -213,17 +295,33 @@ function toApiFilters(report, s) {
   return out;
 }
 
-function ReportView({ report, pinned, onPin, onBack, canExport = true }) {
+const NUMERIC = ['number', 'currency', 'integer'];
+const NOT_SUMMABLE = /(^id$|_id$|year|month|^day|pct|percent|rate|age|days_on_board)/i;
+
+function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, canExport = true }) {
   const { message } = App.useApp();
-  const [filters, setFilters] = useState(() => initialFilters(report));
+  const code = report.code;
+  const [filters, setFilters] = useState(() => initial || initialFilters(report));
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [pageSize, setPageSize] = useState(() => store.get(PAGESIZE, 50));
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [showChart, setShowChart] = useState(false);
+  const [chartType, setChartType] = useState('bar');
   const [exporting, setExporting] = useState(null);
   const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [hidden, setHidden] = useState(() => store.get(`${COLS}.${code}`, []));
+  const [density, setDensity] = useState(() => store.get(DENSITY, 'middle'));
+  const [find, setFind] = useState('');
+  const [detail, setDetail] = useState(null);
+  const [focus, setFocus] = useState(false);
+  const [railOpen, setRailOpen] = useState(() => store.get(RAIL, true));
+  const [autoRefresh, setAutoRefresh] = useState(0);
+  const [loadedAt, setLoadedAt] = useState(null);
+  const [views, setViews] = useState(() => store.get(`${VIEWS}.${code}`, []));
+  const tableBox = useRef(null);
+  const [tableH, setTableH] = useState(480);
 
   const missing = (report.filters?.required || []).filter(k => !filters[k]);
   const apiFilters = useMemo(() => toApiFilters(report, filters), [report, filters]);
@@ -233,17 +331,44 @@ function ReportView({ report, pinned, onPin, onBack, canExport = true }) {
     setLoading(true); setError(null);
     try {
       const res = await apiService.post('/api/v1/report/data', {
-        report_code: report.code, filters: apiFilters, page, page_size: pageSize,
+        report_code: code, filters: apiFilters, page, page_size: pageSize,
       });
       setData(res);
+      setLoadedAt(dayjs());
     } catch (e) {
       setError(e?.response?.data?.detail || e?.message || 'Could not load this report');
     } finally {
       setLoading(false);
     }
-  }, [report.code, apiFilters, page, pageSize, missing.length]);
+  }, [code, apiFilters, page, pageSize, missing.length]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!autoRefresh) return undefined;
+    const t = setInterval(load, autoRefresh * 1000);
+    return () => clearInterval(t);
+  }, [autoRefresh, load]);
+
+  // Table fills the rest of the screen (header stays put, rows scroll).
+  useLayoutEffect(() => {
+    const fit = () => {
+      const el = tableBox.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      setTableH(Math.max(260, window.innerHeight - top - 128));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, [showChart, focus, data, railOpen, missing.length]);
+
+  // Esc leaves full screen.
+  useEffect(() => {
+    if (!focus) return undefined;
+    const onKey = (e) => e.key === 'Escape' && setFocus(false);
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focus]);
 
   const set = (k, v) => { setPage(1); setFilters(prev => ({ ...prev, [k]: v })); };
 
@@ -254,7 +379,7 @@ function ReportView({ report, pinned, onPin, onBack, canExport = true }) {
       const res = await fetch('/api/v1/report/export/file', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ report_code: report.code, filters: apiFilters, format }),
+        body: JSON.stringify({ report_code: code, filters: apiFilters, format }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`);
       const blob = await res.blob();
@@ -270,127 +395,323 @@ function ReportView({ report, pinned, onPin, onBack, canExport = true }) {
     }
   };
 
-  const columns = useMemo(() => (data?.columns || []).map(c => ({
+  const copyLink = async () => {
+    const url = `${window.location.origin}${window.location.pathname}?r=${encodeURIComponent(code)}`
+      + `&f=${encodeURIComponent(JSON.stringify(serializeFilters(filters)))}`;
+    try { await navigator.clipboard.writeText(url); message.success('Link copied — it opens this report with these filters'); }
+    catch { Modal.info({ title: 'Link to this view', content: <Input.TextArea value={url} autoSize readOnly /> }); }
+  };
+
+  const saveView = () => {
+    let name = '';
+    Modal.confirm({
+      title: 'Save these filters as a view',
+      icon: <SaveOutlined />,
+      content: <Input autoFocus placeholder="e.g. Drilling dept — last 30 days" onChange={e => { name = e.target.value; }} />,
+      okText: 'Save',
+      onOk: () => {
+        if (!name.trim()) return Promise.reject();
+        const next = [...views.filter(v => v.name !== name.trim()), { name: name.trim(), f: serializeFilters(filters) }];
+        setViews(next); store.set(`${VIEWS}.${code}`, next);
+        message.success('View saved');
+        return undefined;
+      },
+    });
+  };
+  const applyView = (v) => { const f = deserializeFilters(v.f, report); if (f) { setPage(1); setFilters(f); } };
+  const deleteView = (name) => { const next = views.filter(v => v.name !== name); setViews(next); store.set(`${VIEWS}.${code}`, next); };
+
+  const allCols = data?.columns || [];
+  const columns = useMemo(() => allCols.filter(c => !hidden.includes(c.field)).map(c => ({
     title: c.label, dataIndex: c.field, key: c.field, ellipsis: true,
-    align: ['number', 'currency', 'percentage', 'integer'].includes(c.type) ? 'right' : 'left',
+    align: [...NUMERIC, 'percentage'].includes(c.type) ? 'right' : 'left',
     sorter: (a, b) => {
       const x = a[c.field], y = b[c.field];
       return typeof x === 'number' && typeof y === 'number' ? x - y : String(x ?? '').localeCompare(String(y ?? ''));
     },
-    render: (v) => renderCell(v, c.type),
-  })), [data]);
+    render: (v) => renderCell(v, c.type, find),
+  })), [allCols, hidden, find]); // eslint-disable-line
+
+  const rows = useMemo(() => {
+    const all = data?.data || [];
+    const q = find.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(r => Object.values(r).some(v => v !== null && v !== undefined && String(v).toLowerCase().includes(q)));
+  }, [data, find]);
+
+  const sumCols = columns.filter(c => {
+    const t = allCols.find(x => x.field === c.dataIndex)?.type;
+    return NUMERIC.includes(t) && !NOT_SUMMABLE.test(c.dataIndex);
+  }).map(c => c.dataIndex);
 
   const kpis = useMemo(() => {
     const s = data?.summary || {};
     const spec = report.kpis;
     const entries = spec
       ? Object.entries(spec).filter(([k]) => s[k] !== undefined && s[k] !== null).map(([k, label]) => [label, s[k]])
-      : Object.entries(s).filter(([, v]) => typeof v === 'number').slice(0, 4).map(([k, v]) => [humanize(k), v]);
-    return [['Rows', data?.total ?? 0], ...entries].slice(0, 5);
+      : Object.entries(s).filter(([, v]) => typeof v === 'number').slice(0, 5).map(([k, v]) => [humanize(k), v]);
+    return [['Rows', data?.total ?? 0], ...entries].slice(0, 6);
   }, [data, report.kpis]);
 
   const chart = data?.chart_data?.labels?.length && data?.chart_data?.datasets?.[0]
     ? data.chart_data.labels.map((l, i) => ({ name: String(l), value: Number(data.chart_data.datasets[0].data?.[i] ?? 0) }))
     : null;
 
-  return (
-    <div style={{ maxWidth: 1400, margin: '0 auto' }}>
-      <button className="apx-back" onClick={onBack}><ArrowLeftOutlined /> Reports <span style={{ color: T.faint }}>/</span> {report.group.title}</button>
+  const toggleCol = (field, on) => {
+    const next = on ? hidden.filter(f => f !== field) : [...hidden, field];
+    setHidden(next); store.set(`${COLS}.${code}`, next);
+  };
+  const columnMenu = (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 360, overflow: 'auto', minWidth: 200 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+        <b>Columns</b>
+        <a onClick={() => { setHidden([]); store.set(`${COLS}.${code}`, []); }}>Show all</a>
+      </div>
+      {allCols.map(c => (
+        <Checkbox key={c.field} checked={!hidden.includes(c.field)}
+          disabled={!hidden.includes(c.field) && allCols.length - hidden.length <= 1}
+          onChange={e => toggleCol(c.field, e.target.checked)}>{c.label}</Checkbox>
+      ))}
+      <div style={{ borderTop: `1px solid ${T.line}`, paddingTop: 8, marginTop: 4 }}>
+        <b>Row height</b>
+        <Segmented block size="small" style={{ marginTop: 6 }} value={density}
+          onChange={(v) => { setDensity(v); store.set(DENSITY, v); }}
+          options={[{ label: 'Compact', value: 'small' }, { label: 'Normal', value: 'middle' }, { label: 'Roomy', value: 'large' }]} />
+      </div>
+    </div>
+  );
 
-      <div className="apx-report-head">
-        <div style={{ minWidth: 0 }}>
-          <h1 className="apx-h1" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className="apx-bar" style={{ background: report.group.color }} />
-            {report.title}
-          </h1>
-          <div className="apx-sub">{report.desc}</div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-          <Tooltip title={pinned ? 'Unpin' : 'Pin to the library'}>
-            <Button icon={pinned ? <StarFilled style={{ color: '#f59e0b' }} /> : <StarOutlined />} onClick={onPin} />
-          </Tooltip>
-          <Tooltip title="Refresh"><Button icon={<ReloadOutlined />} onClick={load} loading={loading} /></Tooltip>
-          {chart && <Button icon={<BarChartOutlined />} type={showChart ? 'primary' : 'default'} ghost={showChart}
-            onClick={() => setShowChart(v => !v)}>Chart</Button>}
-          {canExport && (
+  const viewItems = [
+    ...views.map(v => ({
+      key: `v:${v.name}`,
+      label: (
+        <span style={{ display: 'flex', justifyContent: 'space-between', gap: 16 }}>
+          {v.name}
+          <DeleteOutlined style={{ color: T.faint }} onClick={(e) => { e.stopPropagation(); deleteView(v.name); }} />
+        </span>
+      ),
+    })),
+    ...(views.length ? [{ type: 'divider' }] : []),
+    { key: 'save', icon: <SaveOutlined />, label: 'Save current filters…' },
+    { key: 'reset', icon: <ReloadOutlined />, label: 'Reset filters' },
+  ];
+
+  return (
+    <div className={`apx-report ${focus ? 'apx-focus' : ''} ${railOpen ? '' : 'apx-rail-closed'}`}>
+      {railOpen && !focus && (
+        <aside className="apx-rail apx-report-rail">
+          <button className="apx-back" onClick={onBack}><ArrowLeftOutlined /> All reports</button>
+          {REPORT_GROUPS.map(g => {
+            const list = g.reports.filter(r => canView(r.code));
+            if (!list.length) return null;
+            return (
+              <div key={g.key} style={{ marginBottom: 14 }}>
+                <div className="apx-rail-title"><span className="apx-dot" style={{ background: g.color }} /> {g.title}</div>
+                {list.map(r => (
+                  <button key={r.code} className={`apx-rail-item sm ${r.code === code ? 'on' : ''}`} onClick={() => onOpen(r.code)}>{r.title}</button>
+                ))}
+              </div>
+            );
+          })}
+        </aside>
+      )}
+
+      <div className="apx-report-main">
+        <div className="apx-report-head">
+          <div style={{ minWidth: 0, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            {!focus && (
+              <Tooltip title={railOpen ? 'Hide report list' : 'Show report list'}>
+                <Button type="text" icon={railOpen ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
+                  onClick={() => { setRailOpen(!railOpen); store.set(RAIL, !railOpen); }} />
+              </Tooltip>
+            )}
+            <div style={{ minWidth: 0 }}>
+              <div className="apx-crumb">
+                <a onClick={onBack}>Reports</a> <span style={{ color: T.faint }}>/</span> {report.group.title}
+              </div>
+              <h1 className="apx-h1" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span className="apx-bar" style={{ background: report.group.color }} />
+                {report.title}
+              </h1>
+              <div className="apx-sub">{report.desc}</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
+            <span className="apx-updated">
+              {loadedAt ? <>Updated {loadedAt.format('HH:mm:ss')}</> : null}
+            </span>
             <Dropdown menu={{
-              items: [
-                { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
-                { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
-                { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
-                { type: 'divider' },
-                { key: 'schedule', icon: <ScheduleOutlined style={{ color: T.accent }} />, label: 'Schedule…' },
-              ],
-              onClick: ({ key }) => (key === 'schedule' ? setScheduleOpen(true) : exportAs(key)),
+              selectable: true, selectedKeys: [String(autoRefresh)],
+              items: [{ key: '0', label: 'Auto-refresh off' }, { key: '30', label: 'Every 30 seconds' },
+                { key: '60', label: 'Every minute' }, { key: '300', label: 'Every 5 minutes' }],
+              onClick: ({ key }) => setAutoRefresh(Number(key)),
             }}>
-              <Button type="primary" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
+              <Button icon={<SyncOutlined spin={!!autoRefresh && loading} style={autoRefresh ? { color: T.accent } : undefined} />}>
+                {autoRefresh ? (autoRefresh < 60 ? `${autoRefresh}s` : `${autoRefresh / 60}m`) : ''}
+              </Button>
             </Dropdown>
-          )}
+            <Tooltip title="Refresh now"><Button icon={<ReloadOutlined />} onClick={load} loading={loading} /></Tooltip>
+            <Tooltip title={pinned ? 'Unpin' : 'Pin to the library'}>
+              <Button icon={pinned ? <StarFilled style={{ color: '#f59e0b' }} /> : <StarOutlined />} onClick={onPin} />
+            </Tooltip>
+            <Tooltip title="Copy a link to this report with these filters"><Button icon={<LinkOutlined />} onClick={copyLink} /></Tooltip>
+            <Tooltip title={focus ? 'Exit full screen (Esc)' : 'Full screen'}>
+              <Button icon={focus ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => setFocus(!focus)} />
+            </Tooltip>
+            {chart && <Button icon={<BarChartOutlined />} type={showChart ? 'primary' : 'default'} ghost={showChart}
+              onClick={() => setShowChart(v => !v)}>Chart</Button>}
+            {canExport && (
+              <Dropdown menu={{
+                items: [
+                  { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
+                  { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
+                  { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
+                  { type: 'divider' },
+                  { key: 'schedule', icon: <ScheduleOutlined style={{ color: T.accent }} />, label: 'Schedule…' },
+                ],
+                onClick: ({ key }) => (key === 'schedule' ? setScheduleOpen(true) : exportAs(key)),
+              }}>
+                <Button type="primary" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
+              </Dropdown>
+            )}
+          </div>
         </div>
+
+        <div className="apx-filter-row">
+          <FilterBar report={report} filters={filters} set={set} setFilters={(f) => { setPage(1); setFilters(f); }} />
+          <Dropdown trigger={['click']} menu={{
+            items: viewItems,
+            onClick: ({ key }) => {
+              if (key === 'save') saveView();
+              else if (key === 'reset') { setPage(1); setFilters(initialFilters(report)); }
+              else applyView(views.find(v => `v:${v.name}` === key));
+            },
+          }}>
+            <Button icon={<SaveOutlined />}>Views{views.length ? ` (${views.length})` : ''}</Button>
+          </Dropdown>
+        </div>
+        <ScheduleModal open={scheduleOpen} onClose={() => setScheduleOpen(false)} report={report} filters={filters} />
+
+        {missing.length > 0 ? (
+          <div className="apx-panel" style={{ padding: 56 }}>
+            <Empty description={`Choose ${missing.map(k => ({ person: 'a person', musterEvent: 'a muster event' }[k] || k)).join(' and ')} above to run this report.`} />
+          </div>
+        ) : (
+          <>
+            <div className="apx-kpis">
+              {kpis.map(([label, v]) => (
+                <div key={label} className="apx-kpi" style={{ '--accent': report.group.color }}>
+                  <div className="apx-kpi-v">{loading && !data ? <Skeleton.Input size="small" active /> : (fmtNum(v) ?? '—')}</div>
+                  <div className="apx-kpi-l">{label}</div>
+                </div>
+              ))}
+            </div>
+
+            {showChart && chart && (
+              <div className="apx-panel" style={{ padding: '12px 18px 6px', marginBottom: 14 }}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
+                  <Segmented size="small" value={chartType} onChange={setChartType}
+                    options={[{ value: 'bar', icon: <BarChartOutlined /> }, { value: 'line', icon: <LineChartOutlined /> }]} />
+                </div>
+                <ResponsiveContainer width="100%" height={240}>
+                  {chartType === 'line' ? (
+                    <LineChart data={chart} margin={{ top: 4, right: 12, left: -12, bottom: 4 }}>
+                      <CartesianGrid vertical={false} stroke={T.line} />
+                      <XAxis dataKey="name" tick={{ fontSize: 12, fill: T.muted }} interval="preserveStartEnd" />
+                      <YAxis tick={{ fontSize: 12, fill: T.muted }} allowDecimals={false} />
+                      <RTooltip />
+                      <Line type="monotone" dataKey="value" stroke={report.group.color} strokeWidth={2.5} dot={chart.length < 40} />
+                    </LineChart>
+                  ) : (
+                    <BarChart data={chart} margin={{ top: 4, right: 8, left: -12, bottom: 4 }}>
+                      <CartesianGrid vertical={false} stroke={T.line} />
+                      <XAxis dataKey="name" tick={{ fontSize: 12, fill: T.muted }} interval={chart.length > 24 ? 'preserveStartEnd' : 0}
+                        angle={chart.length > 8 ? -30 : 0} textAnchor={chart.length > 8 ? 'end' : 'middle'} height={chart.length > 8 ? 60 : 30} />
+                      <YAxis tick={{ fontSize: 12, fill: T.muted }} allowDecimals={false} />
+                      <RTooltip cursor={{ fill: 'rgba(37,99,235,0.06)' }} />
+                      <Bar dataKey="value" fill={report.group.color} radius={[4, 4, 0, 0]} maxBarSize={44} />
+                    </BarChart>
+                  )}
+                </ResponsiveContainer>
+              </div>
+            )}
+
+            <div className="apx-panel">
+              <div className="apx-table-bar">
+                <Input allowClear size="small" prefix={<SearchOutlined style={{ color: T.faint }} />} style={{ width: 260 }}
+                  placeholder="Find in these rows…" value={find} onChange={e => setFind(e.target.value)} />
+                {find && <span className="apx-sub" style={{ margin: 0, fontSize: 12.5 }}>{rows.length} of {(data?.data || []).length} rows on this page match</span>}
+                <span style={{ flex: 1 }} />
+                <span className="apx-sub" style={{ margin: 0, fontSize: 12.5 }}>Click a row for details</span>
+                <Popover trigger="click" placement="bottomRight" content={columnMenu}>
+                  <Button size="small" icon={<SettingOutlined />}>
+                    Columns{hidden.length ? ` (${allCols.length - hidden.filter(h => allCols.some(c => c.field === h)).length}/${allCols.length})` : ''}
+                  </Button>
+                </Popover>
+              </div>
+              <div ref={tableBox}>
+                {error ? (
+                  <div style={{ padding: 48 }}><Empty description={<span style={{ color: '#dc2626' }}>{error}</span>} /></div>
+                ) : (
+                  <Table
+                    rowKey={(r, i) => r.id ?? r.emp_code ?? i}
+                    size={density}
+                    columns={columns}
+                    dataSource={rows}
+                    loading={loading}
+                    scroll={{ x: 'max-content', y: tableH }}
+                    onRow={(r) => ({ onClick: () => setDetail(r), style: { cursor: 'pointer' } })}
+                    locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={find ? 'No row on this page matches' : 'Nothing for these filters'} /> }}
+                    summary={sumCols.length && rows.length > 1 ? (pageRows) => (
+                      <Table.Summary fixed>
+                        <Table.Summary.Row className="apx-total">
+                          {columns.map((c, i) => (
+                            <Table.Summary.Cell key={c.key} index={i} align={c.align}>
+                              {sumCols.includes(c.dataIndex)
+                                ? fmtNum(pageRows.reduce((t, r) => t + (Number(r[c.dataIndex]) || 0), 0))
+                                : i === 0 ? <b>Page total</b> : null}
+                            </Table.Summary.Cell>
+                          ))}
+                        </Table.Summary.Row>
+                      </Table.Summary>
+                    ) : undefined}
+                    pagination={{
+                      current: page, pageSize, total: data?.total || 0, showSizeChanger: true,
+                      pageSizeOptions: [25, 50, 100, 200, 500],
+                      showTotal: (t, r) => `${r[0]}–${r[1]} of ${t.toLocaleString()}`,
+                      onChange: (p, s) => { setPage(p); setPageSize(s); store.set(PAGESIZE, s); },
+                    }}
+                  />
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
-      <FilterBar report={report} filters={filters} set={set} setFilters={(f) => { setPage(1); setFilters(f); }} />
-      <ScheduleModal open={scheduleOpen} onClose={() => setScheduleOpen(false)} report={report} filters={filters} />
-
-      {missing.length > 0 ? (
-        <div className="apx-panel" style={{ padding: 56 }}>
-          <Empty description={`Choose ${missing.map(k => ({ person: 'a person', musterEvent: 'a muster event' }[k] || k)).join(' and ')} above to run this report.`} />
-        </div>
-      ) : (
-        <>
-          <div className="apx-kpis">
-            {kpis.map(([label, v]) => (
-              <div key={label} className="apx-kpi">
-                <div className="apx-kpi-v">{loading && !data ? <Skeleton.Input size="small" active /> : (fmtNum(v) ?? '—')}</div>
-                <div className="apx-kpi-l">{label}</div>
+      <Drawer title={report.title} width={460} open={!!detail} onClose={() => setDetail(null)}>
+        {detail && (
+          <div className="apx-detail">
+            {allCols.map(c => (
+              <div key={c.field} className="apx-detail-row">
+                <span>{c.label}</span>
+                <div>{renderCell(detail[c.field], c.type)}</div>
               </div>
             ))}
           </div>
-
-          {showChart && chart && (
-            <div className="apx-panel" style={{ padding: '18px 18px 6px', marginBottom: 16 }}>
-              <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={chart} margin={{ top: 4, right: 8, left: -12, bottom: 4 }}>
-                  <CartesianGrid vertical={false} stroke={T.line} />
-                  <XAxis dataKey="name" tick={{ fontSize: 12, fill: T.muted }} interval={0} angle={chart.length > 8 ? -30 : 0}
-                    textAnchor={chart.length > 8 ? 'end' : 'middle'} height={chart.length > 8 ? 60 : 30} />
-                  <YAxis tick={{ fontSize: 12, fill: T.muted }} allowDecimals={false} />
-                  <RTooltip cursor={{ fill: 'rgba(37,99,235,0.06)' }} />
-                  <Bar dataKey="value" fill={report.group.color} radius={[4, 4, 0, 0]} maxBarSize={44} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          <div className="apx-panel">
-            {error ? (
-              <div style={{ padding: 48 }}><Empty description={<span style={{ color: '#dc2626' }}>{error}</span>} /></div>
-            ) : (
-              <Table
-                rowKey={(r, i) => r.id ?? r.emp_code ?? i}
-                size="middle"
-                columns={columns}
-                dataSource={data?.data || []}
-                loading={loading}
-                scroll={{ x: 'max-content' }}
-                sticky
-                locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Nothing for these filters" /> }}
-                pagination={{
-                  current: page, pageSize, total: data?.total || 0, showSizeChanger: true,
-                  pageSizeOptions: [25, 50, 100, 200],
-                  showTotal: (t, r) => `${r[0]}–${r[1]} of ${t.toLocaleString()}`,
-                  onChange: (p, s) => { setPage(p); setPageSize(s); },
-                }}
-              />
-            )}
-          </div>
-        </>
-      )}
+        )}
+      </Drawer>
     </div>
   );
 }
 
-function renderCell(v, type) {
+function Highlight({ text, q }) {
+  const i = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;
+  if (i < 0) return text;
+  return <>{text.slice(0, i)}<mark className="apx-mark">{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length)}</>;
+}
+
+function renderCell(v, type, find = '') {
   if (v === null || v === undefined || v === '') return <span style={{ color: T.faint }}>—</span>;
   switch (type) {
     case 'status': return <Tag color={statusColor(v)} style={{ marginInlineEnd: 0 }}>{String(v)}</Tag>;
@@ -404,7 +725,7 @@ function renderCell(v, type) {
       if (typeof v === 'string' && STATUS_COLORS.some(([re]) => re.test(v)) && v.length <= 20 && /^[A-Za-z -]+$/.test(v)) {
         return <Tag color={statusColor(v)} style={{ marginInlineEnd: 0 }}>{v}</Tag>;
       }
-      return String(v);
+      return find ? <Highlight text={String(v)} q={find} /> : String(v);
   }
 }
 
@@ -444,10 +765,11 @@ function FilterBar({ report, filters, set, setFilters }) {
   const f = report.filters || {};
   const extra = f.extra || [];
   const { depts, zones, events } = useLookups(extra);
-  if (f.date === 'none' && extra.length === 0) return null;
+  if (f.date === 'none' && extra.length === 0) return <div className="apx-filters apx-filters-empty">No filters — this report shows the current state.</div>;
 
   return (
     <div className="apx-filters">
+      <FilterOutlined style={{ color: T.faint, marginLeft: 4 }} />
       {f.date === 'range' && (
         <>
           <Segmented value={filters._preset || 'custom'}
@@ -695,7 +1017,7 @@ const CSS = `
 .apx-group-head h2 { font-size: 16px; font-weight: 700; margin: 0; color: ${T.ink}; }
 .apx-group-head .apx-dot { transform: translateY(-1px); }
 .apx-blurb { color: ${T.muted}; font-size: 13px; }
-.apx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+.apx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .apx-card { position: relative; background: ${T.card}; border: 1px solid ${T.line}; border-radius: 12px; padding: 16px 16px 14px;
   cursor: pointer; transition: transform .15s, box-shadow .15s, border-color .15s; display: flex; flex-direction: column; gap: 6px; min-height: 118px; outline: none; }
 .apx-card::before { content: ''; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); opacity: .0; transition: opacity .15s; }
@@ -711,12 +1033,12 @@ const CSS = `
 
 .apx-back { all: unset; cursor: pointer; color: ${T.muted}; font-size: 13px; display: inline-flex; gap: 8px; align-items: center; margin-bottom: 14px; }
 .apx-back:hover { color: ${T.accent}; }
-.apx-report-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+.apx-report-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
 .apx-bar { width: 4px; height: 24px; border-radius: 3px; display: inline-block; }
 
 .apx-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; background: ${T.card}; border: 1px solid ${T.line};
   border-radius: 12px; padding: 12px; margin-bottom: 16px; }
-.apx-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.apx-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .apx-kpi { background: ${T.card}; border: 1px solid ${T.line}; border-radius: 12px; padding: 14px 16px; }
 .apx-kpi-v { font-size: 26px; font-weight: 750; letter-spacing: -0.5px; color: ${T.ink}; line-height: 1.15; }
 .apx-kpi-l { color: ${T.muted}; font-size: 12.5px; margin-top: 4px; }
@@ -724,8 +1046,54 @@ const CSS = `
 .apx-panel .ant-table-thead > tr > th { background: #f8fafc; color: ${T.muted}; font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
 .apx-panel .ant-table-tbody > tr > td { font-size: 13.5px; }
 .apx-panel .ant-pagination { padding: 0 16px; }
+/* full-bleed: cancel the app layout's padding so the page uses the whole screen */
+.apx-reports { background: ${T.bg}; margin: -24px; padding: 20px 24px 28px; min-height: calc(100vh - 64px); border-radius: 8px; }
+.apx-lib { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 28px; }
+.apx-rail { position: sticky; top: 12px; align-self: start; max-height: calc(100vh - 100px); overflow: auto; padding-right: 4px; }
+.apx-rail-title { font-size: 11.5px; font-weight: 650; color: ${T.faint}; text-transform: uppercase; letter-spacing: .07em; margin: 4px 8px 6px; display: flex; gap: 6px; align-items: center; }
+.apx-rail-item { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 10px;
+  border-radius: 8px; font-size: 13.5px; color: ${T.ink}; transition: background .12s; }
+.apx-rail-item.sm { padding: 5px 10px 5px 24px; font-size: 13px; color: #334155; }
+.apx-rail-item:hover { background: #eef1f6; }
+.apx-rail-item.on { background: #e8efff; color: ${T.accent}; font-weight: 600; }
+.apx-count { margin-left: auto; font-size: 12px; color: ${T.faint}; }
+.apx-narrow-only { display: none !important; }
+kbd { font-family: inherit; font-size: 11px; background: #fff; border: 1px solid ${T.line}; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
+.apx-list-row { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid ${T.line}; cursor: pointer; outline: none; }
+.apx-list-row:last-child { border-bottom: 0; }
+.apx-list-row:hover, .apx-list-row:focus-visible { background: #f8fafc; }
+.apx-list-row .apx-card-desc { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.apx-report { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 22px; }
+.apx-report.apx-rail-closed, .apx-report.apx-focus { grid-template-columns: minmax(0, 1fr); }
+.apx-report-rail .apx-back { margin: 2px 8px 14px; }
+.apx-focus { position: fixed; inset: 0; z-index: 1000; background: ${T.bg}; padding: 16px 22px; overflow: auto; }
+.apx-crumb { font-size: 12.5px; color: ${T.muted}; margin-bottom: 2px; }
+.apx-crumb a { color: ${T.muted}; }
+.apx-crumb a:hover { color: ${T.accent}; }
+.apx-updated { font-size: 12px; color: ${T.faint}; margin-right: 4px; }
+.apx-filter-row { display: flex; gap: 10px; align-items: stretch; margin-bottom: 14px; }
+.apx-filter-row .apx-filters { flex: 1; margin-bottom: 0; }
+.apx-filter-row > .ant-btn, .apx-filter-row > .ant-dropdown-trigger { height: auto; border-radius: 12px; }
+.apx-filters-empty { color: ${T.faint}; font-size: 13px; }
+.apx-kpi { position: relative; overflow: hidden; }
+.apx-kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: .8; }
+.apx-table-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid ${T.line}; flex-wrap: wrap; }
+.apx-panel .ant-table-tbody > tr:hover > td { background: #f5f8ff !important; }
+.apx-total td { background: #f8fafc !important; font-weight: 650; }
+.apx-mark { background: #fde68a; padding: 0 1px; border-radius: 2px; }
+.apx-detail { display: flex; flex-direction: column; }
+.apx-detail-row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 9px 0; border-bottom: 1px solid ${T.line}; font-size: 13.5px; }
+.apx-detail-row > span { color: ${T.muted}; }
+.apx-detail-row > div { word-break: break-word; }
+@media (max-width: 1100px) {
+  .apx-lib, .apx-report { grid-template-columns: minmax(0, 1fr); }
+  .apx-rail { display: none; }
+  .apx-narrow-only { display: inline-flex !important; }
+}
 @media (max-width: 640px) {
-  .apx-reports { padding: 20px 16px 40px !important; }
+  .apx-reports { margin: -24px -16px; padding: 16px 16px 32px; }
   .apx-lib-head .ant-input-affix-wrapper { width: 100% !important; }
+  .apx-filter-row { flex-direction: column; }
 }
 `;
