@@ -132,8 +132,10 @@ class MusteringService:
             if active_event:
                 raise ValueError("An active mustering event already exists. End it before starting a new one.")
 
-            # Calculate expected personnel from zone occupancy (access-control)
-            expected_personnel = self._calculate_expected_personnel(zone_ids)
+            # Calculate expected personnel from zone occupancy (access-control), plus
+            # every visitor checked in and not yet out — they are on site, usually
+            # without a reader badge, and must be accounted for like anyone else.
+            expected_personnel = self._calculate_expected_personnel(zone_ids) + self._visitors_on_site()
             total_expected = len(expected_personnel)
 
             # Use first zone as the FK anchor; all zones stored in zone_ids JSONB
@@ -562,7 +564,9 @@ class MusteringService:
             total_safe = len([log for log in logs if log.status == 1])
             total_missing = len([log for log in logs if log.status == 0])
             total_injured = len([log for log in logs if log.status == 2])
-            total_accounted = total_safe + total_injured
+            total_left = len([log for log in logs if log.status == 3])
+            total_visitors = len([log for log in logs if (log.emp_code or "").startswith(self.VISITOR_PREFIX)])
+            total_accounted = total_safe + total_injured + total_left
 
             completion_percentage = (total_accounted / event.total_expected * 100) if event.total_expected > 0 else 0
 
@@ -577,8 +581,10 @@ class MusteringService:
                     zone_tally[area]['safe'] += 1
                 elif log.status == 0:
                     zone_tally[area]['missing'] += 1
-                else:
+                elif log.status == 2:
                     zone_tally[area]['injured'] += 1
+                else:
+                    zone_tally[area]['left_site'] = zone_tally[area].get('left_site', 0) + 1
 
             # Attach zone IDs for front-end linking
             event_zone_ids = event.zone_ids or ([event.zone_id] if event.zone_id else [])
@@ -598,6 +604,8 @@ class MusteringService:
                 "total_safe": total_safe,
                 "total_missing": total_missing,
                 "total_injured": total_injured,
+                "total_left_site": total_left,
+                "total_visitors": total_visitors,
                 "total_accounted": total_accounted,
                 "completion_percentage": round(completion_percentage, 2),
                 "zone_breakdown": zone_breakdown,
@@ -897,8 +905,8 @@ class MusteringService:
     def mark_person_status(self, event_id: int, emp_code: str, status: int, marked_by: int) -> Dict[str, Any]:
         """Manually mark a person's status"""
         try:
-            if status not in [0, 1, 2]:  # Missing, Safe, Injured
-                raise ValueError("Invalid status. Must be 0 (Missing), 1 (Safe), or 2 (Injured)")
+            if status not in [0, 1, 2, 3]:  # Missing, Safe, Injured, Left site
+                raise ValueError("Invalid status. Must be 0 (Missing), 1 (Safe), 2 (Injured) or 3 (Left site)")
             
             log = self.db.query(MusteringLog).filter(
                 and_(
@@ -926,28 +934,23 @@ class MusteringService:
                     if mz:
                         log.last_punch_area = mz.name
 
-            # Compute counter deltas and apply atomically
-            delta_safe = delta_missing = delta_injured = 0
-            if old_status == 0 and status == 1:    # Missing -> Safe
-                delta_safe, delta_missing = +1, -1
-            elif old_status == 0 and status == 2:  # Missing -> Injured
-                delta_injured, delta_missing = +1, -1
-            elif old_status == 1 and status == 0:  # Safe -> Missing
-                delta_safe, delta_missing = -1, +1
-            elif old_status == 1 and status == 2:  # Safe -> Injured
-                delta_injured, delta_safe = +1, -1
-            elif old_status == 2 and status == 0:  # Injured -> Missing
-                delta_injured, delta_missing = -1, +1
-            elif old_status == 2 and status == 1:  # Injured -> Safe
-                delta_safe, delta_injured = +1, -1
+            # Counter deltas: leave the old bucket, join the new one. "Left site" (3)
+            # has no counter of its own — it only stops counting as missing.
+            bucket = {0: "missing", 1: "safe", 2: "injured", 3: None}
+            deltas = {"safe": 0, "missing": 0, "injured": 0}
+            if old_status != status:
+                if bucket.get(old_status):
+                    deltas[bucket[old_status]] -= 1
+                if bucket.get(status):
+                    deltas[bucket[status]] += 1
+            if any(deltas.values()):
+                self._adjust_event_counters(event_id, delta_safe=deltas["safe"],
+                                            delta_missing=deltas["missing"], delta_injured=deltas["injured"])
 
-            if any([delta_safe, delta_missing, delta_injured]):
-                self._adjust_event_counters(
-                    event_id,
-                    delta_safe=delta_safe,
-                    delta_missing=delta_missing,
-                    delta_injured=delta_injured,
-                )
+            # Keep the visit record in step for visitors.
+            if emp_code.startswith(self.VISITOR_PREFIX) and emp_code[len(self.VISITOR_PREFIX):].isdigit():
+                self.db.execute(text("UPDATE vis_visit_log SET mustering_status = :s WHERE id = :i"),
+                                {"s": status, "i": int(emp_code[len(self.VISITOR_PREFIX):])})
 
             self.db.commit()
             
@@ -966,6 +969,53 @@ class MusteringService:
             self.db.rollback()
             raise
     
+    VISITOR_PREFIX = "VIS-"
+
+    def _visitors_on_site(self) -> List[Dict[str, Any]]:
+        """Checked-in visitors as muster rows (emp_code VIS-<visit id>)."""
+        try:
+            rows = self.db.execute(text("""
+                SELECT l.id, v.full_name, v.company, v.phone,
+                       COALESCE(NULLIF(TRIM(CONCAT(h.first_name, ' ', h.last_name)), ''), h.emp_code) AS host
+                FROM vis_visit_log l
+                JOIN vis_visitor v ON v.id = l.visitor_id
+                LEFT JOIN personnel_employee h ON h.id = l.host_emp_id
+                WHERE l.check_out_time IS NULL AND l.status IN (0, 2)
+            """)).fetchall()
+        except Exception as e:  # noqa: BLE001 — never block a muster on the visitor module
+            logger.warning("Could not list visitors on site for muster: %s", e)
+            self.db.rollback()
+            return []
+        return [{
+            "emp_code": f"{self.VISITOR_PREFIX}{r.id}",
+            "emp_name": (f"{r.full_name} (visitor{', host ' + r.host if r.host else ''})")[:100],
+            "dept_id": None,
+            "dept_name": "Visitor",
+            "current_zone_name": None,
+            "phone": r.phone,
+        } for r in rows]
+
+    def visitor_contacts(self, codes: List[str]) -> List[Dict[str, str]]:
+        ids = [int(c[len(self.VISITOR_PREFIX):]) for c in codes
+               if c.startswith(self.VISITOR_PREFIX) and c[len(self.VISITOR_PREFIX):].isdigit()]
+        if not ids:
+            return []
+        rows = self.db.execute(text("""
+            SELECT v.full_name, v.email, v.phone FROM vis_visit_log l JOIN vis_visitor v ON v.id = l.visitor_id
+            WHERE l.id = ANY(:ids)"""), {"ids": ids}).fetchall()
+        return [{"name": r.full_name, "email": r.email or "", "phone": r.phone or "", "kind": "visitor"} for r in rows]
+
+    def mark_left_site(self, emp_code: str) -> bool:
+        """Someone tapped out at the site gate during an active muster: they are
+        accounted for (status 3 = left site), not missing."""
+        log = (self.db.query(MusteringLog).join(MusteringEvent, MusteringEvent.id == MusteringLog.event_id)
+               .filter(MusteringEvent.status == 0, MusteringLog.emp_code == emp_code, MusteringLog.status == 0)
+               .first())
+        if not log:
+            return False
+        self.mark_person_status(log.event_id, emp_code, 3, None)
+        return True
+
     def _calculate_expected_personnel(self, zone_ids: List[int]) -> List[Dict[str, Any]]:
         """Return personnel expected to muster for the given work zones.
 
@@ -1307,7 +1357,7 @@ class MusteringService:
             w = self._event_words(event)
             drill = event.event_type == 1
             codes = [r[0] for r in self.db.query(MusteringLog.emp_code).filter(MusteringLog.event_id == event_id).all()]
-            people = people_from_personnel(self.db, emp_codes=codes)
+            people = people_from_personnel(self.db, emp_codes=codes) + self.visitor_contacts(codes)
             head = f"{'DRILL — ' if drill else ''}{w['type'].upper()} MUSTER"
             to_staff = (f"{head}: Stop work and go to {w['points']} now. Scan your badge at the muster "
                         f"reader so you are counted safe. Do not use lifts. Follow your warden.")

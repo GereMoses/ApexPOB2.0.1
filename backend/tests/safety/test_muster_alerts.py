@@ -163,3 +163,79 @@ def test_meta_whatsapp_sends_template_with_alert_text(monkeypatch):
     assert url.endswith("/v21.0/111/messages") and headers["Authorization"] == "Bearer tok"
     assert body["to"].startswith("234") and body["template"]["name"] == "pob_alert"
     assert body["template"]["components"][0]["parameters"][0]["text"] == "FIRE MUSTER: · Go to MP-A"
+
+
+def _visitor_on_site(db, name="Ada Visitor"):
+    vid = db.execute(text("INSERT INTO vis_visitor (visitor_code, full_name, phone) VALUES (:c, :n, '08039990000') RETURNING id"),
+                     {"c": "V" + uuid.uuid4().hex[:8], "n": name}).scalar()
+    lid = db.execute(text("INSERT INTO vis_visit_log (visitor_id, check_in_time, status) VALUES (:v, NOW(), 0) RETURNING id"),
+                     {"v": vid}).scalar()
+    db.commit()
+    return lid
+
+
+@needs_db
+def test_visitors_on_site_are_on_the_muster_list_and_can_be_marked(db, make_zone, sent):
+    from app.services.mustering_service import MusteringService
+    area = make_zone()
+    visit = _visitor_on_site(db)
+    svc = MusteringService(db)
+    ev = svc.start_mustering_event([area], 0, 1, notify_whatsapp=True)["event_id"]
+    try:
+        code = f"VIS-{visit}"
+        st = db.execute(text("SELECT status, emp_name FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                        {"e": ev, "c": code}).fetchone()
+        assert st is not None and st.status == 0 and "visitor" in st.emp_name
+        staff = [c for c in sent if c["source_type"] == "muster" and not c["responders"]][0]
+        assert any(p.get("kind") == "visitor" and p["phone"] == "08039990000" for p in staff["people"])
+        svc.mark_person_status(ev, code, 1, 1)
+        assert db.execute(text("SELECT mustering_status FROM vis_visit_log WHERE id = :i"), {"i": visit}).scalar() == 1
+        assert svc.get_event_headcount(ev)["total_visitors"] >= 1
+    finally:
+        db.execute(text("UPDATE vis_visit_log SET status = 1, check_out_time = NOW() WHERE id = :i"), {"i": visit})
+        db.commit()
+        _end(db, ev)
+
+
+@needs_db
+def test_gate_exit_during_muster_marks_left_site(db, make_person, make_zone, sent):
+    from app.api.adms_protocol import _mark_onboard
+    from app.services.mustering_service import MusteringService
+    area = make_zone()
+    p = make_person()
+    _set(db, p["emp_code"], True, area)
+    svc = MusteringService(db)
+    ev = svc.start_mustering_event([area], 0, 1)["event_id"]
+    try:
+        before = db.execute(text("SELECT total_missing FROM mustering_event WHERE id = :e"), {"e": ev}).scalar()
+        _mark_onboard(p["emp_code"], False, db)
+        assert db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                          {"e": ev, "c": p["emp_code"]}).scalar() == 3
+        assert db.execute(text("SELECT total_missing FROM mustering_event WHERE id = :e"), {"e": ev}).scalar() == before - 1
+        hc = svc.get_event_headcount(ev)
+        assert hc["total_left_site"] == 1 and hc["total_accounted"] >= 1
+    finally:
+        _end(db, ev)
+
+
+@needs_db
+def test_any_reader_at_a_muster_point_counts_people_safe(db, make_person, make_zone, sent):
+    from app.api.adms_protocol import handle_attlog
+    from app.services.mustering_service import MusteringService
+    from datetime import datetime, timezone
+    area = make_zone()
+    sn = "AT" + uuid.uuid4().hex[:8].upper()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) VALUES (:sn, 'gate F18', 1, 'ATTENDANCE')"), {"sn": sn})
+    mp = db.execute(text("INSERT INTO zones (name, code, zone_type, status, reader_sn) VALUES (:n, :c, 'MUSTER_POINT', 'active', :sn) RETURNING id"),
+                    {"n": "MP " + sn, "c": uuid.uuid4().hex[:10].upper(), "sn": sn}).scalar()
+    db.commit()
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    _set(db, p["emp_code"], True, area)
+    ev = MusteringService(db).start_mustering_event([area], 0, 1, muster_zone_ids=[mp])["event_id"]
+    try:
+        handle_attlog([{"PIN": pin, "Time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "Status": "0"}], sn, db)
+        assert db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                          {"e": ev, "c": p["emp_code"]}).scalar() == 1
+    finally:
+        _end(db, ev)

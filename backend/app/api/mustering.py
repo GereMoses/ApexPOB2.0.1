@@ -61,7 +61,7 @@ class MusteringEventEnd(BaseModel):
 
 class MusteringPersonMark(BaseModel):
     emp_code: str = Field(..., description="Employee code")
-    status: int = Field(..., description="Status: 0=Missing, 1=Safe, 2=Injured")
+    status: int = Field(..., ge=0, le=3, description="Status: 0=Missing, 1=Safe, 2=Injured, 3=Left site")
 
 class MusteringZoneCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=50, description="Zone name")

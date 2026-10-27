@@ -512,6 +512,21 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
     mustering_mode = (bool(acc_door and getattr(acc_door, 'mustering_mode', False))
                       or reader_purpose == 'MUSTERING'
                       or getattr(terminal, 'device_type', None) == 2)
+    if not mustering_mode:
+        # Any reader that stands at a MUSTER POINT (placed there on the zone, or the
+        # zone names it as its reader) counts people safe while a muster is running —
+        # no need to re-purpose it, and it goes back to normal when the muster ends.
+        try:
+            at_point = db.execute(text("""
+                SELECT 1 FROM zones z
+                WHERE z.zone_type = 'MUSTER_POINT'
+                  AND (z.reader_sn = :sn OR z.id = :zid)
+                  AND EXISTS (SELECT 1 FROM mustering_event WHERE status = 0)
+                LIMIT 1"""), {"sn": sn, "zid": getattr(terminal, "zone_id", None) or -1}).scalar()
+            mustering_mode = bool(at_point)
+        except Exception as e:
+            logger.warning("Muster-point reader check failed for %s: %s", sn, e)
+            db.rollback()
 
     for rec in records:
         emp_code = rec.get('PIN') or rec.get('UserID') or rec.get('USERID')
@@ -1657,6 +1672,16 @@ def _mark_onboard(emp_code: str, onboard, db: Session, location: "Optional[str]"
                 WHERE (emp_code = :ec OR badge_id = :ec) AND is_active = TRUE
             """), {"ec": emp_code})
         db.commit()
+        if not onboard:
+            # Left the site while a muster is running → accounted for, not missing.
+            try:
+                code = db.execute(text("SELECT emp_code FROM personnel WHERE emp_code = :ec OR badge_id = :ec LIMIT 1"),
+                                  {"ec": emp_code}).scalar() or emp_code
+                if MusteringService(db).mark_left_site(code):
+                    logger.info("Muster: %s tapped out at the gate — marked LEFT SITE", code)
+            except Exception as me:
+                logger.warning("Muster left-site update failed for %s: %s", emp_code, me)
+                db.rollback()
     except Exception as e:
         logger.warning("onboard status update failed for %s: %s", emp_code, e)
         db.rollback()
