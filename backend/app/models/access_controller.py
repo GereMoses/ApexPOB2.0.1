@@ -58,6 +58,9 @@ class AccessController(Base):
     # Realtime-log polling (opt-in; the C3 driver is pull, not push)
     poll_enabled = Column(Boolean, nullable=False, default=False)
     poll_interval_sec = Column(Integer, nullable=False, default=5)
+    # Fire alarm panel dry contact wired to this panel's AUX input → fire mode
+    fire_alarm_input = Column(Integer, nullable=True)        # AUX IN number, None = not wired
+    fire_alarm_on = Column(String(6), nullable=False, default="open", server_default="open")  # open | close
 
     notes = Column(Text, nullable=True)
 

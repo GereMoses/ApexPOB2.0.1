@@ -27,6 +27,10 @@ def panel(monkeypatch):
         def __exit__(self, *a): return False
         def open_door(self, door, duration): sent.append(("door", self.ip, door, duration)); return True
         def aux_output(self, aux, duration): sent.append(("aux", self.ip, aux, duration)); return True
+        def push_users(self, users, door_nos=None, timezone_id=1):
+            for u in users:
+                sent.append(("user", self.ip, u["pin"], u.get("card_no"), u.get("expire"), tuple(door_nos or ())))
+            return {"pushed": len(users), "failed": []}
     monkeypatch.setattr(z, "ZKAccessC3Client", FakeC3)
     import app.services.notify_dispatch as nd
     monkeypatch.setattr(nd, "dispatch_background", lambda *a, **k: sent.append(("alert", a[0])) or {})
@@ -177,3 +181,64 @@ def test_c3_reader_at_muster_point_counts_people_safe(superuser_headers, panel, 
                           {"e": ev, "c": p["emp_code"]}).scalar() == 1
     finally:
         MusteringService(db).end_mustering_event(ev, None)
+
+
+
+@needs_db
+def test_panel_sync_loads_staff_and_removes_leavers(superuser_headers, panel, db, make_person, monkeypatch):
+    import app.services.zkteco.c3_zkaccess as z
+    monkeypatch.setattr(z, "sdk_available", lambda: True)
+    c = _client(superuser_headers)
+    ip = f"10.6.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "Sync", "ip_address": ip, "model": "C3-200", "door_count": 2}).json()["id"]
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    r = c.post(f"/api/v1/access-controllers/{cid}/sync-users").json()
+    assert any(x[0] == "user" and x[1] == ip and x[2] == pin and x[5] == (1, 2) for x in panel)
+    assert r["load"]["pushed"] >= 1
+    # nothing changed → nothing re-sent for this person
+    panel.clear()
+    c.post(f"/api/v1/access-controllers/{cid}/sync-users")
+    assert not any(x[0] == "user" and x[2] == pin for x in panel)
+    # leaver → expired on the panel
+    db.execute(text("UPDATE personnel SET is_active = FALSE WHERE emp_code = :c"), {"c": p["emp_code"]})
+    db.commit()
+    c.post(f"/api/v1/access-controllers/{cid}/sync-users")
+    removal = [x for x in panel if x[0] == "user" and x[2] == pin]
+    assert removal and removal[0][4] and removal[0][3] == ""            # end date set, card cleared
+    states = {u["pin"]: u["state"] for u in c.get(f"/api/v1/access-controllers/{cid}/users").json()}
+    assert states[pin] == "removed"
+
+
+@needs_db
+def test_card_import_by_attendance_id(superuser_headers, panel, db, make_person):
+    c = _client(superuser_headers)
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    card = str(uuid.uuid4().int)[:9]
+    r = c.post("/api/v1/access-controllers/cards/import", json=[{"key": pin, "card_no": card},
+                                                              {"key": "NOBODY", "card_no": "123"},
+                                                              {"key": p["emp_code"], "card_no": card}]).json()
+    assert r["updated"] == 1 and len(r["problems"]) == 2
+    assert db.execute(text("SELECT card_number FROM personnel WHERE emp_code = :c"), {"c": p["emp_code"]}).scalar() == int(card)
+
+
+@needs_db
+def test_fire_alarm_input_starts_fire_mode(superuser_headers, panel, db, monkeypatch):
+    import app.services.access_controller_ingest as ing
+    fired = []
+    monkeypatch.setattr(ing, "_trigger_fire_mode", lambda ctrl, when: fired.append(ctrl.id))
+    c = _client(superuser_headers)
+    ip = f"10.5.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "FA", "ip_address": ip, "model": "C3-200", "door_count": 2,
+                                                    "fire_alarm_input": 2, "fire_alarm_on": "open"}).json()["id"]
+    _tap(db, cid, event_type=221)                         # contact closed (normal) on input 1 → nothing
+    _tap(db, cid, event_type=220)                         # input 1 opened — not the fire input
+    assert fired == []
+    from datetime import datetime
+    from app.models.access_controller import AccessController
+    from app.services.access_controller_ingest import ingest_event
+    from app.services.zkteco.c3_controller import C3Event
+    ingest_event(db.query(AccessController).get(cid), C3Event(time=datetime.now(), card_no=None, pin=None, door_id=2,
+                                                             event_type=220, in_out=0, verify_type=0), db)
+    assert fired == [cid]

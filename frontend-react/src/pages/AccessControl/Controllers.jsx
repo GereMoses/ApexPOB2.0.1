@@ -7,7 +7,7 @@ import {
   PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined,
   SyncOutlined, WifiOutlined, DisconnectOutlined,
   ReloadOutlined, UnlockOutlined, LoginOutlined, LogoutOutlined,
-  ClusterOutlined, AimOutlined, BulbOutlined, FireOutlined, SoundOutlined, CreditCardOutlined,
+  ClusterOutlined, AimOutlined, BulbOutlined, FireOutlined, SoundOutlined, CreditCardOutlined, TeamOutlined, UploadOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -145,6 +145,35 @@ const PersonSearch = ({ value, onChange }) => {
     onSearch={search} options={opts} value={value} onChange={onChange} notFoundContent="Type 2+ letters" />;
 };
 
+const CardImport = () => {
+  const { message } = App.useApp();
+  const [txt, setTxt] = useState('');
+  const [res, setRes] = useState(null);
+  const rows = txt.split(/\r?\n/).map(l => l.split(/\t|,|;/).map(x => x.trim())).filter(r => r[0] && r[1] && /\d/.test(r[1]));
+  const go = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/cards/import`, rows.map(([key, card_no]) => ({ key, card_no: card_no.replace(/\D/g, '') }))),
+    onSuccess: r => { setRes(r); message.success(`${r.updated} card(s) saved`); },
+    onError: e => message.error(e.message),
+  });
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: '#64748b', marginBottom: 6 }}>
+        Copy two columns from Excel and paste: <b>employee code or Attendance ID</b>, then <b>card number</b>.
+      </div>
+      <Input.TextArea rows={5} value={txt} onChange={e => setTxt(e.target.value)} placeholder={'MARC 14256\t0012345678\n14257\t0012345679'} />
+      <Space style={{ marginTop: 8 }}>
+        <Button type="primary" disabled={!rows.length} loading={go.isPending} onClick={() => go.mutate()}>Import {rows.length || ''} row(s)</Button>
+        {res && <span style={{ fontSize: 12.5 }}>{res.updated} saved · {res.problems.length} problem(s). {res.next}</span>}
+      </Space>
+      {res?.problems?.length > 0 && (
+        <div style={{ marginTop: 8, maxHeight: 160, overflow: 'auto', fontSize: 12, color: '#b45309' }}>
+          {res.problems.map(p => <div key={p.row}>Row {p.row} ({p.key} → {p.card_no}): {p.error}</div>)}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const CardsDrawer = ({ open, onClose }) => {
   const { message } = App.useApp();
   const qc = useQueryClient();
@@ -171,6 +200,10 @@ const CardsDrawer = ({ open, onClose }) => {
         Tap a new card on <b>any reader</b>. It is refused (it belongs to nobody yet) and appears below within a few
         seconds — pick the person and press <b>Issue</b>. The card is saved on their record and loaded onto every controller.
       </div>
+      <Collapse size="small" style={{ marginBottom: 14 }} items={[{
+        key: 'imp', label: <span><UploadOutlined /> Import card numbers from Excel</span>,
+        children: <CardImport />,
+      }]} />
       {cards.length === 0 && <Empty description="Waiting for a card tap…" />}
       {cards.map(c => (
         <div key={c.card_no} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>
@@ -288,6 +321,17 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
     onSuccess: r => r?.success ? message.success(r.message) : message.warning(r?.error || 'Open failed'),
   });
   const [probeResult, setProbeResult] = React.useState(null);
+  const syncUsers = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/sync-users`),
+    onSuccess: r => {
+      const failed = (r?.load?.failed?.length || 0) + (r?.remove?.failed?.length || 0);
+      const msg = `Loaded ${r?.load?.pushed ?? 0}, removed ${r?.remove?.removed ?? 0}` +
+        (r?.skipped_no_attendance_id ? ` · ${r.skipped_no_attendance_id} staff skipped (no Attendance ID)` : '');
+      (failed ? message.warning : message.success)(failed ? `${msg} · ${failed} failed — see Probe` : msg, 8);
+    },
+    onError: e => message.error(e.message || 'Sync failed'),
+  });
+
   const probe = useMutation({
     mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/probe`),
     onSuccess: r => setProbeResult(r),
@@ -330,6 +374,9 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
           </Tooltip>
           <Tooltip title="Poll buffered events now → zone occupancy">
             <Button size="small" icon={<SyncOutlined />} loading={poll.isPending} onClick={() => poll.mutate()} />
+          </Tooltip>
+          <Tooltip title="Load every active person (Attendance ID + card) onto this panel and remove leavers. Also runs nightly.">
+            <Button size="small" icon={<TeamOutlined />} loading={syncUsers.isPending} onClick={() => syncUsers.mutate()}>Sync users</Button>
           </Tooltip>
           <Tooltip title="Learn mode — badge at each reader to discover & map its port">
             <Button size="small" icon={<AimOutlined />} onClick={() => api.learn(ctrl)}>Learn</Button>
@@ -780,6 +827,20 @@ const Controllers = () => {
                 <Form.Item name="poll_enabled" label="Auto-poll" valuePropName="checked"
                   tooltip="Continuously read events from this panel into zones"><Switch /></Form.Item>
                 <Form.Item name="poll_interval_sec" label="Poll interval (s)"><InputNumber min={1} max={3600} /></Form.Item>
+              </Space>
+
+              <Space align="start">
+                <Form.Item name="fire_alarm_input" label="Fire alarm wired to"
+                  tooltip="The fire alarm panel's dry contact on this controller's AUX input. When it trips, ApexPOB starts fire mode: fire exits open, sirens, site-wide muster and alerts.">
+                  <Select allowClear placeholder="Not wired" style={{ width: 150 }}
+                    options={[1, 2, 3, 4].map(n => ({ value: n, label: `AUX input ${n}` }))} />
+                </Form.Item>
+                <Form.Item name="fire_alarm_on" label="Alarm when the contact" initialValue="open">
+                  <Select style={{ width: 200 }} options={[
+                    { value: 'open', label: 'Opens (normally closed)' },
+                    { value: 'close', label: 'Closes (normally open)' },
+                  ]} />
+                </Form.Item>
               </Space>
 
               <Form.Item name="notes" label="Notes">

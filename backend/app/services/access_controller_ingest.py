@@ -268,6 +268,14 @@ def ingest_event(controller: AccessController, event: C3Event, db: Session) -> D
     zone_id = reader.zone_id if reader else None
     et = int(event.event_type) if event.event_type is not None else 0
 
+    # ── fire alarm panel contact on an AUX input → fire mode ───────────────────
+    if et in (220, 221) and controller.fire_alarm_input and int(event.door_id) == int(controller.fire_alarm_input):
+        alarm = (et == 220 and (controller.fire_alarm_on or "open") == "open") or \
+                (et == 221 and controller.fire_alarm_on == "close")
+        if alarm:
+            _trigger_fire_mode(controller, punch_time)
+        return {}
+
     # ── refused / alarm ────────────────────────────────────────────────────────
     if et not in GRANTED:
         if et == 27 and event.card_no and str(event.card_no) != "0":
@@ -338,6 +346,32 @@ def ingest_event(controller: AccessController, event: C3Event, db: Session) -> D
     reader.last_event_at = punch_time
     db.commit()
     return updates
+
+
+def _trigger_fire_mode(controller: AccessController, when: datetime) -> None:
+    """The fire alarm panel tripped: fire exits open, sirens, site-wide muster, alerts.
+    Ignored if a fire emergency is already running (contacts chatter)."""
+    import threading
+
+    def run():
+        from ..core.database import SessionLocal
+        db = SessionLocal()
+        try:
+            busy = db.execute(text("SELECT 1 FROM emergency_event WHERE event_type IN (1, 2) AND status = 0 LIMIT 1")).scalar()
+            if busy:
+                logger.info("Fire alarm input on controller %s — fire mode already active", controller.id)
+                return
+            from .emergency_service import emergency_service
+            logger.warning("FIRE ALARM input tripped on controller %s (%s) — activating fire mode", controller.id, controller.name)
+            asyncio.run(emergency_service.activate_fire_mode(
+                zone_id=None, location_id=None, muster_zone_ids=None, action="activate",
+                reason=f"Fire alarm panel ({controller.name} AUX IN {controller.fire_alarm_input})",
+                initiated_by=None, db=db))
+        except Exception as e:  # noqa: BLE001
+            logger.error("Fire alarm → fire mode failed: %s", e)
+        finally:
+            db.close()
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _recalc_later(emp_code: str, punch_time: datetime) -> None:

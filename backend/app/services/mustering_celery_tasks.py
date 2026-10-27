@@ -979,3 +979,20 @@ celery_app.conf.beat_schedule["email-muster-list-shift-change"] = {
     "task": "app.services.mustering_celery_tasks.email_muster_list",
     "schedule": crontab(minute=0, hour="5,17"),   # 06:00 and 18:00 Lagos (beat runs in UTC)
 }
+
+
+@celery_app.task(name="app.services.mustering_celery_tasks.sync_access_panels")
+def sync_access_panels():
+    """Nightly: load active staff onto every C3/inBio panel and remove leavers."""
+    from app.services.panel_sync import sync_all
+    db = SessionLocal()
+    try:
+        return sync_all(db)
+    finally:
+        db.close()
+
+
+celery_app.conf.beat_schedule["sync-access-panels-nightly"] = {
+    "task": "app.services.mustering_celery_tasks.sync_access_panels",
+    "schedule": crontab(minute=30, hour=1),   # 02:30 Lagos — after the SeamlessHR staff pull
+}

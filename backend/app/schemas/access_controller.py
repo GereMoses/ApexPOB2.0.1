@@ -54,6 +54,8 @@ class AccessControllerBase(BaseModel):
     poll_enabled: bool = False
     poll_interval_sec: int = Field(5, ge=1, le=3600)
     notes: Optional[str] = None
+    fire_alarm_input: Optional[int] = Field(None, ge=1, le=8, description="AUX input the fire alarm contact is wired to")
+    fire_alarm_on: str = Field("open", pattern="^(open|close)$", description="Alarm when the contact opens or closes")
 
 
 class AccessControllerCreate(AccessControllerBase):
@@ -73,6 +75,8 @@ class AccessControllerUpdate(BaseModel):
     poll_enabled: Optional[bool] = None
     poll_interval_sec: Optional[int] = Field(None, ge=1, le=3600)
     notes: Optional[str] = None
+    fire_alarm_input: Optional[int] = Field(None, ge=1, le=8, description="AUX input the fire alarm contact is wired to")
+    fire_alarm_on: Optional[str] = Field(None, pattern="^(open|close)$", description="Alarm when the contact opens or closes")
 
 
 class AccessControllerOut(AccessControllerBase):

@@ -256,11 +256,8 @@ def enroll_personnel(controller_id: int, body: Optional[dict] = None, db: Sessio
 
     users, skipped = _panel_users(db, (body or {}).get("emp_codes"))
 
-    door_nos = list(range(1, (ctrl.door_count or 1) + 1))
-    result = c3_zkaccess.enroll_users(
-        ctrl.ip_address, users, door_nos=door_nos,
-        port=ctrl.port or 4370, password=ctrl.comm_password or "",
-    )
+    from ..services.panel_sync import load_users
+    result = load_users(db, ctrl, users)
     result["prepared"] = len(users)
     result["skipped_no_attendance_id"] = skipped
     return result
@@ -380,23 +377,8 @@ def test_aux(controller_id: int, aux_no: int, seconds: int = 3, db: Session = De
 
 
 def _panel_users(db: Session, emp_codes=None):
-    """Active staff as C3 user records. PIN = Attendance ID; staff without one are skipped."""
-    from sqlalchemy import text as _t
-    from ..services.device_pin import is_valid_pin
-    q = """SELECT emp_code, attendance_id, card_number,
-                  COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name))) AS name
-           FROM personnel WHERE is_active AND COALESCE(status, 'ACTIVE') <> 'TERMINATED'"""
-    params = {}
-    if emp_codes:
-        q += " AND emp_code = ANY(:codes)"
-        params["codes"] = list(emp_codes)
-    users, skipped = [], 0
-    for r in db.execute(_t(q), params).fetchall():
-        if not is_valid_pin(r.attendance_id):
-            skipped += 1
-            continue
-        users.append({"pin": str(r.attendance_id), "card_no": str(r.card_number) if r.card_number else "",
-                      "name": (r.name or "")[:24]})
+    from ..services.panel_sync import active_panel_users
+    users, skipped = active_panel_users(db, emp_codes)
     return users, skipped
 
 
@@ -433,10 +415,68 @@ def assign_card(body: CardAssignIn, db: Session = Depends(get_db)):
     if users and c3_zkaccess.sdk_available():
         for ctrl in db.query(AccessController).all():
             try:
-                r = c3_zkaccess.enroll_users(ctrl.ip_address, users, door_nos=list(range(1, (ctrl.door_count or 1) + 1)),
-                                             port=ctrl.port or 4370, password=ctrl.comm_password or "")
+                from ..services.panel_sync import load_users
+                r = load_users(db, ctrl, users)
                 loaded.append({"controller": ctrl.name, "ok": bool(r.get("pushed")), "failed": r.get("failed")})
             except Exception as exc:  # noqa: BLE001
                 loaded.append({"controller": ctrl.name, "ok": False, "error": str(exc)[:200]})
     note = None if users else "Saved — but this person has no Attendance ID yet, so the card can't be loaded onto the panels."
     return {"success": True, "card_no": body.card_no, "emp_code": body.emp_code, "controllers": loaded, "note": note}
+
+
+@router.post("/{controller_id}/sync-users", summary="Load active staff onto this panel and remove leavers")
+def sync_users(controller_id: int, db: Session = Depends(get_db)):
+    from ..services.panel_sync import sync_controller
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    if not c3_zkaccess.sdk_available():
+        raise HTTPException(status_code=503, detail="C3 driver (zkaccess-c3) unavailable")
+    return sync_controller(db, ctrl)
+
+
+@router.get("/{controller_id}/users", summary="Who ApexPOB has loaded onto this panel")
+def panel_users(controller_id: int, db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    rows = db.execute(_t("""SELECT u.pin, u.emp_code, u.card_no, u.state, u.last_error,
+                                   u.updated_at AT TIME ZONE 'Africa/Lagos' AS updated_at,
+                                   COALESCE(NULLIF(p.full_name, ''), u.emp_code) AS name
+                            FROM controller_user u LEFT JOIN personnel p ON p.emp_code = u.emp_code
+                            WHERE u.controller_id = :c ORDER BY u.state, name"""), {"c": controller_id}).mappings().all()
+    return [dict(r, updated_at=r["updated_at"].isoformat(sep=" ", timespec="seconds")) for r in rows]
+
+
+class CardImportRow(BaseModel):
+    key: str            # employee code or Attendance ID
+    card_no: str
+
+
+@router.post("/cards/import", summary="Bulk card numbers (employee code or Attendance ID → card)")
+def import_cards(rows: List[CardImportRow], db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    done, problems, seen = 0, [], {}
+    for i, r in enumerate(rows, start=1):
+        key, card = (r.key or "").strip(), (r.card_no or "").strip()
+        if not key or not card.isdigit():
+            problems.append({"row": i, "key": key, "card_no": card, "error": "card number must be digits"})
+            continue
+        if card in seen:
+            problems.append({"row": i, "key": key, "card_no": card, "error": f"same card as row {seen[card]}"})
+            continue
+        seen[card] = i
+        person = db.execute(_t("""SELECT emp_code FROM personnel WHERE is_active AND (emp_code = :k OR attendance_id = :k
+                                  OR REPLACE(emp_code, ' ', '') = REPLACE(:k, ' ', '')) LIMIT 1"""), {"k": key}).fetchone()
+        if not person:
+            problems.append({"row": i, "key": key, "card_no": card, "error": "no active person with this code / ID"})
+            continue
+        other = db.execute(_t("SELECT emp_code FROM personnel WHERE card_number = :c AND emp_code <> :e"),
+                           {"c": int(card), "e": person.emp_code}).fetchone()
+        if other:
+            problems.append({"row": i, "key": key, "card_no": card, "error": f"card already belongs to {other.emp_code}"})
+            continue
+        db.execute(_t("UPDATE personnel SET card_number = :c, updated_at = NOW() WHERE emp_code = :e"),
+                   {"c": int(card), "e": person.emp_code})
+        done += 1
+    db.commit()
+    return {"updated": done, "problems": problems,
+            "next": "Run Sync users on each controller (or wait for tonight's sync) to load the cards onto the panels."}

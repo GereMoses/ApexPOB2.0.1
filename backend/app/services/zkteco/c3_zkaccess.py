@@ -151,13 +151,17 @@ class ZKAccessC3Client:
             if not pin:
                 continue
             try:
-                self._set_record(ucfg, {
+                rec = {
                     "pin": pin,
                     "cardno": str(u.get("card_no") or ""),
                     "name": str(u.get("name") or "")[:24],
                     "group": u.get("group") or 1,
-                })
-                if acfg is not None:
+                }
+                if u.get("expire"):
+                    # Removal = validity ended yesterday; the panel refuses the user.
+                    rec.update(starttime=20000101, endtime=int(u["expire"]))
+                self._set_record(ucfg, rec)
+                if acfg is not None and not u.get("expire") and door_nos:
                     # AuthorizeDoorId is a BITMASK (door1=1, door2=2, door3=4, door4=8) —
                     # one record for all doors. Writing the door number itself (as before)
                     # made "door 3" mean doors 1+2.

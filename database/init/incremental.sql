@@ -525,3 +525,18 @@ CREATE TABLE IF NOT EXISTS controller_unknown_card (
     taps          INTEGER NOT NULL DEFAULT 1,
     last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Fire alarm panel wired to a C3 AUX input: which input, and alarm = contact opens or closes
+ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS fire_alarm_input SMALLINT;
+ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS fire_alarm_on VARCHAR(6) NOT NULL DEFAULT 'open';
+-- Who ApexPOB has loaded onto each panel (so leavers can be removed — never touching users it didn't load)
+CREATE TABLE IF NOT EXISTS controller_user (
+    controller_id INTEGER NOT NULL REFERENCES access_controllers(id) ON DELETE CASCADE,
+    pin           VARCHAR(24) NOT NULL,
+    emp_code      VARCHAR(50),
+    card_no       VARCHAR(32),
+    state         VARCHAR(10) NOT NULL DEFAULT 'loaded',   -- loaded | removed | failed
+    last_error    TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (controller_id, pin)
+);
