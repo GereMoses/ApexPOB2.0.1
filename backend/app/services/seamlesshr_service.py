@@ -97,6 +97,16 @@ _DEFAULT_OPTIONS: Dict[str, Any] = {
     # attendanceId = the employee's Personnel ID ON THE BIOMETRIC DEVICE, per
     # SeamlessHR support docs. That is the only employee mapping in the payload.
     "attendance_id_source": "device_personnel_id",  # device_personnel_id | idempotency_key
+    # Where each person's Attendance ID (= reader PIN = the ID SeamlessHR matches
+    # punches on) comes from after a staff pull:
+    #   seamlesshr  — read from SeamlessHR's attendance records (needs T&A read access)
+    #   code_digits — the digits of the employee code ("MARC 14256" → "14256"); only
+    #                 correct if SeamlessHR holds the same number as each Attendance ID
+    #   manual      — imported / typed in ApexPOB only
+    "attendance_id_rule":   "seamlesshr",
+    # Nightly: pull staff + leave, set Attendance IDs, update the readers — then push
+    # attendance. Off = the nightly job only pushes attendance (old behaviour).
+    "nightly_staff_refresh": True,
     "include_employee_id":  False,               # extra key; their 406 covers unknown fields
     # ApexPOB writes badge_id to the ZKTeco reader as the user_id, so badge_id is
     # the Personnel ID SeamlessHR will have against the employee.

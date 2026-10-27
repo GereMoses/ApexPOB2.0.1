@@ -244,13 +244,16 @@ async def pull_employees_endpoint(
 ):
     """Pull the employee master from SeamlessHR into ApexPOB personnel. Pulled records
     are marked as SeamlessHR-managed and become read-only here (SeamlessHR is the
-    system of record). Field mapping is config-driven (Settings → HR Integration)."""
-    result = await pull_employees(db, triggered_by=getattr(current_user, "email", "manual"))
-    if result.get("error"):
-        raise HTTPException(status_code=502, detail=result["error"])
-    # Also refresh leave so muster rosters exclude anyone on approved leave (best-effort).
-    leave = await pull_leave(db, triggered_by=getattr(current_user, "email", "manual"))
-    return {"success": True, **result, "on_leave": leave.get("on_leave", 0)}
+    system of record). Then: leave, Attendance IDs (by the configured rule) and the
+    readers (door panels + T&A terminals) are brought up to date."""
+    from ..services.hr_reader_pipeline import refresh_staff_and_readers
+    out = await refresh_staff_and_readers(db, triggered_by=getattr(current_user, "email", "manual"))
+    if out.get("error"):
+        raise HTTPException(status_code=502, detail=out["error"])
+    # Keep the old top-level keys (created/updated/…) for existing callers.
+    return {"success": True, **out["staff"], "on_leave": out.get("on_leave", 0),
+            "attendance_ids": out.get("attendance_ids"), "readers": out.get("readers"),
+            "readiness": out.get("readiness")}
 
 
 class AttendanceIdItem(BaseModel):
@@ -363,7 +366,18 @@ async def seamlesshr_webhook(request: Request, db: Session = Depends(get_db)):
     event = payload.get("event")
     data = payload.get("data") or {}
     result = handle_webhook_event(db, event, data, opts)
-    return {"success": True, "event": event, "result": result}
+    # Joiner / change / leaver → readers now, not tonight.
+    readers = None
+    try:
+        code_field = (opts.get("webhook_field_map") or {}).get("emp_code", "employee_code")
+        code = str((data or {}).get(code_field) or "").strip()
+        if code and not str(result).startswith("skipped"):
+            from ..services.hr_reader_pipeline import person_changed
+            readers = await person_changed(db, code)
+    except Exception as e:  # noqa: BLE001 — never fail the webhook (SeamlessHR would retry-storm)
+        logger.error("Webhook reader update failed: %s", e)
+        db.rollback()
+    return {"success": True, "event": event, "result": result, "readers_updated": readers is not None}
 
 
 # ── Sync history ──────────────────────────────────────────────────────────────

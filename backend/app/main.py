@@ -681,6 +681,19 @@ async def _seamlesshr_nightly_sync_loop():
                         scheduled_today = now.replace(hour=sync_h, minute=sync_m, second=0, microsecond=0)
                         if now >= scheduled_today:
                             logger.info("SeamlessHR: nightly sync starting...")
+                            # 1) staff → Attendance IDs → readers, so tonight's push and
+                            #    tomorrow's taps use the current staff list.
+                            if (cfg.get("options") or {}).get("nightly_staff_refresh", True):
+                                try:
+                                    from app.services.hr_reader_pipeline import refresh_staff_and_readers
+                                    ref = await asyncio.wait_for(
+                                        refresh_staff_and_readers(db, triggered_by="scheduler"), timeout=900.0)
+                                    logger.info("SeamlessHR nightly staff refresh: %s",
+                                                ref.get("error") or ref.get("readiness"))
+                                except Exception as rex:  # noqa: BLE001 — the push must still run
+                                    logger.error("SeamlessHR nightly staff refresh failed: %s", rex)
+                                    db.rollback()
+                            # 2) push attendance
                             result = await asyncio.wait_for(
                                 push_attendance(db, triggered_by="scheduler"),
                                 timeout=120.0,

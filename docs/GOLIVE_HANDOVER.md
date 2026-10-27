@@ -92,9 +92,14 @@ Everything was proven on SeamlessHR's sandbox (Integration Company); Marconi use
 1. **Back up**: `docker exec pob_postgres pg_dump -U pob_user pob_system > pre_marconi.sql`.
 2. **Remove the sandbox staff** (≈344 `hr_source='SEAMLESSHR'` records) and the HR sync history — a pull adds/updates but never deletes, so they would otherwise sit beside Marconi's staff in POB and mustering.
 3. **Settings → HR Integration**: API Base URL = SeamlessHR's **production** URL (ask SeamlessHR — the form defaults to the sandbox), Client ID, Client Secret → **Test Connection** → **Pull employees** (≈2–3 min; the sandbox throttles, the pull retries and pages slowly by design).
-4. **Attendance IDs** (= the reader PIN, = what SeamlessHR matches punches on): Settings → Attendance IDs → *Adopt from SeamlessHR* (needs Time & Attendance read on Marconi's client) or *Import* an export. Staff without one are **not** sent to SeamlessHR.
-5. **Verify one person end to end**: enrol → tap first thing in the morning and again later → Attendance shows clock-in/out → Sync for that day → SeamlessHR reply says `N sent successfully, 0 failed`.
-6. In SeamlessHR's T&A module (Schedule Manager → Records, or Reports → Attendance) HR must **create schedules** for staff; their rotational limits (currently 1 h / 1 shift per week) must be corrected.
+4. **Attendance IDs** (= the reader PIN on every door panel and T&A terminal, = what SeamlessHR matches punches on). Settings → HR Integration → *Attendance ID comes from*:
+   - **SeamlessHR's Attendance ID** — read from SeamlessHR (needs Time & Attendance read on Marconi's client — the sandbox key is refused);
+   - **Digits of the employee code** (`MARC 14256` → `14256`) — only if SeamlessHR confirms each Marconi Attendance ID equals those digits;
+   - **Imported / typed** — Settings → Attendance IDs → *Import*.
+   Staff without one are not loaded onto readers and not sent to SeamlessHR.
+5. **Pull staff & update readers** (same tab; also every night at the sync time, before the attendance push): pulls staff + leave → sets Attendance IDs → sends new people and card changes to every door panel and T&A terminal, removes leavers. A SeamlessHR webhook (joiner / change / leaver), if configured, does the reader update straight away. The result shows how many staff now have an Attendance ID and a card (full detail: report *Door access readiness*).
+6. **Verify one person end to end**: enrol → tap first thing in the morning and again later → Attendance shows clock-in/out → Sync for that day → SeamlessHR reply says `N sent successfully, 0 failed`.
+7. In SeamlessHR's T&A module (Schedule Manager → Records, or Reports → Attendance) HR must **create schedules** for staff; their rotational limits (currently 1 h / 1 shift per week) must be corrected.
 
 Open with SeamlessHR (sandbox): records rejected with "0 sent, 1 failed" and no reason since 15 Oct ~18:40; `GET /v1/attendances` "Unauthorized access"; employee list intermittently 400; record #345 unreadable. Draft: `docs/SeamlessHR_sandbox_questions.md`.
 

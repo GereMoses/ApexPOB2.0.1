@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 # 1-9 digits: safe on every ZKTeco firmware (ZKBioSecurity's own personnel-ID cap is 9).
 _PIN_RE = re.compile(r"^\d{1,9}$")
 # "PIN=<value>" inside a push-protocol command; value ends at whitespace/tab.
-_CMD_PIN_RE = re.compile(r"\bPIN=(\S+)")
+# A PIN value runs to the next tab / line end — employee codes can contain spaces
+# ("MARC 14256"); \S+ stopped at the space, so such codes were never rewritten to
+# the reader PIN. Stop early only at a space-separated "Key=" (space-style commands).
+_CMD_PIN_RE = re.compile(r"\bPIN=((?:(?!\s\w+=)[^\t\r\n])+)")
 
 
 def is_valid_pin(value: Optional[str]) -> bool:

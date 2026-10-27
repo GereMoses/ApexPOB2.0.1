@@ -57,3 +57,7 @@ clock-out) and sends the previous day's CLOCK_IN and CLOCK_OUT for each employee
 to /biometric/process once a day, at most 100 records per call.
 
 Regards,
+
+## Update — 28 Oct 2026
+- `GET /v1/employees` now fails for **every** page and page size (`page=1&limit=5`, `page=1&limit=25`, `page=2&limit=25`) with HTTP 400 `{"message":"An error occurred while processing the request"}`. Authentication is accepted (no "Unauthorized"). Please check the sandbox tenant.
+- **Attendance ID**: the employee list does not include it, and `GET /v1/attendances` is refused for our key. For Marconi, please either (a) enable Time & Attendance read for the integration client, or (b) confirm that each Marconi employee's Attendance ID equals the digits of their employee code (`MARC 14256` → `14256`) so ApexPOB can derive it.

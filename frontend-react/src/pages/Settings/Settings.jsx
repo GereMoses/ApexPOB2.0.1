@@ -2455,6 +2455,7 @@ const HRIntegrationTab = () => {
   const [syncing,     setSyncing]     = useState(false);
   const [testing,     setTesting]     = useState(false);
   const [pulling,     setPulling]     = useState(false);
+  const [pullResult,  setPullResult]  = useState(null);
   const [idsOpen,     setIdsOpen]     = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [previewDate, setPreviewDate] = useState('');
@@ -2508,6 +2509,8 @@ const HRIntegrationTab = () => {
         default_device_sn:   cfgRaw.options?.default_device_sn || 'POB-MANUAL',
         datetime_style:      cfgRaw.options?.datetime_style    || 'local_naive',
         time_zone:           cfgRaw.options?.time_zone         || 'Africa/Lagos',
+        attendance_id_rule:  cfgRaw.options?.attendance_id_rule || 'seamlesshr',
+        nightly_staff_refresh: cfgRaw.options?.nightly_staff_refresh !== false,
       });
       if (cfgRaw.options) setOptionsText(JSON.stringify(cfgRaw.options, null, 2));
     }
@@ -2541,10 +2544,12 @@ const HRIntegrationTab = () => {
     if (values.default_device_sn) opts.default_device_sn = values.default_device_sn.trim();
     if (values.datetime_style)    opts.datetime_style    = values.datetime_style;
     if (values.time_zone)         opts.time_zone         = values.time_zone.trim();
+    if (values.attendance_id_rule) opts.attendance_id_rule = values.attendance_id_rule;
+    if (values.nightly_staff_refresh !== undefined) opts.nightly_staff_refresh = !!values.nightly_staff_refresh;
     payload.options = opts;
     ['map_emp_code', 'map_last_name', 'map_first_name', 'clock_in_type',
      'clock_out_type', 'default_device_sn', 'datetime_style',
-     'time_zone'].forEach(k => delete payload[k]);
+     'time_zone', 'attendance_id_rule', 'nightly_staff_refresh'].forEach(k => delete payload[k]);
 
     setSaving(true);
     try {
@@ -2591,7 +2596,8 @@ const HRIntegrationTab = () => {
     setPulling(true);
     try {
       const data = await apiService.post('/api/v1/hr-integration/pull-employees');
-      msg.success(`Employee pull complete — ${data.created} created, ${data.updated} updated${data.skipped ? `, ${data.skipped} skipped` : ''}`);
+      setPullResult(data);
+      msg.success(`Staff pulled — ${data.created} new, ${data.updated} updated · readers updated`);
       queryClient.invalidateQueries({ queryKey: ['hr-history'] });
       queryClient.invalidateQueries({ queryKey: ['hr-status'] });
     } catch (e) { msg.error(e.message || 'Employee pull failed'); }
@@ -2831,6 +2837,32 @@ const HRIntegrationTab = () => {
                 </Col>
               </Row>
 
+              <Row gutter={12}>
+                <Col span={14}>
+                  <Form.Item label="Attendance ID (reader PIN) comes from" name="attendance_id_rule"
+                    extra="The ID each person uses on every reader, and the ID SeamlessHR matches their punches on.">
+                    <Select options={[
+                      { value: 'seamlesshr', label: "SeamlessHR's Attendance ID (needs Time & Attendance read access)" },
+                      { value: 'code_digits', label: 'Digits of the employee code  (MARC 14256 → 14256)' },
+                      { value: 'manual', label: 'Imported / typed in ApexPOB only' },
+                    ]} />
+                  </Form.Item>
+                </Col>
+                <Col span={10}>
+                  <Form.Item label="Nightly staff refresh" name="nightly_staff_refresh" valuePropName="checked"
+                    extra="At the sync time: pull staff + leave, set Attendance IDs, update the readers, then push attendance.">
+                    <Switch />
+                  </Form.Item>
+                </Col>
+              </Row>
+              <Form.Item noStyle dependencies={['attendance_id_rule']}>
+                {({ getFieldValue }) => getFieldValue('attendance_id_rule') === 'code_digits' && (
+                  <Alert type="warning" showIcon style={{ marginBottom: 12 }}
+                    message="Only use this if SeamlessHR holds the same number"
+                    description="Punches are sent to SeamlessHR under this ID. Confirm with SeamlessHR that each Marconi employee's Attendance ID equals the digits of their employee code (MARC 14256 → 14256) — otherwise their punches are rejected." />
+                )}
+              </Form.Item>
+
               <Alert type="warning" showIcon style={{ marginBottom: 12 }}
                 message="Confirm the timestamp format with SeamlessHR before the first payroll run"
                 description={
@@ -2944,16 +2976,28 @@ const HRIntegrationTab = () => {
 
             <Card title={<Space><TeamOutlined />Employee Master (SeamlessHR → ApexPOB)</Space>} size="small">
               <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
-                Pull the employee master from SeamlessHR into ApexPOB. Pulled staff become
-                <b> read-only here</b> — SeamlessHR remains the system of record for their details.
+                Pull staff from SeamlessHR, set their Attendance IDs, and update every reader — door panels and
+                T&amp;A terminals get new people and card changes; leavers are removed. Also runs nightly.
+                Pulled staff are <b>read-only here</b> — SeamlessHR remains the system of record.
               </Text>
               <Button
                 block type="primary" icon={<SyncOutlined />}
                 loading={pulling} disabled={pulling || !status.configured}
                 onClick={handlePullEmployees}
               >
-                Pull Employees from SeamlessHR
+                Pull staff &amp; update readers
               </Button>
+              {pullResult && (
+                <div style={{ marginTop: 10, fontSize: 12.5, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '8px 10px', lineHeight: 1.7 }}>
+                  <div><b>Staff:</b> {pullResult.created} new · {pullResult.updated} updated{pullResult.on_leave ? ` · ${pullResult.on_leave} on leave` : ''}</div>
+                  <div><b>Attendance IDs</b> ({pullResult.attendance_ids?.rule}): {pullResult.attendance_ids?.error
+                    ? <span style={{ color: '#b45309' }}>{pullResult.attendance_ids.error}</span>
+                    : `${pullResult.attendance_ids?.updated ?? 0} set${pullResult.attendance_ids?.conflicts?.length ? ` · ${pullResult.attendance_ids.conflicts.length} conflicts` : ''}`}</div>
+                  <div><b>Readers:</b> {(pullResult.readers?.ta_terminals || []).map?.(t => `${t.terminal} ${t.loaded}↑ ${t.removed}↓`).join(' · ') || 'no T&A terminals'}
+                    {' · '}{(pullResult.readers?.door_panels || []).map?.(c => `${c.controller} ${c.load?.pushed ?? 0}↑ ${c.remove?.removed ?? 0}↓`).join(' · ') || 'no door panels'}</div>
+                  <div><b>Ready for readers:</b> {pullResult.readiness?.with_attendance_id ?? 0} / {pullResult.readiness?.active ?? 0} have an Attendance ID · {pullResult.readiness?.with_card ?? 0} have a card</div>
+                </div>
+              )}
               <Button
                 block icon={<IdcardOutlined />} style={{ marginTop: 8 }}
                 onClick={() => setIdsOpen(true)}
