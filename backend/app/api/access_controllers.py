@@ -287,9 +287,13 @@ def learn_ports(controller_id: int, db: Session = Depends(get_db)):
 _ROLE = {0: "No change", 1: "Lock in a fire", 2: "Fire exit — unlock in a fire"}
 
 
+_MODES = {4: "Card only", 11: "Card + PIN", 3: "PIN only"}
+
+
 class DoorRoleIn(BaseModel):
     name: Optional[str] = None
     emergency_action: Optional[int] = Field(None, ge=0, le=2)
+    verify_mode: Optional[int] = Field(None, description="4 = card only, 11 = card + PIN, 3 = PIN only")
 
 
 @router.get("/{controller_id}/doors", summary="This controller's doors and their emergency role")
@@ -301,7 +305,8 @@ def controller_doors(controller_id: int, db: Session = Depends(get_db)):
     ensure_controller_doors(db, ctrl)
     doors = db.query(AccDoor).filter(AccDoor.controller_id == controller_id).order_by(AccDoor.port).all()
     return [{"id": d.id, "port": d.port, "name": d.name, "emergency_action": d.emergency_action or 0,
-             "role": _ROLE.get(d.emergency_action or 0)} for d in doors]
+             "role": _ROLE.get(d.emergency_action or 0), "verify_mode": d.verify_mode or 4,
+             "verify_label": _MODES.get(d.verify_mode or 4)} for d in doors]
 
 
 @router.put("/doors/{door_id}", summary="Rename a door or set what it does in a fire")
@@ -314,9 +319,23 @@ def update_door_role(door_id: int, body: DoorRoleIn, db: Session = Depends(get_d
         d.name = body.name.strip()[:50]
     if body.emergency_action is not None:
         d.emergency_action = body.emergency_action
+    panel = None
+    if body.verify_mode is not None:
+        if body.verify_mode not in _MODES:
+            raise HTTPException(status_code=400, detail="verify_mode must be 4 (card), 11 (card + PIN) or 3 (PIN)")
+        d.verify_mode = body.verify_mode
+        ctrl = db.query(AccessController).filter(AccessController.id == d.controller_id).first() if d.controller_id else None
+        if ctrl and d.port and c3_zkaccess.sdk_available():
+            try:
+                with c3_zkaccess.ZKAccessC3Client(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "") as c:
+                    c.set_door_verify_mode(d.port, body.verify_mode)
+                panel = {"ok": True}
+            except Exception as exc:  # noqa: BLE001 — saved; the panel can be retried
+                panel = {"ok": False, "error": str(exc)[:200]}
     db.commit()
     return {"id": d.id, "port": d.port, "name": d.name, "emergency_action": d.emergency_action,
-            "role": _ROLE.get(d.emergency_action or 0)}
+            "role": _ROLE.get(d.emergency_action or 0), "verify_mode": d.verify_mode,
+            "verify_label": _MODES.get(d.verify_mode or 4), "panel": panel}
 
 
 # ── sirens / strobes on AUX outputs ───────────────────────────────────────────
@@ -480,3 +499,76 @@ def import_cards(rows: List[CardImportRow], db: Session = Depends(get_db)):
     db.commit()
     return {"updated": done, "problems": problems,
             "next": "Run Sync users on each controller (or wait for tonight's sync) to load the cards onto the panels."}
+
+
+
+# ── door PINs (keypad) ─────────────────────────────────────────────────────────
+class PinIn(BaseModel):
+    emp_code: str
+    pin: Optional[str] = Field(None, description="4-6 digits; leave empty to generate one")
+    send: bool = Field(False, description="Send it to the person by WhatsApp / email")
+
+
+@router.get("/pins/status", summary="Who has a door PIN (never the PIN itself)")
+def pin_status(search: Optional[str] = None, missing_only: bool = False, db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    q = """SELECT emp_code, COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name))) AS name,
+                  attendance_id, card_number, door_pin_enc IS NOT NULL AS has_pin,
+                  door_pin_set_at AT TIME ZONE 'Africa/Lagos' AS set_at
+           FROM personnel WHERE is_active"""
+    params = {}
+    if search:
+        q += " AND (full_name ILIKE :s OR emp_code ILIKE :s OR attendance_id ILIKE :s)"
+        params["s"] = f"%{search.strip()}%"
+    if missing_only:
+        q += " AND door_pin_enc IS NULL"
+    q += " ORDER BY name LIMIT 100"
+    rows = db.execute(_t(q), params).mappings().all()
+    totals = db.execute(_t("SELECT count(*) AS active, count(door_pin_enc) AS with_pin, count(card_number) AS with_card "
+                           "FROM personnel WHERE is_active")).mappings().first()
+    return {"totals": dict(totals), "people": [dict(r, card_number=str(r["card_number"]) if r["card_number"] else None,
+                                                   set_at=r["set_at"].isoformat(sep=" ", timespec="minutes") if r["set_at"] else None)
+                                              for r in rows]}
+
+
+@router.post("/pins", summary="Set or generate one person's door PIN (shown once)")
+def set_door_pin(body: PinIn, db: Session = Depends(get_db)):
+    from ..services.door_pins import set_pin, send_pin
+    try:
+        pin = set_pin(db, body.emp_code, body.pin)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sent = send_pin(db, body.emp_code, pin) if body.send else None
+    return {"emp_code": body.emp_code, "pin": pin, "sent": sent,
+            "next": "Loaded onto the panels at the next Sync users (or tonight)."}
+
+
+@router.delete("/pins/{emp_code}", status_code=status.HTTP_204_NO_CONTENT)
+def clear_door_pin(emp_code: str, db: Session = Depends(get_db)):
+    from ..services.door_pins import clear_pin
+    clear_pin(db, emp_code)
+
+
+class GeneratePinsIn(BaseModel):
+    send: bool = True
+
+
+@router.post("/pins/generate-missing", summary="Give everyone without a door PIN a new one")
+def generate_missing_pins(body: GeneratePinsIn, db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    from ..services.door_pins import set_pin, send_pin
+    codes = [r[0] for r in db.execute(_t("SELECT emp_code FROM personnel WHERE is_active AND door_pin_enc IS NULL "
+                                          "AND COALESCE(attendance_id, '') <> ''")).fetchall()]
+    issued, sent = [], 0
+    for code in codes:
+        pin = set_pin(db, code)
+        if body.send:
+            r = send_pin(db, code, pin)
+            sent += 1 if any((v or {}).get("sent") for k, v in r.items() if isinstance(v, dict)) else 0
+        else:
+            issued.append({"emp_code": code, "pin": pin})
+    return {"generated": len(codes), "sent": sent if body.send else None,
+            "pins": issued if not body.send else None,
+            "note": None if body.send else "Shown once — hand each PIN to its owner privately."}

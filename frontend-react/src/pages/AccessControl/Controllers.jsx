@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Button, Input, Select, Switch, Tag, Tooltip, Popconfirm, Form, InputNumber,
-  Space, Spin, App, Empty, Modal, Card, Collapse, Badge, Radio, Drawer,
+  Space, Spin, App, Empty, Modal, Card, Collapse, Badge, Radio, Drawer, Tabs,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined,
@@ -174,6 +174,83 @@ const CardImport = () => {
   );
 };
 
+const DoorPins = () => {
+  const { message, modal } = App.useApp();
+  const qc = useQueryClient();
+  const [q, setQ] = useState('');
+  const [missing, setMissing] = useState(false);
+  const { data, isFetching } = useQuery({
+    queryKey: ['ac-pins', q, missing],
+    queryFn: () => apiService.get(`${BASE}/pins/status`, { search: q || undefined, missing_only: missing || undefined }),
+  });
+  const showOnce = (title, pin, extra) => modal.success({
+    title, width: 420,
+    content: <div><div style={{ fontSize: 34, fontWeight: 800, letterSpacing: 6, fontFamily: 'monospace', margin: '8px 0' }}>{pin}</div>
+      <div style={{ color: '#64748b' }}>{extra || 'Shown once. Give it to the person privately.'}</div></div>,
+  });
+  const setPin = useMutation({
+    mutationFn: (body) => apiService.post(`${BASE}/pins`, body),
+    onSuccess: (r, vars) => {
+      qc.invalidateQueries(['ac-pins']);
+      const sent = r?.sent && Object.values(r.sent).some(v => v?.sent);
+      showOnce(`New PIN for ${vars.emp_code}`, r.pin,
+        vars.send ? (sent ? 'Sent to them by WhatsApp / email. Loaded onto the panels at the next sync.' : 'Could not send it (no WhatsApp / email set up or no contact) — hand it over privately.') : undefined);
+    },
+    onError: e => message.error(e.message),
+  });
+  const clear = useMutation({
+    mutationFn: (code) => apiService.delete(`${BASE}/pins/${encodeURIComponent(code)}`),
+    onSuccess: () => { qc.invalidateQueries(['ac-pins']); message.success('PIN removed'); },
+  });
+  const bulk = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/pins/generate-missing`, { send: true }),
+    onSuccess: (r) => { qc.invalidateQueries(['ac-pins']); message.success(`${r.generated} PIN(s) created · ${r.sent} sent`, 8); },
+    onError: e => message.error(e.message),
+  });
+  const t = data?.totals || {};
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+        {[['Active staff', t.active], ['With a card', t.with_card], ['With a PIN', t.with_pin]].map(([l, v]) => (
+          <div key={l} style={{ flex: 1, minWidth: 120, background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: '8px 12px' }}>
+            <div style={{ fontSize: 20, fontWeight: 800 }}>{v ?? '—'}</div><div style={{ fontSize: 12, color: '#64748b' }}>{l}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 12.5, color: '#64748b', marginBottom: 10 }}>
+        A PIN is used on keypad doors set to <b>Card + PIN</b> or <b>PIN only</b>. PINs are stored encrypted and are only ever shown once.
+      </div>
+      <Space wrap style={{ marginBottom: 10 }}>
+        <Input.Search allowClear placeholder="Find a person…" onSearch={setQ} style={{ width: 240 }} />
+        <Switch checked={missing} onChange={setMissing} /> <span style={{ fontSize: 13 }}>Without a PIN only</span>
+        <Popconfirm title="Create a PIN for everyone without one and send each person theirs by WhatsApp / email?"
+          onConfirm={() => bulk.mutate()}>
+          <Button loading={bulk.isPending}>Create &amp; send missing PINs</Button>
+        </Popconfirm>
+      </Space>
+      {isFetching && !data ? <Spin /> : (data?.people || []).map(p => (
+        <div key={p.emp_code} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '8px 0', borderBottom: '1px solid #f0f0f0' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 600 }}>{p.name}</div>
+            <div style={{ fontSize: 12, color: '#8c8c8c' }}>{p.emp_code}{p.card_number ? ` · card ${p.card_number}` : ' · no card'}{p.attendance_id ? '' : ' · no Attendance ID'}</div>
+          </div>
+          {p.has_pin ? <Tag color="green">PIN set {p.set_at ? p.set_at.slice(0, 10) : ''}</Tag> : <Tag>No PIN</Tag>}
+          <Button size="small" loading={setPin.isPending && setPin.variables?.emp_code === p.emp_code}
+            onClick={() => setPin.mutate({ emp_code: p.emp_code, send: true })}>{p.has_pin ? 'New PIN' : 'Create'} &amp; send</Button>
+          <Tooltip title="Make a new PIN and show it here instead of sending it (the current PIN can never be shown)">
+            <Button size="small" onClick={() => setPin.mutate({ emp_code: p.emp_code, send: false })}>New PIN to hand over</Button>
+          </Tooltip>
+          {p.has_pin && (
+            <Popconfirm title="Remove this person's PIN?" onConfirm={() => clear.mutate(p.emp_code)}>
+              <Button size="small" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
 const CardsDrawer = ({ open, onClose }) => {
   const { message } = App.useApp();
   const qc = useQueryClient();
@@ -194,8 +271,9 @@ const CardsDrawer = ({ open, onClose }) => {
     onError: e => message.error(e.message),
   });
   return (
-    <Drawer open={open} onClose={onClose} width={640} title={<span><CreditCardOutlined /> Issue cards</span>}
+    <Drawer open={open} onClose={onClose} width={720} title={<span><CreditCardOutlined /> Cards &amp; PINs</span>}
       extra={isFetching ? <Spin size="small" /> : null}>
+      <Tabs items={[{ key: 'cards', label: 'Issue cards', children: (<>
       <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 10, padding: '10px 12px', marginBottom: 14, fontSize: 13 }}>
         Tap a new card on <b>any reader</b>. It is refused (it belongs to nobody yet) and appears below within a few
         seconds — pick the person and press <b>Issue</b>. The card is saved on their record and loaded onto every controller.
@@ -216,6 +294,7 @@ const CardsDrawer = ({ open, onClose }) => {
             onClick={() => assign.mutate({ card_no: c.card_no, emp_code: who[c.card_no] })}>Issue</Button>
         </div>
       ))}
+      </>) }, { key: 'pins', label: 'Door PINs', children: <DoorPins /> }]} />
     </Drawer>
   );
 };
@@ -239,7 +318,11 @@ const EmergencyOutputs = ({ ctrl }) => {
   });
   const saveDoor = useMutation({
     mutationFn: ({ id, patch }) => apiService.put(`${BASE}/doors/${id}`, patch),
-    onSuccess: () => { qc.invalidateQueries(['ctrl-doors', ctrl.id]); message.success('Saved'); },
+    onSuccess: (r) => {
+      qc.invalidateQueries(['ctrl-doors', ctrl.id]);
+      if (r?.panel && !r.panel.ok) message.warning(`Saved — but the panel did not accept it: ${r.panel.error}`, 8);
+      else message.success(r?.panel ? 'Saved and set on the panel' : 'Saved');
+    },
     onError: e => message.error(e.message),
   });
   const addSiren = useMutation({
@@ -267,8 +350,15 @@ const EmergencyOutputs = ({ ctrl }) => {
           <Tag style={{ minWidth: 58, textAlign: 'center' }}>Door {d.port}</Tag>
           <Input size="small" defaultValue={d.name} style={{ maxWidth: 260 }}
             onBlur={e => e.target.value !== d.name && saveDoor.mutate({ id: d.id, patch: { name: e.target.value } })} />
-          <Select size="small" value={d.emergency_action} style={{ width: 230 }} options={ROLES}
-            onChange={v => saveDoor.mutate({ id: d.id, patch: { emergency_action: v } })} />
+          <Tooltip title="How people open this door">
+            <Select size="small" value={d.verify_mode || 4} style={{ width: 130 }}
+              onChange={v => saveDoor.mutate({ id: d.id, patch: { verify_mode: v } })}
+              options={[{ value: 4, label: '💳 Card' }, { value: 11, label: '💳 Card + PIN' }, { value: 3, label: '🔢 PIN only' }]} />
+          </Tooltip>
+          <Tooltip title="What this door does in a fire">
+            <Select size="small" value={d.emergency_action} style={{ width: 230 }} options={ROLES}
+              onChange={v => saveDoor.mutate({ id: d.id, patch: { emergency_action: v } })} />
+          </Tooltip>
           {d.emergency_action === 2 && <Tag color="green" icon={<FireOutlined />}>fire exit</Tag>}
         </div>
       ))}
@@ -422,7 +512,7 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
           ),
         }, {
           key: 'emergency',
-          label: <span style={{ fontWeight: 600, fontSize: 13 }}><FireOutlined style={{ color: '#f97316' }} /> In an emergency — fire exits &amp; sirens</span>,
+          label: <span style={{ fontWeight: 600, fontSize: 13 }}><FireOutlined style={{ color: '#f97316' }} /> Doors (card / PIN), fire exits &amp; sirens</span>,
           children: <EmergencyOutputs ctrl={ctrl} />,
         }]}
       />
@@ -675,7 +765,7 @@ const Controllers = () => {
           </div>
         </div>
         <Space>
-          <Button icon={<CreditCardOutlined />} onClick={() => setCardsOpen(true)}>Issue cards</Button>
+          <Button icon={<CreditCardOutlined />} onClick={() => setCardsOpen(true)}>Cards &amp; PINs</Button>
           <Button icon={<ReloadOutlined />} onClick={() => qc.invalidateQueries({ queryKey: ['ac-controllers'] })}>
             Refresh
           </Button>

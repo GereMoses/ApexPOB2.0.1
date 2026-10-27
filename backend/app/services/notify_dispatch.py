@@ -67,7 +67,7 @@ def responders(db) -> List[Dict[str, str]]:
 
 def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, str]], subject: str, message: str,
              channels: Optional[Iterable[str]] = None, include_responders: bool = True,
-             html_body: Optional[str] = None) -> Dict[str, Any]:
+             html_body: Optional[str] = None, log_text: Optional[str] = None) -> Dict[str, Any]:
     """Send now (blocking) and log every delivery. Never raises."""
     from ..core.database import SessionLocal
     from .notify_email import send_email
@@ -126,7 +126,8 @@ def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, 
             db.execute(text("""
                 INSERT INTO notify_delivery (source_type, source_id, channel, recipient_name, address, status, error, subject, message)
                 VALUES (:st, :sid, :channel, :name, :addr, :status, :error, :subject, :message)
-            """), [dict(r, st=source_type, sid=source_id, subject=subject[:255], message=message[:2000]) for r in log_rows])
+            """), [dict(r, st=source_type, sid=source_id, subject=subject[:255],
+                        message=(log_text if log_text is not None else message)[:2000]) for r in log_rows])
             db.commit()
         logger.info("Alert %s#%s dispatched: %s", source_type, source_id, summary)
     except Exception as e:  # noqa: BLE001 — alerts must never break the flow that raised them

@@ -242,6 +242,7 @@ class AccDoor(Base):
     acc_level_id = Column(Integer, ForeignKey("acc_level.id"))
     mustering_mode = Column(Boolean, default=False)
     emergency_action = Column(SmallInteger, default=0)  # 0=none, 1=lock, 2=unlock
+    verify_mode = Column(SmallInteger, default=4, server_default='4', nullable=False)  # 4 card, 11 card+PIN, 3 PIN
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

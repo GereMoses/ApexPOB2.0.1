@@ -1,8 +1,9 @@
 """
 Keep each ZKTeco C3 / inBio panel's user list in step with ApexPOB.
 
-* Active staff with an Attendance ID are loaded (PIN = Attendance ID, card =
-  personnel.card_number) and authorised on every door of the panel.
+* Active staff with an Attendance ID are loaded (panel user ID = Attendance ID,
+  card = personnel.card_number, keypad PIN = their door PIN) and authorised on
+  every door of the panel.
 * Someone ApexPOB loaded who is no longer active (leaver, suspended, or lost their
   ID) is REMOVED by re-writing their record with an end date of yesterday and no
   card — the panel then refuses them ("card expired"). Panel users ApexPOB did not
@@ -27,7 +28,8 @@ logger = logging.getLogger(__name__)
 def active_panel_users(db: Session, emp_codes: Optional[List[str]] = None) -> Tuple[List[Dict], int]:
     """Active staff as panel user records; also returns how many were skipped (no Attendance ID)."""
     from .device_pin import is_valid_pin
-    q = """SELECT emp_code, attendance_id, card_number,
+    from ..core.crypto import decrypt_secret
+    q = """SELECT emp_code, attendance_id, card_number, door_pin_enc,
                   COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name))) AS name
            FROM personnel
            WHERE is_active AND COALESCE(UPPER(status), 'ACTIVE') NOT IN ('TERMINATED', 'INACTIVE', 'SUSPENDED')"""
@@ -40,21 +42,33 @@ def active_panel_users(db: Session, emp_codes: Optional[List[str]] = None) -> Tu
         if not is_valid_pin(r.attendance_id):
             skipped += 1
             continue
+        door_pin = ""
+        if r.door_pin_enc:
+            try:
+                door_pin = decrypt_secret(r.door_pin_enc) or ""
+            except Exception:  # noqa: BLE001 — a bad secret must not stop the sync
+                door_pin = ""
         users.append({"pin": str(r.attendance_id), "emp_code": r.emp_code,
-                      "card_no": str(r.card_number) if r.card_number else "", "name": (r.name or "")[:24]})
+                      "card_no": str(r.card_number) if r.card_number else "", "name": (r.name or "")[:24],
+                      "password": door_pin})
     return users, skipped
+
+
+def _secret_hash(u: Dict) -> str:
+    import hashlib
+    return hashlib.sha256(f"{u.get('pin')}:{u.get('password') or ''}".encode()).hexdigest() if u.get("password") else ""
 
 
 def _record(db: Session, ctrl_id: int, users: List[Dict], state: str, failed: Dict[str, str]) -> None:
     for u in users:
         bad = u["pin"] in failed
         db.execute(text("""
-            INSERT INTO controller_user (controller_id, pin, emp_code, card_no, state, last_error, updated_at)
-            VALUES (:c, :p, :e, :card, :s, :err, NOW())
+            INSERT INTO controller_user (controller_id, pin, emp_code, card_no, secret_hash, state, last_error, updated_at)
+            VALUES (:c, :p, :e, :card, :h, :s, :err, NOW())
             ON CONFLICT (controller_id, pin) DO UPDATE SET emp_code = EXCLUDED.emp_code, card_no = EXCLUDED.card_no,
-                state = EXCLUDED.state, last_error = EXCLUDED.last_error, updated_at = NOW()
+                secret_hash = EXCLUDED.secret_hash, state = EXCLUDED.state, last_error = EXCLUDED.last_error, updated_at = NOW()
         """), {"c": ctrl_id, "p": u["pin"], "e": u.get("emp_code"), "card": u.get("card_no") or "",
-               "s": "failed" if bad else state, "err": failed.get(u["pin"])})
+               "h": _secret_hash(u), "s": "failed" if bad else state, "err": failed.get(u["pin"])})
     db.commit()
 
 
@@ -91,10 +105,11 @@ def remove_users(db: Session, ctrl, pins: List[str]) -> Dict:
 def sync_controller(db: Session, ctrl) -> Dict:
     wanted, skipped = active_panel_users(db)
     want = {u["pin"]: u for u in wanted}
-    rows = db.execute(text("SELECT pin, card_no, state FROM controller_user WHERE controller_id = :c"),
+    rows = db.execute(text("SELECT pin, card_no, secret_hash, state FROM controller_user WHERE controller_id = :c"),
                       {"c": ctrl.id}).fetchall()
     have = {r.pin: r for r in rows if r.state == "loaded"}
-    to_load = [u for p, u in want.items() if p not in have or (have[p].card_no or "") != (u["card_no"] or "")]
+    to_load = [u for p, u in want.items() if p not in have or (have[p].card_no or "") != (u["card_no"] or "")
+               or (have[p].secret_hash or "") != _secret_hash(u)]
     to_remove = [p for p in have if p not in want]
     out = {"controller": ctrl.name, "to_load": len(to_load), "to_remove": len(to_remove),
            "skipped_no_attendance_id": skipped}

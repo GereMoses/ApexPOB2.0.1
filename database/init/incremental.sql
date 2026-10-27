@@ -540,3 +540,10 @@ CREATE TABLE IF NOT EXISTS controller_user (
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (controller_id, pin)
 );
+
+-- Personal door PIN (keypad) for C3 readers — encrypted at rest; loaded onto panels as the user password
+ALTER TABLE personnel ADD COLUMN IF NOT EXISTS door_pin_enc TEXT;
+ALTER TABLE personnel ADD COLUMN IF NOT EXISTS door_pin_set_at TIMESTAMPTZ;
+ALTER TABLE controller_user ADD COLUMN IF NOT EXISTS secret_hash VARCHAR(64);
+-- How a door is opened: 4 = card only, 11 = card + PIN, 3 = PIN only (C3 DoorNVerifyType)
+ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS verify_mode SMALLINT NOT NULL DEFAULT 4;

@@ -242,3 +242,54 @@ def test_fire_alarm_input_starts_fire_mode(superuser_headers, panel, db, monkeyp
     ingest_event(db.query(AccessController).get(cid), C3Event(time=datetime.now(), card_no=None, pin=None, door_id=2,
                                                              event_type=220, in_out=0, verify_type=0), db)
     assert fired == [cid]
+
+
+@needs_db
+def test_door_pin_set_loaded_and_never_logged(superuser_headers, panel, db, make_person, monkeypatch):
+    import app.services.zkteco.c3_zkaccess as z
+    import app.services.notify_dispatch as nd
+    monkeypatch.setattr(z, "sdk_available", lambda: True)
+    monkeypatch.setattr(nd, "configured_channels", lambda: {"email": False, "whatsapp": False, "sms": False})
+    c = _client(superuser_headers)
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    assert c.post("/api/v1/access-controllers/pins", json={"emp_code": p["emp_code"], "pin": "1234"}).status_code == 400
+    r = c.post("/api/v1/access-controllers/pins", json={"emp_code": p["emp_code"], "send": True}).json()
+    door_pin = r["pin"]
+    assert len(door_pin) == 6 and door_pin.isdigit()
+    stored = db.execute(text("SELECT door_pin_enc FROM personnel WHERE emp_code = :c"), {"c": p["emp_code"]}).scalar()
+    assert stored and door_pin not in stored                                   # encrypted at rest
+    logged = db.execute(text("SELECT string_agg(message, '|') FROM notify_delivery WHERE source_type = 'door_pin'")).scalar() or ""
+    assert door_pin not in logged                                              # never in the delivery log
+    status = c.get("/api/v1/access-controllers/pins/status", params={"search": p["emp_code"]}).json()
+    assert status["people"][0]["has_pin"] is True and "pin" not in status["people"][0]
+
+    ip = f"10.4.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "Keypad", "ip_address": ip, "model": "C3-100", "door_count": 1}).json()["id"]
+    from app.services.panel_sync import active_panel_users
+    users, _ = active_panel_users(db, [p["emp_code"]])
+    assert users[0]["password"] == door_pin
+    c.post(f"/api/v1/access-controllers/{cid}/sync-users")
+    assert any(x[0] == "user" and x[2] == pin for x in panel)
+    # a new PIN is re-sent at the next sync; an unchanged one is not
+    panel.clear()
+    c.post(f"/api/v1/access-controllers/{cid}/sync-users")
+    assert not any(x[0] == "user" and x[2] == pin for x in panel)
+    c.post("/api/v1/access-controllers/pins", json={"emp_code": p["emp_code"]})
+    c.post(f"/api/v1/access-controllers/{cid}/sync-users")
+    assert any(x[0] == "user" and x[2] == pin for x in panel)
+
+
+@needs_db
+def test_door_verify_mode_is_written_to_the_panel(superuser_headers, panel, db, monkeypatch):
+    import app.services.zkteco.c3_zkaccess as z
+    monkeypatch.setattr(z, "sdk_available", lambda: True)
+    params = []
+    monkeypatch.setattr(z.ZKAccessC3Client, "set_door_verify_mode", lambda self, door, mode: params.append((door, mode)), raising=False)
+    c = _client(superuser_headers)
+    ip = f"10.3.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "Lab", "ip_address": ip, "model": "C3-200", "door_count": 2}).json()["id"]
+    door = c.get(f"/api/v1/access-controllers/{cid}/doors").json()[1]
+    r = c.put(f"/api/v1/access-controllers/doors/{door['id']}", json={"verify_mode": 11}).json()
+    assert r["verify_label"] == "Card + PIN" and r["panel"]["ok"] and params == [(2, 11)]
+    assert c.put(f"/api/v1/access-controllers/doors/{door['id']}", json={"verify_mode": 7}).status_code == 400

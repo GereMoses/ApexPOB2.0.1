@@ -117,6 +117,16 @@ class ZKAccessC3Client:
         )
         return True
 
+    def set_params(self, params: dict) -> None:
+        """SetDeviceParam — the same key=value write the library uses for the clock
+        (command 3, "DateTime=…"), e.g. {"Door1VerifyType": 11}."""
+        from c3 import consts
+        self._c3._send_receive(consts.Command.DATETIME, self._c3._kv_to_message(params))
+
+    def set_door_verify_mode(self, door_no: int, mode: int) -> None:
+        """4 = card only, 11 = card + PIN, 3 = PIN only."""
+        self.set_params({f"Door{int(door_no)}VerifyType": int(mode)})
+
     def aux_output(self, aux_no: int = 1, duration: int = 255) -> bool:
         """Switch an AUX output (siren / strobe wired to the panel).
         duration 255 = stay on, 0 = off, 1-254 = seconds on."""
@@ -153,6 +163,7 @@ class ZKAccessC3Client:
             try:
                 rec = {
                     "pin": pin,
+                    "password": str(u.get("password") or ""),
                     "cardno": str(u.get("card_no") or ""),
                     "name": str(u.get("name") or "")[:24],
                     "group": u.get("group") or 1,
