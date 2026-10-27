@@ -1,10 +1,20 @@
 import React, { useState } from 'react';
-import { Form, Input, Button, App, Checkbox } from 'antd';
+import { Form, Input, Button, App } from 'antd';
 import {
   UserOutlined, LockOutlined, SafetyOutlined, TeamOutlined,
-  ApartmentOutlined, AlertOutlined, DashboardOutlined, CheckCircleFilled,
-  EyeInvisibleOutlined, EyeTwoTone, RightOutlined, MobileOutlined,
+  ApartmentOutlined, AlertOutlined, DashboardOutlined,
+  EyeInvisibleOutlined, EyeOutlined, RightOutlined, MobileOutlined, CheckCircleOutlined,
 } from '@ant-design/icons';
+
+/* Right-hand sign-in column: card-less, large inputs (left hero panel unchanged). */
+const C = {
+  bg: '#f4f5f7', ink: '#111827', muted: '#6b7280', label: '#4b5563', line: '#e5e7eb',
+  blue: '#3b74e8', blueLight: '#5b8ff5', green: '#16a34a',
+};
+const labelStyle = {
+  display: 'block', fontSize: 12, fontWeight: 600, color: C.label,
+  letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8,
+};
 
 /* ─── Feature list shown in the left panel ─────────────── */
 const FEATURES = [
@@ -25,9 +35,8 @@ const ORB_DEFS = [
 ];
 
 const Login = ({ onLogin }) => {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [loading, setLoading]       = useState(false);
-  const [focused, setFocused]       = useState(null);
   const [year]                      = useState(new Date().getFullYear());
   // MFA step state
   const [mfaRequired, setMfaRequired] = useState(false);
@@ -116,15 +125,17 @@ const Login = ({ onLogin }) => {
     }
   };
 
-  const inputStyle = (field) => ({
-    height: 48,
-    borderRadius: 10,
-    border: `1.5px solid ${focused === field ? '#4f8ef7' : '#e2e8f0'}`,
-    background: focused === field ? 'rgba(79,142,247,0.04)' : '#fafbfc',
-    boxShadow: focused === field ? '0 0 0 3px rgba(79,142,247,0.12)' : 'none',
-    transition: 'all 0.2s ease',
-    fontSize: 14,
+  // There is no self-service password reset: say so instead of a dead link.
+  const forgotPassword = () => modal.info({
+    title: 'Reset your password',
+    content: 'Ask your ApexPOB administrator to reset it (Settings → Users).',
   });
+
+  const primaryButton = {
+    height: 54, borderRadius: 14, border: 'none',
+    background: `linear-gradient(90deg, ${C.blue} 0%, ${C.blueLight} 100%)`,
+    boxShadow: '0 12px 28px rgba(59,116,232,0.28)', fontSize: 17, fontWeight: 600,
+  };
 
   return (
     <div style={{
@@ -304,232 +315,113 @@ const Login = ({ onLogin }) => {
         </div>
       </div>
 
-      {/* ═══ RIGHT PANEL — Login form ════════════════════════ */}
-      <div style={{
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'center',
-        alignItems: 'center',
-        padding: '40px 32px',
-        background: '#f7f9fc',
-        position: 'relative',
+      {/* ═══ RIGHT PANEL — card-less sign-in ═════════════════ */}
+      <div className="apx-login" style={{
+        flex: 1, background: C.bg,
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        padding: '44px 32px 32px',
       }}>
+        <div style={{ width: '100%', maxWidth: 460, flex: 1, display: 'flex', flexDirection: 'column' }}>
 
-        {/* Subtle radial glow top-right */}
-        <div style={{
-          position: 'absolute', top: -120, right: -120,
-          width: 400, height: 400, borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(79,142,247,0.07) 0%, transparent 70%)',
-          pointerEvents: 'none',
-        }} />
+          <div style={{ textAlign: 'center', fontSize: 13, fontWeight: 600, color: C.muted,
+            letterSpacing: '0.22em', textTransform: 'uppercase' }}>
+            Apex POB
+          </div>
 
-        {/* The card */}
-        <div style={{
-          width: '100%', maxWidth: 400,
-          background: 'white',
-          borderRadius: 20,
-          padding: '40px 36px',
-          boxShadow: '0 4px 6px rgba(0,0,0,0.04), 0 20px 60px rgba(0,0,0,0.08)',
-          border: '1px solid rgba(0,0,0,0.05)',
-          position: 'relative',
-        }}>
-
-          {/* Top accent line */}
-          <div style={{
-            position: 'absolute', top: 0, left: 24, right: 24, height: 3,
-            background: 'linear-gradient(90deg, #4f8ef7, #38bdf8)',
-            borderRadius: '0 0 4px 4px',
-          }} />
-
-          {/* Marconi logo + welcome text */}
-          <div style={{ textAlign: 'center', marginBottom: 28, marginTop: 8 }}>
-            <div style={{
-              display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              marginBottom: 18,
-            }}>
-              <img
-                src="/logo/image.png"
-                alt="Marconi.ng EPC Limited"
-                style={{
-                  height: 72, width: 'auto',
-                  filter: 'drop-shadow(0 4px 12px rgba(0,120,60,0.18))',
-                }}
-              />
-            </div>
-
-            {/* Divider line */}
-            <div style={{
-              width: 48, height: 3, margin: '0 auto 16px',
-              background: 'linear-gradient(90deg, #4f8ef7, #38bdf8)',
-              borderRadius: 2,
-            }} />
-
-            <div style={{ fontWeight: 800, fontSize: 21, color: '#0f172a', letterSpacing: '-0.3px' }}>
-              Welcome back
-            </div>
-            <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 6 }}>
-              Sign in to your Apex POB account
+          <div style={{ marginTop: 'auto' }} />
+          <div style={{ textAlign: 'center', margin: '0 0 44px' }}>
+            <h1 style={{ margin: 0, fontSize: 38, fontWeight: 800, color: C.ink, letterSpacing: '-1px' }}>
+              {mfaRequired ? 'Two-step verification' : 'Welcome back'}
+            </h1>
+            <div style={{ marginTop: 10, fontSize: 17, color: C.muted }}>
+              {mfaRequired ? 'Enter the 6-digit code from your authenticator app' : 'Sign in to your account'}
             </div>
           </div>
 
-          {/* ── MFA Step ── */}
+          {/* ── MFA step ── */}
           {mfaRequired && (
-            <div style={{ marginBottom: 8 }}>
-              <div style={{ textAlign: 'center', marginBottom: 20 }}>
-                <MobileOutlined style={{ fontSize: 32, color: '#4f8ef7', marginBottom: 8 }} />
-                <div style={{ fontWeight: 700, fontSize: 16, color: '#0f172a' }}>Two-Factor Authentication</div>
-                <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 4 }}>
-                  Enter the 6-digit code from your authenticator app
-                </div>
+            <Form form={mfaForm} onFinish={handleMfaSubmit} layout="vertical" requiredMark={false}>
+              <label style={labelStyle} htmlFor="totp_code">Authentication code</label>
+              <Form.Item
+                name="totp_code"
+                rules={[
+                  { required: true, message: 'Code is required' },
+                  { len: 6, message: 'Code must be 6 digits' },
+                  { pattern: /^\d+$/, message: 'Digits only' },
+                ]}
+                style={{ marginBottom: 32 }}
+              >
+                <Input id="totp_code" className="apx-input" prefix={<MobileOutlined className="apx-icon" />}
+                  placeholder="000000" maxLength={6} autoFocus style={{ letterSpacing: 8 }} />
+              </Form.Item>
+              <Button type="primary" htmlType="submit" loading={mfaLoading} block style={primaryButton}>
+                {mfaLoading ? 'Verifying…' : 'Verify code'}
+              </Button>
+              <div style={{ textAlign: 'center', marginTop: 16 }}>
+                <Button type="link" onClick={() => { setMfaRequired(false); setMfaPendingToken(null); }}
+                  style={{ color: C.blue }}>
+                  ← Back to sign in
+                </Button>
               </div>
-              <Form form={mfaForm} onFinish={handleMfaSubmit} layout="vertical" requiredMark={false}>
-                <Form.Item
-                  name="totp_code"
-                  rules={[
-                    { required: true, message: 'Code is required' },
-                    { len: 6, message: 'Code must be 6 digits' },
-                    { pattern: /^\d+$/, message: 'Digits only' },
-                  ]}
-                  style={{ marginBottom: 16 }}
-                >
-                  <Input
-                    prefix={<SafetyOutlined style={{ color: '#4f8ef7' }} />}
-                    placeholder="000000"
-                    maxLength={6}
-                    size="large"
-                    style={{ textAlign: 'center', letterSpacing: 8, fontSize: 20, borderRadius: 10, height: 52 }}
-                    autoFocus
-                  />
-                </Form.Item>
-                <Form.Item style={{ marginBottom: 12 }}>
-                  <Button
-                    type="primary" htmlType="submit" loading={mfaLoading} block
-                    style={{ height: 50, borderRadius: 12, background: 'linear-gradient(135deg,#4f8ef7,#1d5ed8)', border: 'none', fontWeight: 700, fontSize: 15 }}
-                  >
-                    {mfaLoading ? 'Verifying…' : 'Verify Code'}
-                  </Button>
-                </Form.Item>
-                <div style={{ textAlign: 'center' }}>
-                  <Button type="link" size="small" onClick={() => { setMfaRequired(false); setMfaPendingToken(null); }}>
-                    ← Back to login
-                  </Button>
-                </div>
-              </Form>
-            </div>
+            </Form>
           )}
 
-          {/* Form */}
+          {/* ── Sign-in form ── */}
           {!mfaRequired && (
-          <Form name="login" onFinish={handleSubmit} layout="vertical" requiredMark={false}>
-
-            <Form.Item
-              name="username"
-              style={{ marginBottom: 16 }}
-              rules={[{ required: true, message: 'Username is required' }]}
-            >
-              <div>
-                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6, letterSpacing: '0.02em' }}>
-                  USERNAME
-                </label>
-                <Input
-                  prefix={<UserOutlined style={{ color: focused === 'username' ? '#4f8ef7' : '#9ca3af', fontSize: 14, marginRight: 4 }} />}
-                  placeholder="Enter your username"
-                  size="large"
-                  style={inputStyle('username')}
-                  onFocus={() => setFocused('username')}
-                  onBlur={() => setFocused(null)}
-                />
-              </div>
-            </Form.Item>
-
-            <Form.Item
-              name="password"
-              style={{ marginBottom: 20 }}
-              rules={[{ required: true, message: 'Password is required' }]}
-            >
-              <div>
-                <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 6, letterSpacing: '0.02em' }}>
-                  PASSWORD
-                </label>
-                <Input.Password
-                  prefix={<LockOutlined style={{ color: focused === 'password' ? '#4f8ef7' : '#9ca3af', fontSize: 14, marginRight: 4 }} />}
-                  placeholder="Enter your password"
-                  size="large"
-                  style={inputStyle('password')}
-                  onFocus={() => setFocused('password')}
-                  onBlur={() => setFocused(null)}
-                  iconRender={(visible) => visible ? <EyeTwoTone twoToneColor="#4f8ef7" /> : <EyeInvisibleOutlined style={{ color: '#9ca3af' }} />}
-                />
-              </div>
-            </Form.Item>
-
-            {/* Remember me */}
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 }}>
-              <Form.Item name="remember" valuePropName="checked" style={{ margin: 0 }}>
-                <Checkbox style={{ fontSize: 13, color: '#64748b' }}>
-                  Keep me signed in
-                </Checkbox>
+            <Form name="login" onFinish={handleSubmit} layout="vertical" requiredMark={false}>
+              <label style={labelStyle} htmlFor="username">Username or email</label>
+              <Form.Item name="username" rules={[{ required: true, message: 'Username is required' }]}
+                style={{ marginBottom: 30 }}>
+                <Input id="username" className="apx-input" autoComplete="username" autoFocus
+                  prefix={<UserOutlined className="apx-icon" />} placeholder="Enter your username" />
               </Form.Item>
-              <span style={{ fontSize: 13, color: '#4f8ef7', cursor: 'pointer', fontWeight: 500 }}>
-                Forgot password?
-              </span>
-            </div>
 
-            {/* Submit */}
-            <Form.Item style={{ marginBottom: 20 }}>
-              <Button
-                type="primary"
-                htmlType="submit"
-                loading={loading}
-                block
-                style={{
-                  height: 50,
-                  borderRadius: 12,
-                  background: loading ? undefined : 'linear-gradient(135deg, #4f8ef7 0%, #1d5ed8 100%)',
-                  border: 'none',
-                  fontSize: 15,
-                  fontWeight: 700,
-                  letterSpacing: '0.02em',
-                  boxShadow: '0 6px 20px rgba(79,142,247,0.4)',
-                  transition: 'all 0.2s',
-                }}
-              >
-                {loading ? 'Authenticating…' : (
-                  <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+              <label style={labelStyle} htmlFor="password">Password</label>
+              <Form.Item name="password" rules={[{ required: true, message: 'Password is required' }]}
+                style={{ marginBottom: 12 }}>
+                <Input.Password id="password" className="apx-input apx-password" autoComplete="current-password"
+                  prefix={<LockOutlined className="apx-icon" />} placeholder="Enter your password"
+                  iconRender={(visible) => (visible ? <EyeInvisibleOutlined /> : <EyeOutlined />)} />
+              </Form.Item>
+
+              <button type="button" onClick={forgotPassword} style={{
+                all: 'unset', cursor: 'pointer', color: C.blueLight, fontSize: 15, fontWeight: 500,
+              }}>
+                Forgot Password?
+              </button>
+
+              <Button type="primary" htmlType="submit" loading={loading} block
+                style={{ ...primaryButton, marginTop: 40 }}>
+                {loading ? 'Signing in…' : (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12 }}>
                     Sign In <RightOutlined style={{ fontSize: 12 }} />
                   </span>
                 )}
               </Button>
-            </Form.Item>
-          </Form>
+            </Form>
           )}
+          <div style={{ marginBottom: 'auto' }} />
 
-          {/* Trust indicators */}
-          <div style={{
-            display: 'flex', justifyContent: 'center', gap: 20,
-            paddingTop: 20, borderTop: '1px solid #f1f5f9',
-          }}>
-            {[
-              { icon: <LockOutlined />,         label: 'TLS Encrypted'   },
-              { icon: <SafetyOutlined />,        label: 'Secure Session'  },
-              { icon: <CheckCircleFilled />,     label: 'Audit Logged'    },
-            ].map((t, i) => (
-              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-                <span style={{ color: '#22c55e', fontSize: 11 }}>{t.icon}</span>
-                <span style={{ color: '#94a3b8', fontSize: 10, fontWeight: 500 }}>{t.label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div style={{ marginTop: 28, textAlign: 'center' }}>
-          <div style={{ color: '#94a3b8', fontSize: 12 }}>
-            © {year} Apex POB · All rights reserved
-          </div>
-          <div style={{ fontSize: 11, marginTop: 4 }}>
-            <span style={{ color: '#cbd5e1' }}>Apex POB v2.0 · Deployed for Marconi.ng EPC Limited</span>
+          {/* Trust row + footer */}
+          <div style={{ paddingTop: 48 }}>
+            <div style={{ borderTop: `1px solid ${C.line}`, paddingTop: 24,
+              display: 'flex', justifyContent: 'center', flexWrap: 'wrap', gap: '10px 32px' }}>
+              {[
+                { icon: <LockOutlined />,        label: 'TLS Encrypted'  },
+                { icon: <CheckCircleOutlined />, label: 'Secure Session' },
+                { icon: <SafetyOutlined />,      label: 'Audit Logged'   },
+              ].map((t) => (
+                <span key={t.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 8, color: C.muted, fontSize: 14 }}>
+                  <span style={{ color: C.green }}>{t.icon}</span>{t.label}
+                </span>
+              ))}
+            </div>
+            <div style={{ textAlign: 'center', marginTop: 18, color: '#9ca3af', fontSize: 13 }}>
+              © {year} Apex POB · All rights reserved
+            </div>
+            <div style={{ textAlign: 'center', marginTop: 4, color: '#cbd5e1', fontSize: 12 }}>
+              Apex POB v2.0 · Deployed for Marconi.ng EPC Limited
+            </div>
           </div>
         </div>
       </div>
@@ -546,35 +438,24 @@ const Login = ({ onLogin }) => {
           50%      { opacity: 0.5; transform: scale(1.3); }
         }
 
-        /* Smooth hover lift on submit button */
-        .ant-btn-primary:not(.ant-btn-loading):hover {
-          transform: translateY(-1px);
-          box-shadow: 0 10px 28px rgba(79,142,247,0.5) !important;
+        .apx-login .apx-input.ant-input-affix-wrapper {
+          height: 60px; padding: 0 20px; border-radius: 14px;
+          border: 1.5px solid #e5e7eb; background: #ffffff; font-size: 17px; box-shadow: none;
         }
-        .ant-btn-primary:not(.ant-btn-loading):active {
-          transform: translateY(0);
+        .apx-login .apx-input .ant-input { font-size: 17px; background: transparent; }
+        .apx-login .apx-input .ant-input::placeholder { color: #111827; opacity: .8; }
+        .apx-login .apx-input.ant-input-affix-wrapper-focused,
+        .apx-login .apx-input.ant-input-affix-wrapper:hover {
+          border-color: #3b74e8; box-shadow: 0 0 0 4px rgba(59,116,232,0.12);
         }
-
-        /* Input focus animation */
-        .ant-input, .ant-input-password .ant-input {
-          transition: all 0.2s ease !important;
+        .apx-login .apx-icon { color: #9ca3af; font-size: 18px; margin-right: 12px; }
+        /* eye button in its own segment, as in the design */
+        .apx-login .apx-password .ant-input-suffix {
+          margin-right: -20px; height: 100%; padding: 0 24px;
+          border-left: 1.5px solid #e5e7eb; display: flex; align-items: center;
         }
-
-        /* Remove Ant Design default input border override */
-        .ant-input-affix-wrapper {
-          border-radius: 10px !important;
-          transition: all 0.2s ease !important;
-        }
-        .ant-input-affix-wrapper-focused {
-          box-shadow: 0 0 0 3px rgba(79,142,247,0.12) !important;
-          border-color: #4f8ef7 !important;
-        }
-
-        /* Checkbox style */
-        .ant-checkbox-checked .ant-checkbox-inner {
-          background-color: #4f8ef7 !important;
-          border-color: #4f8ef7 !important;
-        }
+        .apx-login .apx-password .ant-input-suffix .anticon { font-size: 20px; color: #6b7280; }
+        .apx-login .ant-btn-primary:not(:disabled):hover { filter: brightness(1.05); }
 
         /* Responsive: stack on small screens */
         @media (max-width: 820px) {
