@@ -93,6 +93,8 @@ def _check_lockout(username: str, ip: str = None) -> None:
 
 def _record_failed(username: str, ip: str = None) -> None:
     """Increment failure counters (per-username and per-IP); lock out on threshold."""
+    from ..core.sessions import audit_login
+    audit_login("login_failed", None, None, ip, remark=f"username: {username}")
     try:
         r = get_redis()
         key = _attempt_key(username)

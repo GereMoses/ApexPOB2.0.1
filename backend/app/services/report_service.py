@@ -4,7 +4,7 @@ Comprehensive reporting service aggregating data from all 12 modules
 """
 
 from typing import Dict, List, Any, Optional, Union
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from decimal import Decimal
 import logging
 try:
@@ -33,6 +33,24 @@ from ..models.biotime_models import BaseOperationLog, AuthUser
 from ..models.system import Company as BaseCompany
 
 logger = logging.getLogger(__name__)
+
+
+def _site_tz():
+    from .attendance_calculation_service import SITE_TZ
+    return SITE_TZ
+
+
+def _day_after(d) -> str:
+    """Exclusive upper bound for a date_to filter on a TIMESTAMP column. Comparing a
+    timestamp with <= 'YYYY-MM-DD' stops at 00:00 of that day, so the whole last day
+    of every chosen range was silently dropped."""
+    return (date.fromisoformat(str(d)[:10]) + timedelta(days=1)).isoformat()
+
+
+def _site_today() -> date:
+    """Today on the SITE calendar. _site_today() is the container's UTC date, so
+    between 00:00 and 01:00 Lagos every "today" default pointed at yesterday."""
+    return datetime.now(_site_tz()).date()
 
 
 class ReportService:
@@ -107,7 +125,7 @@ class ReportService:
         'system.login_log':         {'date_from': str, 'date_to': str},
         'system.data_audit':        {'date_from': str, 'date_to': str, 'module': str},
         'system.license_usage':     {},
-        'system.api_usage':         {'date_from': str},
+        'system.api_usage':         {'date_from': str, 'date_to': str},
         # Zone Security & Audit Reports
         'zone.access_log':          {'zone_id': int, 'emp_code': str, 'date_from': str, 'date_to': str},
         'zone.person_trail':        {'emp_code': str, 'date_from': str, 'date_to': str},
@@ -328,8 +346,15 @@ class ReportService:
             # Validate and clean filters against the known schema
             filters = self.validate_filters(report_code, filters)
 
-            # Execute report with filters
-            result = report_func(filters)
+            # Run the report in SITE time: timestamps come back as Lagos wall clock and
+            # ::date / date filters follow the site's day. Reports were in UTC, so every
+            # time shown was an hour behind (a 06:55 tap printed as 05:55).
+            tz_name = getattr(_site_tz(), "key", "Africa/Lagos")
+            self.db.execute(text("SELECT set_config('TimeZone', :tz, false)"), {"tz": tz_name})
+            try:
+                result = report_func(filters)
+            finally:
+                self.db.execute(text("SELECT set_config('TimeZone', 'UTC', false)"))
 
             data = result.get('data', [])
             if 'total' in result:
@@ -349,7 +374,7 @@ class ReportService:
                 'total': total,
                 'summary': result.get('summary', {}),
                 'chart_data': result.get('chart_data', {}),
-                'timezone': 'UTC',
+                'timezone': getattr(_site_tz(), "key", "Africa/Lagos"),
             }
             
         except Exception as e:
@@ -469,7 +494,7 @@ class ReportService:
         ]
 
         data = []
-        today = date.today()
+        today = _site_today()
         for emp in employees:
             if emp.birthday:
                 age = today.year - emp.birthday.year - ((today.month, today.day) < (emp.birthday.month, emp.birthday.day))
@@ -510,8 +535,8 @@ class ReportService:
         Joins att_report (computed) with att_timetable (scheduled) and
         iclock_transaction (raw punch count) for full audit trail.
         """
-        default_from = (date.today() - timedelta(days=6)).strftime('%Y-%m-%d')
-        default_to   = date.today().strftime('%Y-%m-%d')
+        default_from = (_site_today() - timedelta(days=6)).strftime('%Y-%m-%d')
+        default_to   = _site_today().strftime('%Y-%m-%d')
         date_from = filters.get('date_from', filters.get('date', default_from))
         date_to   = filters.get('date_to',   filters.get('date', default_to))
 
@@ -537,7 +562,7 @@ class ReportService:
                 COALESCE(tx.punch_count, 0)            AS punch_count
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             LEFT JOIN att_timetable t ON r.timetable_id = t.id
             LEFT JOIN (
                 SELECT emp_code, punch_time::date AS p_date, COUNT(*) AS punch_count
@@ -640,7 +665,7 @@ class ReportService:
     
     def attendance_monthly_summary(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Monthly attendance summary from att_report"""
-        month_filter = filters.get('month', date.today().strftime('%Y-%m'))
+        month_filter = filters.get('month', _site_today().strftime('%Y-%m'))
         year, month = map(int, month_filter.split('-'))
         start_date = date(year, month, 1)
         end_date = date(year + (month // 12), (month % 12) + 1, 1) - timedelta(days=1)
@@ -656,7 +681,7 @@ class ReportService:
                    SUM(r.late_minutes)                             AS total_late_minutes
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE r.att_date BETWEEN :start_date AND :end_date
             GROUP BY e.id, e.emp_code, e.first_name, e.last_name, d.dept_name
             ORDER BY d.dept_name, full_name
@@ -696,7 +721,7 @@ class ReportService:
     
     def attendance_late_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Late arrival report from att_report — employees with late_minutes > 0"""
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', (_site_today() - timedelta(days=1)).strftime('%Y-%m-%d'))  # = the picker's default
 
         sql = text("""
             SELECT e.emp_code,
@@ -705,7 +730,7 @@ class ReportService:
                    r.check_in, r.late_minutes
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE r.att_date = :att_date AND r.late_minutes > 0
             ORDER BY r.late_minutes DESC
         """)
@@ -764,8 +789,8 @@ class ReportService:
 
     def mustering_event_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """All mustering events with full headcount and compliance data."""
-        default_from = (date.today() - timedelta(days=30)).strftime('%Y-%m-%d')
-        default_to   = date.today().strftime('%Y-%m-%d')
+        default_from = (_site_today() - timedelta(days=30)).strftime('%Y-%m-%d')
+        default_to   = _site_today().strftime('%Y-%m-%d')
         date_from = filters.get('date_from', default_from)
         date_to   = filters.get('date_to',   default_to)
         event_id  = filters.get('event_id')
@@ -878,7 +903,7 @@ class ReportService:
         if filters.get('date_from'):
             query = query.filter(MusteringEvent.start_time >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(MusteringEvent.start_time <= filters['date_to'])
+            query = query.filter(MusteringEvent.start_time < _day_after(filters['date_to']))
 
         results = query.all()
 
@@ -938,7 +963,7 @@ class ReportService:
             date_from_clause = "AND e.start_time >= :date_from"
             params['date_from'] = filters['date_from']
         if filters.get('date_to'):
-            date_to_clause = "AND e.start_time <= :date_to"
+            date_to_clause = "AND e.start_time < CAST(:date_to AS date) + INTERVAL '1 day'"
             params['date_to'] = filters['date_to']
 
         rows = self.db.execute(text(f"""
@@ -1304,10 +1329,10 @@ class ReportService:
 
     def visitor_daily_log(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Daily visitor check-in/out log — enriched with visitor type, host, area, and pre-reg details."""
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', _site_today().strftime('%Y-%m-%d'))
 
         rows = self.db.execute(text(self._VIS_BASE_SQL + """
-            WHERE DATE(vl.check_in_time AT TIME ZONE 'UTC') = :dt
+            WHERE DATE(vl.check_in_time) = :dt
             ORDER BY vl.check_in_time
         """), {'dt': date_filter}).fetchall()
 
@@ -1381,10 +1406,10 @@ class ReportService:
         params: Dict[str, Any] = {}
         date_from_clause = date_to_clause = ""
         if filters.get('date_from'):
-            date_from_clause = "AND DATE(vl.check_in_time AT TIME ZONE 'UTC') >= :date_from"
+            date_from_clause = "AND DATE(vl.check_in_time) >= :date_from"
             params['date_from'] = filters['date_from']
         if filters.get('date_to'):
-            date_to_clause = "AND DATE(vl.check_in_time AT TIME ZONE 'UTC') <= :date_to"
+            date_to_clause = "AND DATE(vl.check_in_time) <= :date_to"
             params['date_to'] = filters['date_to']
 
         rows = self.db.execute(text(f"""
@@ -1469,23 +1494,31 @@ class ReportService:
         
         personnel = personnel_query.all()
         
-        # Get certification types
-        cert_types = self.db.query(MTDCertification.cert_type).distinct().all()
-        cert_type_list = [ct.cert_type for ct in cert_types]
-        
+        # Certificate types by NAME (mtd_cert_type); certificates keyed to the reader
+        # mirror (personnel_employee) by emp_code. The old code used MTDCertification
+        # .cert_type / .personnel_id, which do not exist (the report always crashed),
+        # and ran one query per employee.
+        cert_type_list = [r[0] for r in self.db.execute(text(
+            "SELECT cert_name FROM mtd_cert_type ORDER BY cert_name")).fetchall()]
+        latest: Dict[tuple, Any] = {}
+        for r in self.db.execute(text("""
+            SELECT pe.emp_code, ct.cert_name, MAX(c.expiry_date) AS expiry_date
+            FROM mtd_certification c
+            JOIN mtd_cert_type ct ON ct.id = c.cert_type_id
+            JOIN personnel_employee pe ON pe.id = c.emp_id
+            WHERE c.person_type = 0
+            GROUP BY pe.emp_code, ct.cert_name
+        """)).fetchall():
+            latest[(r.emp_code, r.cert_name)] = r.expiry_date
+
         # Build compliance matrix
         data = []
         for person in personnel:
-            # Get certifications for this person
-            person_certs = self.db.query(MTDCertification).filter(
-                MTDCertification.personnel_id == person.id
-            ).all()
-            
             cert_status = {}
             for cert_type in cert_type_list:
-                cert = next((c for c in person_certs if c.cert_type == cert_type), None)
-                if cert:
-                    days_to_expiry = (cert.expiry_date - date.today()).days
+                expiry = latest.get((person.emp_code, cert_type))
+                if expiry:
+                    days_to_expiry = (expiry - _site_today()).days
                     if days_to_expiry < 0:
                         cert_status[cert_type] = 'Expired'
                     elif days_to_expiry <= 30:
@@ -1541,7 +1574,7 @@ class ReportService:
         if filters.get('date_from'):
             query = query.filter(BaseOperationLog.created_at >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(BaseOperationLog.created_at <= filters['date_to'])
+            query = query.filter(BaseOperationLog.created_at < _day_after(filters['date_to']))
         if filters.get('module'):
             query = query.filter(BaseOperationLog.table_name == filters['module'])
 
@@ -1597,7 +1630,7 @@ class ReportService:
             {'field': 'hire_date',     'label': 'Hire Date',     'type': 'date'},
             {'field': 'years_service', 'label': 'Years Service', 'type': 'number'},
         ]
-        today = date.today()
+        today = _site_today()
         data = []
         for p in personnel:
             if p.hire_date:
@@ -1649,8 +1682,8 @@ class ReportService:
 
     def attendance_summary_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Overall attendance statistics for a date range from att_report"""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         sql = text("""
             SELECT e.emp_code,
@@ -1664,7 +1697,7 @@ class ReportService:
                    SUM(r.ot_minutes)                               AS total_ot_minutes
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE r.att_date BETWEEN :date_from AND :date_to
             GROUP BY e.id, e.emp_code, e.first_name, e.last_name, d.dept_name
             ORDER BY d.dept_name, full_name
@@ -1698,7 +1731,7 @@ class ReportService:
 
     def attendance_early_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Early departure from att_report — employees with early_minutes > 0"""
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', (_site_today() - timedelta(days=1)).strftime('%Y-%m-%d'))  # = the picker's default
 
         sql = text("""
             SELECT e.emp_code,
@@ -1707,7 +1740,7 @@ class ReportService:
                    r.check_out, r.early_minutes
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE r.att_date = :att_date AND r.early_minutes > 0
             ORDER BY r.early_minutes DESC
         """)
@@ -1741,19 +1774,25 @@ class ReportService:
         }
 
     def attendance_absent_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """Active employees absent (att_status=3) or with no att_report for the date"""
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        """Employees scheduled to work on the date who did not attend (att_status=3).
+        Previously anyone WITHOUT an attendance row counted too — but rows exist only for
+        scheduled days, so every off-rotation / rest-day employee (and every leaver)
+        was listed as absent."""
+        date_filter = filters.get('date', (_site_today() - timedelta(days=1)).strftime('%Y-%m-%d'))  # = the picker's default
 
         sql = text("""
             SELECT e.emp_code,
                    (e.first_name || ' ' || e.last_name) AS full_name,
                    COALESCE(d.dept_name, '') AS department,
                    COALESCE(r.att_status, -1) AS att_status
-            FROM personnel_employee e
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
-            LEFT JOIN att_report r ON r.emp_id = e.id AND r.att_date = :att_date
-            WHERE e.status = 0
-              AND (r.id IS NULL OR r.att_status = 3)
+            FROM att_report r
+            JOIN personnel_employee e ON e.id = r.emp_id
+            JOIN personnel p ON p.emp_code = e.emp_code
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
+            WHERE r.att_date = :att_date
+              AND r.att_status = 3                       -- scheduled to work, no attendance
+              AND p.is_active = TRUE                     -- still employed
+              AND COALESCE(p.on_leave, FALSE) = FALSE
             ORDER BY d.dept_name, full_name
         """)
         rows = self.db.execute(sql, {'att_date': date_filter}).fetchall()
@@ -1772,7 +1811,7 @@ class ReportService:
             'emp_code':   r._mapping['emp_code'],
             'full_name':  r._mapping['full_name'],
             'department': r._mapping['department'],
-            'reason':     'Marked Absent' if r._mapping['att_status'] == 3 else 'No Record',
+            'reason':     'Scheduled, no attendance',
         } for r in rows]
         return {
             'columns': columns, 'data': data, 'total': len(data),
@@ -1781,7 +1820,7 @@ class ReportService:
 
     def attendance_overtime_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Overtime report from att_report — employees with ot_minutes > 0"""
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', (_site_today() - timedelta(days=1)).strftime('%Y-%m-%d'))  # = the picker's default
 
         sql = text("""
             SELECT e.emp_code,
@@ -1792,7 +1831,7 @@ class ReportService:
                    GREATEST(r.ot_minutes, r.overtime_minutes, 0) AS ot_minutes
             FROM att_report r
             JOIN personnel_employee e ON r.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE r.att_date = :att_date
               AND GREATEST(r.ot_minutes, r.overtime_minutes, 0) > 0
             ORDER BY ot_minutes DESC
@@ -1836,8 +1875,8 @@ class ReportService:
 
     def attendance_leave_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Leave records from att_leave table"""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         sql = text("""
             SELECT e.emp_code,
@@ -1855,7 +1894,7 @@ class ReportService:
                    END AS approval_status
             FROM att_leave l
             JOIN personnel_employee e ON l.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             LEFT JOIN att_leave_type lt ON l.leave_type_id = lt.id
             WHERE l.start_time::date <= :date_to
               AND l.end_time::date   >= :date_from
@@ -1923,8 +1962,8 @@ class ReportService:
 
     def attendance_exceptions(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Attendance exceptions from att_exception table"""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         sql = text("""
             SELECT e.emp_code,
@@ -1939,7 +1978,7 @@ class ReportService:
                    END AS handle_status
             FROM att_exception ex
             JOIN personnel_employee e ON ex.emp_id = e.id
-            LEFT JOIN personnel_department d ON e.dept_id = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON e.dept_id = d.id
             WHERE ex.att_date BETWEEN :date_from AND :date_to
             ORDER BY ex.att_date DESC, d.dept_name
         """)
@@ -1999,8 +2038,8 @@ class ReportService:
         Deduplication: iclock_transaction rows are excluded when acc_event already
         holds a matching (emp_code, terminal_sn, same-minute) record.
         """
-        default_from = (date.today() - timedelta(days=6)).strftime('%Y-%m-%d')
-        default_to   = date.today().strftime('%Y-%m-%d')
+        default_from = (_site_today() - timedelta(days=6)).strftime('%Y-%m-%d')
+        default_to   = _site_today().strftime('%Y-%m-%d')
         date_from    = filters.get('date_from', default_from)
         date_to      = filters.get('date_to',   default_to)
         emp_filter   = filters.get('emp_code', '')
@@ -2029,7 +2068,7 @@ class ReportService:
                 'acc_event'                   AS source
             FROM acc_event ae
             LEFT JOIN personnel_employee pe   ON ae.emp_code   = pe.emp_code
-            LEFT JOIN personnel_department dept ON pe.dept_id  = dept.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) dept ON pe.dept_id  = dept.id
             LEFT JOIN iclock_terminal t       ON ae.terminal_sn = t.sn
             LEFT JOIN acc_door d              ON ae.door_id    = d.id
             WHERE ae.event_time::date BETWEEN :date_from AND :date_to
@@ -2060,7 +2099,7 @@ class ReportService:
             JOIN  iclock_terminal t  ON tx.terminal_sn = t.sn
                                     AND t.reader_purpose IN ('ACCESS_ENTRY','ACCESS_EXIT')
             LEFT JOIN personnel_employee pe   ON tx.emp_code    = pe.emp_code
-            LEFT JOIN personnel_department dept ON pe.dept_id   = dept.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) dept ON pe.dept_id   = dept.id
             LEFT JOIN acc_door d ON d.terminal_sn = tx.terminal_sn
                 AND d.id = (
                     SELECT CASE t.reader_purpose
@@ -2250,7 +2289,7 @@ class ReportService:
         Source priority: acc_event (has door_id + direction) → falls back to
         iclock_transaction for access-reader terminals not yet in acc_event.
         """
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', _site_today().strftime('%Y-%m-%d'))
         rows = self.db.execute(text("""
             WITH combined AS (
                 -- Source 1: acc_event (most accurate — has door and direction)
@@ -2299,7 +2338,7 @@ class ReportService:
                 f.first_event
             FROM first_per_emp_door f
             LEFT JOIN personnel_employee pe    ON f.emp_code    = pe.emp_code
-            LEFT JOIN personnel_department dept ON pe.dept_id   = dept.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) dept ON pe.dept_id   = dept.id
             LEFT JOIN iclock_terminal t        ON f.terminal_sn = t.sn
             LEFT JOIN acc_door d               ON f.door_id     = d.id
             ORDER BY f.first_event, f.emp_code
@@ -2332,7 +2371,7 @@ class ReportService:
         Uses acc_event (has proper in_out direction) as primary source and
         falls back to iclock_transaction for access readers not yet in acc_event.
         """
-        date_filter = filters.get('date', date.today().strftime('%Y-%m-%d'))
+        date_filter = filters.get('date', _site_today().strftime('%Y-%m-%d'))
         rows = self.db.execute(text("""
             WITH combined AS (
                 -- Source 1: acc_event — has door_id + proper in_out direction
@@ -2449,7 +2488,7 @@ class ReportService:
         """Derive human-readable connectivity status from last contact timestamp."""
         if last_contact is None:
             return 'Never Connected'
-        lc = last_contact.replace(tzinfo=None) if last_contact.tzinfo else last_contact
+        lc = last_contact.astimezone(timezone.utc).replace(tzinfo=None) if last_contact.tzinfo else last_contact
         hours_ago = (now_utc - lc).total_seconds() / 3600
         if hours_ago <= 2:
             return 'Online'
@@ -2528,8 +2567,8 @@ class ReportService:
 
     def device_transaction_count(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Daily transaction volume per device terminal with device details."""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         rows = self.db.execute(text("""
             SELECT
@@ -2624,7 +2663,7 @@ class ReportService:
         for r in rows:
             status = self._connectivity_status(r.last_contact, now)
             if r.last_contact:
-                lc = r.last_contact.replace(tzinfo=None) if r.last_contact.tzinfo else r.last_contact
+                lc = r.last_contact.astimezone(timezone.utc).replace(tzinfo=None) if r.last_contact.tzinfo else r.last_contact
                 hrs = (now - lc).total_seconds() / 3600
                 if hrs >= 24:
                     duration = f'{int(hrs // 24)}d {int(hrs % 24)}h'
@@ -2711,8 +2750,8 @@ class ReportService:
 
     def mustering_drill_log(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Drill schedule history with zone name, outcome, and linked event results."""
-        default_from = (date.today() - timedelta(days=90)).strftime('%Y-%m-%d')
-        default_to   = date.today().strftime('%Y-%m-%d')
+        default_from = (_site_today() - timedelta(days=90)).strftime('%Y-%m-%d')
+        default_to   = _site_today().strftime('%Y-%m-%d')
         date_from = filters.get('date_from', default_from)
         date_to   = filters.get('date_to',   default_to)
 
@@ -2834,7 +2873,7 @@ class ReportService:
                     OVER (ORDER BY ml.check_time ROWS UNBOUNDED PRECEDING) AS cumulative_missing
             FROM mustering_log ml
             LEFT JOIN personnel_employee pe  ON ml.emp_code  = pe.emp_code
-            LEFT JOIN personnel_department d ON pe.dept_id   = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON pe.dept_id   = d.id
             WHERE ml.event_id = :event_id
             ORDER BY ml.check_time
         """), params).fetchall()
@@ -2907,7 +2946,7 @@ class ReportService:
             JOIN  mustering_event me ON ml.event_id  = me.id
             LEFT JOIN zones z        ON me.zone_id   = z.id
             LEFT JOIN personnel_employee pe  ON ml.emp_code = pe.emp_code
-            LEFT JOIN personnel_department d ON pe.dept_id  = d.id
+            LEFT JOIN (SELECT id, name AS dept_name FROM departments) d ON pe.dept_id  = d.id
             WHERE ml.status = 0
               {event_clause}
               {dept_clause}
@@ -2944,8 +2983,8 @@ class ReportService:
 
     def mustering_compliance_percentage(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Per-event compliance with grade and full headcount breakdown."""
-        default_from = (date.today() - timedelta(days=30)).strftime('%Y-%m-%d')
-        default_to   = date.today().strftime('%Y-%m-%d')
+        default_from = (_site_today() - timedelta(days=30)).strftime('%Y-%m-%d')
+        default_to   = _site_today().strftime('%Y-%m-%d')
         date_from = filters.get('date_from', default_from)
         date_to   = filters.get('date_to',   default_to)
 
@@ -3030,7 +3069,7 @@ class ReportService:
 
     def mustering_zone_performance(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Zone-level mustering performance aggregated across all events."""
-        date_from = filters.get('date_from', (date.today() - timedelta(days=365)).strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', (_site_today() - timedelta(days=365)).strftime('%Y-%m-%d'))
 
         rows = self.db.execute(text("""
             SELECT
@@ -3113,7 +3152,7 @@ class ReportService:
             date_from_clause = "AND e.start_time >= :date_from"
             params['date_from'] = filters['date_from']
         if filters.get('date_to'):
-            date_to_clause = "AND e.start_time <= :date_to"
+            date_to_clause = "AND e.start_time < CAST(:date_to AS date) + INTERVAL '1 day'"
             params['date_to'] = filters['date_to']
 
         rows = self.db.execute(text(f"""
@@ -3318,7 +3357,7 @@ class ReportService:
             date_from_clause = "AND n.sent_time >= :date_from"
             params['date_from'] = filters['date_from']
         if filters.get('date_to'):
-            date_to_clause = "AND n.sent_time <= :date_to"
+            date_to_clause = "AND n.sent_time < CAST(:date_to AS date) + INTERVAL '1 day'"
             params['date_to'] = filters['date_to']
 
         rows = self.db.execute(text(f"""
@@ -3986,8 +4025,8 @@ class ReportService:
 
     def visitor_host_report(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Visitors grouped by host employee — enriched with host dept and visit metrics."""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         # Actual visit log data grouped by host
         log_rows = self.db.execute(text("""
@@ -4002,7 +4041,7 @@ class ReportService:
                 MAX(vl.check_in_time)                                AS last_visit
             FROM vis_visit_log vl
             LEFT JOIN personnel_employee he ON vl.host_emp_id = he.id
-            WHERE DATE(vl.check_in_time AT TIME ZONE 'UTC') BETWEEN :df AND :dt
+            WHERE DATE(vl.check_in_time) BETWEEN :df AND :dt
             GROUP BY he.id, he.first_name, he.last_name, he.emp_code
             ORDER BY visit_count DESC
         """), {'df': date_from, 'dt': date_to}).fetchall()
@@ -4139,8 +4178,8 @@ class ReportService:
 
     def visitor_type_summary(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Visitor type distribution — visit counts, induction compliance, avg duration per type."""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         # Visit log breakdown by type
         log_rows = self.db.execute(text("""
@@ -4156,7 +4195,7 @@ class ReportService:
             FROM vis_visit_log vl
             JOIN vis_visitor v     ON vl.visitor_id    = v.id
             LEFT JOIN vis_type vt  ON v.visitor_type_id = vt.id
-            WHERE DATE(vl.check_in_time AT TIME ZONE 'UTC') BETWEEN :df AND :dt
+            WHERE DATE(vl.check_in_time) BETWEEN :df AND :dt
             GROUP BY COALESCE(vt.type_name, 'General')
             ORDER BY visit_count DESC
         """), {'df': date_from, 'dt': date_to}).fetchall()
@@ -4310,8 +4349,8 @@ class ReportService:
 
     def meeting_room_utilization(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Meeting room utilization percentage"""
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         results = (
             self.db.query(
@@ -4412,8 +4451,8 @@ class ReportService:
     def meeting_noshow(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Bookings with no attendee check-ins"""
         from ..models.meeting import MeetingAttendee
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         attended_booking_ids = {
             r[0] for r in self.db.query(MeetingAttendance.booking_id).distinct().all()
@@ -4446,8 +4485,8 @@ class ReportService:
     def meeting_minutes_status(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Meeting minutes completion status"""
         from ..models.meeting import MeetingMinutes
-        date_from = filters.get('date_from', date.today().replace(day=1).strftime('%Y-%m-%d'))
-        date_to   = filters.get('date_to',   date.today().strftime('%Y-%m-%d'))
+        date_from = filters.get('date_from', _site_today().replace(day=1).strftime('%Y-%m-%d'))
+        date_to   = filters.get('date_to',   _site_today().strftime('%Y-%m-%d'))
 
         bookings = (
             self.db.query(MeetingBooking)
@@ -4484,7 +4523,7 @@ class ReportService:
     def mtd_certification_expiry(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Certifications expiring within specified days"""
         days_ahead = int(filters.get('days_ahead', 60))
-        cutoff = date.today() + timedelta(days=days_ahead)
+        cutoff = _site_today() + timedelta(days=days_ahead)
 
         query = (
             self.db.query(MTDCertification)
@@ -4511,7 +4550,7 @@ class ReportService:
             {'field': 'days_left',   'label': 'Days Left',    'type': 'number'},
             {'field': 'status',      'label': 'Status',       'type': 'text'},
         ]
-        today = date.today()
+        today = _site_today()
         status_map = {0: 'Valid', 1: 'Expiring', 2: 'Expired'}
         data = [{
             'emp_id':      c.emp_id or 0,
@@ -4534,7 +4573,7 @@ class ReportService:
     def mtd_medical_expiry(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Medical certificates expiring within specified days"""
         days_ahead = int(filters.get('days_ahead', 60))
-        cutoff = date.today() + timedelta(days=days_ahead)
+        cutoff = _site_today() + timedelta(days=days_ahead)
 
         records = (
             self.db.query(MTDMedicalRecord)
@@ -4546,7 +4585,7 @@ class ReportService:
             .order_by(MTDMedicalRecord.next_due)
             .all()
         )
-        today = date.today()
+        today = _site_today()
         columns = [
             {'field': 'emp_id',     'label': 'Employee ID', 'type': 'number'},
             {'field': 'fit_status', 'label': 'Fit Status',  'type': 'text'},
@@ -4676,35 +4715,40 @@ class ReportService:
     # ==================== SYSTEM REPORTS (continued) ====================
 
     def system_login_log(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """User login history"""
-        query = (
-            self.db.query(BaseOperationLog)
-            .filter(BaseOperationLog.action == 'login')
-        )
+        """Sign-in history — successful and failed (written by core.sessions.audit_login)."""
+        params: Dict[str, Any] = {}
+        where = "l.action IN ('login', 'login_failed')"
         if filters.get('date_from'):
-            query = query.filter(BaseOperationLog.created_at >= filters['date_from'])
+            where += " AND l.created_at >= CAST(:df AS date)"
+            params['df'] = filters['date_from']
         if filters.get('date_to'):
-            query = query.filter(BaseOperationLog.created_at <= filters['date_to'])
-
-        query = query.order_by(desc(BaseOperationLog.created_at))
-        logs, total = self._paginate(query)
+            where += " AND l.created_at < CAST(:dt AS date) + INTERVAL '1 day'"   # whole last day
+            params['dt'] = filters['date_to']
+        total = self.db.execute(text(f"SELECT count(*) FROM base_operationlog l WHERE {where}"), params).scalar()
+        params.update(lim=self._page_size, off=(self._page - 1) * self._page_size)
+        rows = self.db.execute(text(f"""
+            SELECT l.created_at, l.action, l.ip_address, l.user_agent, l.remark, u.username
+            FROM base_operationlog l LEFT JOIN auth_user u ON u.id = l.user_id
+            WHERE {where} ORDER BY l.created_at DESC LIMIT :lim OFFSET :off
+        """), params).fetchall()
         columns = [
             {'field': 'timestamp',  'label': 'Time',       'type': 'datetime'},
             {'field': 'user',       'label': 'User',       'type': 'text'},
+            {'field': 'result',     'label': 'Result',     'type': 'text'},
             {'field': 'ip_address', 'label': 'IP Address', 'type': 'text'},
+            {'field': 'device',     'label': 'Browser / Device', 'type': 'text'},
         ]
         data = [{
-            'timestamp':  l.created_at.strftime('%Y-%m-%d %H:%M:%S') if l.created_at else '',
-            'user':       l.user.username if getattr(l, 'user', None) else '',
-            'ip_address': l.ip_address or '',
-        } for l in logs]
-        return {
-            'columns': columns, 'data': data,
-            'total': total,
-            'summary': {
-                'total_logins': total,
-            },
-        }
+            'timestamp':  self._fmt_dt(r.created_at, '%Y-%m-%d %H:%M:%S'),
+            'user':       r.username or (r.remark or '').replace('username: ', ''),
+            'result':     'Success' if r.action == 'login' else 'Failed',
+            'ip_address': r.ip_address or '',
+            'device':     (r.user_agent or '')[:80],
+        } for r in rows]
+        failed = self.db.execute(text(
+            f"SELECT count(*) FROM base_operationlog l WHERE {where} AND l.action = 'login_failed'"), params).scalar()
+        return {'columns': columns, 'data': data, 'total': total,
+                'summary': {'total_attempts': total, 'failed': failed}}
 
     def system_data_audit(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Data change audit log"""
@@ -4712,7 +4756,7 @@ class ReportService:
         if filters.get('date_from'):
             query = query.filter(BaseOperationLog.created_at >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(BaseOperationLog.created_at <= filters['date_to'])
+            query = query.filter(BaseOperationLog.created_at < _day_after(filters['date_to']))
         if filters.get('module'):
             query = query.filter(BaseOperationLog.table_name == filters['module'])
 
@@ -4763,13 +4807,23 @@ class ReportService:
 
     def system_api_usage(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """API usage by module"""
-        query = self.db.query(
-            BaseOperationLog.module,
-            func.count(BaseOperationLog.id).label('call_count'),
-        ).group_by(BaseOperationLog.module)
+        # There is no "module" column (the report always crashed): derive it from the
+        # request path recorded by the RBAC audit, e.g. /api/v1/zones/5 -> zones.
+        params: Dict[str, Any] = {}
+        where = "table_name LIKE '/api/%'"
         if filters.get('date_from'):
-            query = query.filter(BaseOperationLog.created_at >= filters['date_from'])
-        results = query.all()
+            where += " AND created_at >= CAST(:df AS date)"
+            params['df'] = filters['date_from']
+        if filters.get('date_to'):
+            where += " AND created_at < CAST(:dt AS date) + INTERVAL '1 day'"
+            params['dt'] = filters['date_to']
+        results = self.db.execute(text(f"""
+            SELECT CASE WHEN split_part(table_name, '/', 3) = 'v1' THEN split_part(table_name, '/', 4)
+                        ELSE split_part(table_name, '/', 3) END AS module,
+                   COUNT(*) AS call_count
+            FROM base_operationlog WHERE {where}
+            GROUP BY 1 ORDER BY 2 DESC
+        """), params).fetchall()
 
         columns = [
             {'field': 'module',     'label': 'Module',      'type': 'text'},
@@ -4810,7 +4864,7 @@ class ReportService:
         if filters.get('date_from'):
             query = query.filter(ZonePersonnelTracking.punch_time >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(ZonePersonnelTracking.punch_time <= filters['date_to'])
+            query = query.filter(ZonePersonnelTracking.punch_time < _day_after(filters['date_to']))
 
         query = query.order_by(ZonePersonnelTracking.emp_code, ZonePersonnelTracking.punch_time)
         rows, total = self._paginate(query)
@@ -4887,7 +4941,7 @@ class ReportService:
         if filters.get('date_from'):
             query = query.filter(ZonePersonnelTracking.punch_time >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(ZonePersonnelTracking.punch_time <= filters['date_to'])
+            query = query.filter(ZonePersonnelTracking.punch_time < _day_after(filters['date_to']))
 
         query = query.order_by(ZonePersonnelTracking.punch_time)
         rows, total = self._paginate(query)
@@ -5076,14 +5130,14 @@ class ReportService:
 
         query = (
             self.db.query(IClockOperLog, Device.zone_id)
-            .outerjoin(Device, Device.sn == IClockOperLog.terminal_sn)
+            .outerjoin(Device, Device.serial_number == IClockOperLog.terminal_sn)
             .filter(IClockOperLog.oper_event.in_(_SECURITY_OPER_CODES))
         )
 
         if filters.get('date_from'):
             query = query.filter(IClockOperLog.event_time >= filters['date_from'])
         if filters.get('date_to'):
-            query = query.filter(IClockOperLog.event_time <= filters['date_to'])
+            query = query.filter(IClockOperLog.event_time < _day_after(filters['date_to']))
         if filters.get('zone_id'):
             query = query.filter(Device.zone_id == filters['zone_id'])
         if filters.get('event_type'):
@@ -5257,45 +5311,54 @@ class ReportService:
         }
 
     def pob_crew_change(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """Personnel who mobilized or demobilized on a given date."""
-        target_date = filters.get('date', str(date.today()))
-        change_type_filter = filters.get('change_type', '').upper()  # MOBILIZE or DEMOBILIZE
+        """People who actually arrived on (MOBILIZE) or left (DEMOBILIZE) the site on a
+        date: flights/voyages and land journeys that moved POB, and taps through a
+        site-boundary zone (gate / helideck / jetty).
 
+        It used to treat every attendance check-in as a mobilisation and every
+        check-out as a demobilisation — daily shift taps, not crew changes (and with
+        the F18 stamping every tap Check-Out, everyone "demobilised" daily) — while
+        real arrivals and departures by helicopter or boat never appeared."""
+        target_date = filters.get('date', str(_site_today()))
+        change_type_filter = filters.get('change_type', '').upper()  # MOBILIZE or DEMOBILIZE
         params: Dict[str, Any] = {'d': target_date}
 
-        mobilize_sql = text("""
-            SELECT DISTINCT ON (t.emp_code)
-                t.emp_code,
-                t.punch_time,
-                'MOBILIZE' AS change_type,
-                term.alias AS terminal_alias
-            FROM iclock_transaction t
-            LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
-            WHERE t.punch_time::date = :d
-              AND t.punch_state IN (0, 4)
-            ORDER BY t.emp_code, t.punch_time
-        """)
+        moves = self.db.execute(text("""
+            -- flights / voyages (POB moved when the flight departed / arrived)
+            SELECT p.emp_code, me.pob_applied_at AS at,
+                   CASE WHEN me.direction = 'INBOUND' THEN 'MOBILIZE' ELSE 'DEMOBILIZE' END AS change_type,
+                   COALESCE(tr.identifier, 'Flight') || ': ' || ts.departure_location || ' → ' || ts.arrival_location AS via
+            FROM manifest_entry me
+            JOIN transport_schedule ts ON ts.id = me.schedule_id
+            LEFT JOIN transport tr ON tr.id = ts.transport_id
+            JOIN personnel p ON p.id = me.personnel_id
+            WHERE me.pob_applied_at IS NOT NULL AND me.pob_applied_at::date = CAST(:d AS date)
+            UNION ALL
+            -- land journeys that crossed the site boundary
+            SELECT p.emp_code, j.pob_applied_at,
+                   CASE WHEN j.pob_movement = 'INBOUND' THEN 'MOBILIZE' ELSE 'DEMOBILIZE' END,
+                   COALESCE(j.reference, 'Journey') || ': ' || j.origin || ' → ' || j.destination
+            FROM journey_plan j
+            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(j.pob_applied_ids, '[]'::jsonb)) pid
+            JOIN personnel p ON p.id = pid::int
+            WHERE j.pob_applied_at IS NOT NULL AND j.pob_applied_at::date = CAST(:d AS date)
+            UNION ALL
+            -- taps through a site-boundary zone
+            SELECT p.emp_code, al.timestamp,
+                   CASE WHEN al.event_type = 'ACCESS_ENTRY' THEN 'MOBILIZE' ELSE 'DEMOBILIZE' END,
+                   z.name
+            FROM access_logs al
+            JOIN zones z ON z.id = al.zone_id AND z.is_site_boundary = TRUE
+            JOIN personnel p ON p.id = al.personnel_id
+            WHERE al.event_type IN ('ACCESS_ENTRY', 'ACCESS_EXIT') AND al.timestamp::date = CAST(:d AS date)
+        """), params).fetchall()
+        if change_type_filter in ('MOBILIZE', 'DEMOBILIZE'):
+            moves = [m for m in moves if m.change_type == change_type_filter]
 
-        demobilize_sql = text("""
-            SELECT DISTINCT ON (t.emp_code)
-                t.emp_code,
-                t.punch_time,
-                'DEMOBILIZE' AS change_type,
-                term.alias AS terminal_alias
-            FROM iclock_transaction t
-            LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
-            WHERE t.punch_time::date = :d
-              AND t.punch_state = 1
-            ORDER BY t.emp_code, t.punch_time DESC
-        """)
-
-        mobilize_rows = self.db.execute(mobilize_sql, params).fetchall() if change_type_filter != 'DEMOBILIZE' else []
-        demobilize_rows = self.db.execute(demobilize_sql, params).fetchall() if change_type_filter != 'MOBILIZE' else []
-
-        all_emp_codes = list({r.emp_code for r in list(mobilize_rows) + list(demobilize_rows)})
+        codes = list({m.emp_code for m in moves})
         personnel_map: Dict[str, Any] = {}
-        if all_emp_codes:
-            p_rows = self.db.execute(text("""
+        if codes:
+            for pr in self.db.execute(text("""
                 SELECT emp_code,
                        COALESCE(full_name, TRIM(first_name || ' ' || last_name)) AS full_name,
                        COALESCE(NULLIF(department,''), 'Unassigned') AS department,
@@ -5303,43 +5366,26 @@ class ReportService:
                        COALESCE(NULLIF(position,''), '—') AS position,
                        personnel_type
                 FROM personnel WHERE emp_code = ANY(:codes)
-            """), {"codes": all_emp_codes}).fetchall()
-            for p in p_rows:
-                personnel_map[p.emp_code] = p
+            """), {"codes": codes}).fetchall():
+                personnel_map[pr.emp_code] = pr
 
         data = []
-        mobilize_count = 0
-        demobilize_count = 0
-        for r in mobilize_rows:
-            p = personnel_map.get(r.emp_code)
+        for m in moves:
+            pr = personnel_map.get(m.emp_code)
             data.append({
-                'emp_code':       r.emp_code,
-                'full_name':      p.full_name if p else r.emp_code,
-                'department':     p.department if p else '—',
-                'company':        p.company if p else '—',
-                'position':       p.position if p else '—',
-                'personnel_type': p.personnel_type if p else '—',
-                'change_type':    'MOBILIZE',
-                'change_time':    self._fmt_dt(r.punch_time),
-                'terminal':       r.terminal_alias or '',
+                'emp_code':       m.emp_code,
+                'full_name':      pr.full_name if pr else m.emp_code,
+                'department':     pr.department if pr else '—',
+                'company':        pr.company if pr else '—',
+                'position':       pr.position if pr else '—',
+                'personnel_type': pr.personnel_type if pr else '—',
+                'change_type':    m.change_type,
+                'change_time':    self._fmt_dt(m.at),
+                'terminal':       m.via or '',
             })
-            mobilize_count += 1
-        for r in demobilize_rows:
-            p = personnel_map.get(r.emp_code)
-            data.append({
-                'emp_code':       r.emp_code,
-                'full_name':      p.full_name if p else r.emp_code,
-                'department':     p.department if p else '—',
-                'company':        p.company if p else '—',
-                'position':       p.position if p else '—',
-                'personnel_type': p.personnel_type if p else '—',
-                'change_type':    'DEMOBILIZE',
-                'change_time':    self._fmt_dt(r.punch_time),
-                'terminal':       r.terminal_alias or '',
-            })
-            demobilize_count += 1
-
         data.sort(key=lambda x: x['change_time'])
+        mobilize_count = sum(1 for d in data if d['change_type'] == 'MOBILIZE')
+        demobilize_count = len(data) - mobilize_count
         total = len(data)
         start = (self._page - 1) * self._page_size
         page_data = data[start:start + self._page_size]
@@ -5352,7 +5398,7 @@ class ReportService:
             {'field': 'company',        'label': 'Company',      'type': 'text'},
             {'field': 'position',       'label': 'Position',     'type': 'text'},
             {'field': 'personnel_type', 'label': 'Type',         'type': 'text'},
-            {'field': 'terminal',       'label': 'Terminal',     'type': 'text'},
+            {'field': 'terminal',       'label': 'Via',          'type': 'text'},
         ]
         chart_data = {
             'labels': ['Mobilized', 'Demobilized'],
@@ -5461,29 +5507,31 @@ class ReportService:
 
     def pob_zone_occupancy_history(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Daily check-in and check-out counts per zone over a date range."""
-        date_from = filters.get('date_from', str(date.today() - timedelta(days=6)))
-        date_to   = filters.get('date_to',   str(date.today()))
+        date_from = filters.get('date_from', str(_site_today() - timedelta(days=6)))
+        date_to   = filters.get('date_to',   str(_site_today()))
         params: Dict[str, Any] = {'df': date_from, 'dt': date_to}
         zone_clause = ""
         if filters.get('zone_id'):
             zone_clause = "AND term.zone_id = :zone_id"
             params['zone_id'] = filters['zone_id']
 
+        # Zone movements (door / zone readers, transport arrivals) are recorded in
+        # zone_personnel_tracking. This used to count ATTENDANCE punches by their In/Out
+        # key at readers that have a zone — not zone entries and exits at all.
+        zone_clause = zone_clause.replace("term.zone_id", "zt.zone_id")
         rows = self.db.execute(text(f"""
             SELECT
                 z.id   AS zone_id,
                 z.name AS zone_name,
-                t.punch_time::date AS punch_date,
-                COUNT(CASE WHEN t.punch_state IN (0, 4) THEN 1 END) AS checkin_count,
-                COUNT(CASE WHEN t.punch_state = 1 THEN 1 END)       AS checkout_count,
-                COUNT(DISTINCT CASE WHEN t.punch_state IN (0, 4) THEN t.emp_code END) AS unique_entrants
-            FROM iclock_transaction t
-            JOIN iclock_terminal term ON term.sn = t.terminal_sn
-            JOIN zones z ON z.id = term.zone_id
-            WHERE t.punch_time::date BETWEEN :df AND :dt
-              AND term.zone_id IS NOT NULL
+                zt.punch_time::date AS punch_date,
+                COUNT(*) FILTER (WHERE zt.event_type = 'CLOCK_IN')  AS checkin_count,
+                COUNT(*) FILTER (WHERE zt.event_type = 'CLOCK_OUT') AS checkout_count,
+                COUNT(DISTINCT zt.emp_code) FILTER (WHERE zt.event_type = 'CLOCK_IN') AS unique_entrants
+            FROM zone_personnel_tracking zt
+            JOIN zones z ON z.id = zt.zone_id
+            WHERE zt.punch_time::date BETWEEN CAST(:df AS date) AND CAST(:dt AS date)
               {zone_clause}
-            GROUP BY z.id, z.name, t.punch_time::date
+            GROUP BY z.id, z.name, zt.punch_time::date
             ORDER BY punch_date, z.name
         """), params).fetchall()
 

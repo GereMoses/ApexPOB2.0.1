@@ -424,3 +424,50 @@ $function$;
 SELECT setval('public.personnel_employee_id_seq',
               GREATEST((SELECT COALESCE(MAX(id), 1) FROM public.personnel_employee),
                        (SELECT last_value FROM public.personnel_employee_id_seq)));
+
+-- ── Mirror carries department and leaver status ──────────────────────────────────
+-- personnel_employee.dept_id (FK -> departments) was never filled, and reports read
+-- departments from the empty legacy personnel_department table: every department
+-- column was blank and the department filter matched nobody. And a leaver
+-- (personnel.is_active = false, e.g. exited in SeamlessHR) stayed status 0 = active
+-- on the mirror, so they were still counted (e.g. in Absenteeism).
+CREATE OR REPLACE FUNCTION public.sync_personnel_to_employee()
+ RETURNS trigger LANGUAGE plpgsql AS $function$
+DECLARE
+  v_status smallint;
+BEGIN
+  IF (TG_OP = 'DELETE') THEN
+    DELETE FROM personnel_employee WHERE emp_code = OLD.emp_code;
+    RETURN OLD;
+  END IF;
+
+  v_status := CASE WHEN COALESCE(NEW.is_active, TRUE) = FALSE THEN 1
+                   WHEN NEW.status::text IN ('active','ACTIVE','onshore','offshore','transit','on_leave') THEN 0
+                   ELSE 1 END;
+
+  IF EXISTS (SELECT 1 FROM personnel_employee WHERE id = NEW.id AND emp_code <> NEW.emp_code) THEN
+    INSERT INTO personnel_employee (emp_code, first_name, last_name, status, dept_id, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.emp_code, NEW.first_name, NEW.last_name, v_status, NEW.department_id,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, status = EXCLUDED.status,
+      dept_id = EXCLUDED.dept_id, card_no = EXCLUDED.card_no, updated_at = NOW();
+  ELSE
+    INSERT INTO personnel_employee (id, emp_code, first_name, last_name, status, dept_id, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.id, NEW.emp_code, NEW.first_name, NEW.last_name, v_status, NEW.department_id,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, status = EXCLUDED.status,
+      dept_id = EXCLUDED.dept_id, card_no = EXCLUDED.card_no, updated_at = NOW();
+    PERFORM setval('public.personnel_employee_id_seq',
+                   GREATEST((SELECT last_value FROM public.personnel_employee_id_seq), NEW.id));
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+UPDATE public.personnel_employee pe
+SET dept_id = p.department_id,
+    status  = CASE WHEN COALESCE(p.is_active, TRUE) = FALSE THEN 1 ELSE pe.status END
+FROM public.personnel p
+WHERE p.emp_code = pe.emp_code
+  AND (pe.dept_id IS DISTINCT FROM p.department_id OR (COALESCE(p.is_active, TRUE) = FALSE AND pe.status <> 1));

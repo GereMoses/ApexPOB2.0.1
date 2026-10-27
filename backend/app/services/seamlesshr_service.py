@@ -773,6 +773,30 @@ def _link_department(db: Session, person, unmatched: set) -> None:
 _RETRY_STATUSES = {400, 408, 425, 429, 500, 502, 503, 504}
 
 
+def _seamless_date(value) -> Optional[date]:
+    """SeamlessHR dates arrive in two shapes:
+      - "2018-01-07T23:00:00.000000Z": a SITE-midnight stored as UTC, so the date part
+        alone is a day early (this was the employment date of 8 Jan 2018);
+      - "16/08/1993": day/month/year (date_of_birth).
+    Returns the site calendar date, or None."""
+    if not value:
+        return None
+    v = str(value).strip()
+    try:
+        if "T" in v:
+            from .attendance_calculation_service import SITE_TZ
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(SITE_TZ)
+            return dt.date()
+        if "/" in v:
+            d, m, y = v.split("/")[:3]
+            return date(int(y[:4]), int(m), int(d))
+        return date.fromisoformat(v[:10])
+    except Exception:
+        return None
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, headers: Dict[str, str],
                           params: Optional[Dict] = None, attempts: int = 6) -> httpx.Response:
     """GET with backoff on transient failures. Raises on the final failure."""
@@ -941,9 +965,20 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                             person.is_onboard = False
                             person.is_pob = False
                         _link_department(db, person, unmatched_departments)
+                        # Dates: the generic copy above stored employment_date's date
+                        # part, which is a day early (UTC-encoded site midnight).
+                        hd = _seamless_date(emp.get(fmap.get("hire_date") or "employment_date"))
+                        if hd:
+                            person.hire_date = hd
                         person.hr_source = "SEAMLESSHR"
                         person.hr_synced_at = now
                         db.flush()
+                        # Date of birth lives on the reader mirror (birthday) — it was
+                        # never pulled, so the Birthday report was always empty.
+                        dob = _seamless_date(emp.get(opts.get("employee_dob_field", "date_of_birth")))
+                        if dob:
+                            db.execute(text("UPDATE personnel_employee SET birthday = :b WHERE emp_code = :c"),
+                                       {"b": dob, "c": code})
                         created += 1 if is_new else 0
                         updated += 0 if is_new else 1
                     except Exception as row_err:

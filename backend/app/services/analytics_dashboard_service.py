@@ -136,7 +136,7 @@ class AnalyticsDashboardService:
                     COUNT(pe.id) as total_employees,
                     SUM(CASE WHEN pe.is_onboard = TRUE THEN 1 ELSE 0 END) as onboard_count
                 FROM personnel_employee pe
-                LEFT JOIN personnel_department pd ON pe.dept_id = pd.id
+                LEFT JOIN (SELECT id, name AS dept_name FROM departments) pd ON pe.dept_id = pd.id
                 WHERE pe.status = 0
                 GROUP BY pd.dept_name
                 ORDER BY total_employees DESC
@@ -307,10 +307,11 @@ class AnalyticsDashboardService:
                     pd.id as department_id,
                     pd.dept_name,
                     COUNT(pe.id) as total_employees,
-                    SUM(CASE WHEN pe.is_onboard = TRUE THEN 1 ELSE 0 END) as onboard_count,
+                    SUM(CASE WHEN p.is_onboard = TRUE THEN 1 ELSE 0 END) as onboard_count,
                     AVG(CASE WHEN it.emp_code IS NOT NULL THEN 1 ELSE 0 END) as attendance_rate
-                FROM personnel_department pd
+                FROM (SELECT id, name AS dept_name FROM departments) pd
                 LEFT JOIN personnel_employee pe ON pd.id = pe.dept_id AND pe.status = 0
+                LEFT JOIN personnel p ON p.emp_code = pe.emp_code
                 LEFT JOIN (
                     SELECT DISTINCT emp_code, DATE(punch_time) as punch_date
                     FROM iclock_transaction

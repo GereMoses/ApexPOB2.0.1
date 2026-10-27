@@ -32,10 +32,39 @@ def _decode(token: str) -> dict:
         return {}
 
 
+def audit_login(action: str, user_id: Optional[int] = None, request=None,
+                ip: Optional[str] = None, remark: Optional[str] = None) -> None:
+    """Write a sign-in to the audit log (base_operationlog). Nothing ever recorded
+    logins, so the System > Login Log report was always empty. action is 'login' or
+    'login_failed'. Best-effort: never blocks or breaks a login."""
+    try:
+        from sqlalchemy import text
+        from .database import SessionLocal
+        ua = None
+        if request is not None:
+            try:
+                ip = (request.client.host if request.client else None) or ip
+                ua = (request.headers.get("user-agent", "") or "")[:200]
+            except Exception:
+                pass
+        db = SessionLocal()
+        try:
+            db.execute(text("""
+                INSERT INTO base_operationlog (user_id, action, table_name, ip_address, user_agent, remark, created_at)
+                VALUES (:u, :a, '/api/v1/auth', :ip, :ua, :r, NOW())
+            """), {"u": user_id, "a": action, "ip": ip, "ua": ua, "r": (remark or "")[:200]})
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("audit_login(%s) failed: %s", action, e)
+
+
 def record_login_session(user_id: int, token: str, request=None,
                          ip: Optional[str] = None, ua: Optional[str] = None) -> Optional[str]:
     """Record a login session for `user_id` tied to `token`'s jti. Returns the
     session_id, or None if Redis is unavailable (best-effort — never raises)."""
+    audit_login("login", user_id, request, ip)
     try:
         r = get_redis()
         payload = _decode(token)

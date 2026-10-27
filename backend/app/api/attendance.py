@@ -1908,8 +1908,11 @@ async def reprocess_single_transaction(
         if not txn:
             raise HTTPException(status_code=404, detail="Transaction not found")
 
+        # calculate_attendance takes PERSONNEL ids. This looked up the reader-mirror
+        # (personnel_employee) id, which differs from personnel.id whenever the two
+        # sequences have drifted — the wrong employee's day was recalculated.
         emp = db.execute(
-            text("SELECT id FROM personnel_employee WHERE emp_code = :emp_code"),
+            text("SELECT id FROM personnel WHERE emp_code = :emp_code OR badge_id = :emp_code LIMIT 1"),
             {"emp_code": txn.emp_code}
         ).fetchone()
 

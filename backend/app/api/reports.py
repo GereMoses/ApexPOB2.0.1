@@ -11,6 +11,61 @@ from sqlalchemy import text
 from ..core.database import get_db
 from ..core.dependencies import get_current_user
 
+
+def _site_tz():
+    from ..services.attendance_calculation_service import SITE_TZ
+    return SITE_TZ
+
+
+def _site_today() -> date:
+    from datetime import datetime
+    return datetime.now(_site_tz()).date()
+
+
+def _site_session(db: Session) -> None:
+    """Run this export in SITE time: times print as Lagos wall clock (they printed
+    as UTC, e.g. 06:00:00+00:00 for a 07:00 tap) and dates follow the site's day."""
+    db.execute(text("SELECT set_config('TimeZone', :tz, true)"), {"tz": getattr(_site_tz(), "key", "Africa/Lagos")})
+
+
+# att_report.emp_id is personnel_employee.id (the reader mirror) — joining it straight
+# to personnel.id only worked while the two ids happened to match. Status codes are
+# 0 Present, 1 Late, 2 Early leave, 3 Absent, 4 Leave (2 was printed "Absent" and 3
+# "Other").
+_ATTENDANCE_SQL = """
+    SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
+           p.emp_code, d.name AS department,
+           r.att_date,
+           to_char(r.check_in,  'YYYY-MM-DD HH24:MI') AS check_in,
+           to_char(r.check_out, 'YYYY-MM-DD HH24:MI') AS check_out,
+           ROUND(r.work_minutes / 60.0, 2) AS work_hours,
+           r.late_minutes, r.ot_minutes,
+           CASE r.att_status WHEN 0 THEN 'Present' WHEN 1 THEN 'Late' WHEN 2 THEN 'Early leave'
+                             WHEN 3 THEN 'Absent'  WHEN 4 THEN 'Leave' ELSE 'Other' END AS status
+    FROM att_report r
+    JOIN personnel_employee pe ON pe.id = r.emp_id
+    LEFT JOIN personnel p ON p.emp_code = pe.emp_code
+    LEFT JOIN departments d ON d.id = COALESCE(r.department_id, p.department_id)
+    WHERE r.att_date BETWEEN :start AND :end
+    ORDER BY r.att_date DESC, p.first_name
+    LIMIT :lim
+"""
+
+# Who is ON BOARD now, and where — the export used to list every active employee.
+_POB_SQL = """
+    SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
+           p.emp_code, d.name AS department, p.position, p.company,
+           COALESCE(z.name, 'Location unknown') AS zone,
+           to_char(p.pob_since, 'YYYY-MM-DD HH24:MI') AS pob_since,
+           to_char(p.last_seen, 'YYYY-MM-DD HH24:MI') AS last_seen
+    FROM personnel p
+    LEFT JOIN departments d ON d.id = p.department_id
+    LEFT JOIN zones z ON z.id = p.current_zone_id
+    WHERE p.is_onboard = TRUE AND p.is_active = TRUE
+    ORDER BY z.name NULLS LAST, p.first_name
+    LIMIT 2000
+"""
+
 router = APIRouter(prefix="/api/v1/reports", tags=["Reports"])
 
 
@@ -98,7 +153,7 @@ def _build_pdf(title: str, subtitle: str, headers: list, rows: list,
     pdf.set_y(-10)
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 5, _pdf_text(f"Generated: {date.today()}  \u2022  {len(rows)} record(s)"), align='C')
+    pdf.cell(0, 5, _pdf_text(f"Generated: {_site_today()}  \u2022  {len(rows)} record(s)"), align='C')
 
     return bytes(pdf.output())
 
@@ -133,23 +188,10 @@ async def attendance_csv(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    start = start_date or (date.today() - timedelta(days=7)).isoformat()
-    end   = end_date   or date.today().isoformat()
-    rows = db.execute(text("""
-        SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
-               p.emp_code, d.name AS department,
-               r.att_date, r.check_in, r.check_out,
-               ROUND(r.work_minutes / 60.0, 2) AS work_hours,
-               r.late_minutes, r.ot_minutes,
-               CASE r.att_status WHEN 0 THEN 'Present' WHEN 1 THEN 'Late'
-                                 WHEN 2 THEN 'Absent'  WHEN 4 THEN 'Day-off' ELSE 'Other' END AS status
-        FROM att_report r
-        LEFT JOIN personnel p ON r.emp_id = p.id
-        LEFT JOIN departments d ON d.id = r.department_id
-        WHERE r.att_date BETWEEN :start AND :end
-        ORDER BY r.att_date DESC, p.first_name
-        LIMIT 5000
-    """), {"start": start, "end": end}).fetchall()
+    start = start_date or (_site_today() - timedelta(days=7)).isoformat()
+    end   = end_date   or _site_today().isoformat()
+    _site_session(db)
+    rows = db.execute(text(_ATTENDANCE_SQL), {"start": start, "end": end, "lim": 5000}).fetchall()
     return _csv_response(
         [[r.name, r.emp_code, r.department, r.att_date, r.check_in, r.check_out,
           r.work_hours, r.late_minutes, r.ot_minutes, r.status] for r in rows],
@@ -165,7 +207,7 @@ async def compliance_csv(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    cutoff = (date.today() + timedelta(days=days)).isoformat()
+    cutoff = (_site_today() + timedelta(days=days)).isoformat()
     rows = db.execute(text("""
         SELECT (c.first_name||' '||c.last_name) AS name,
                c.contractor_code, v.vendor_name AS vendor,
@@ -192,20 +234,12 @@ async def pob_csv(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    rows = db.execute(text("""
-        SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
-               p.emp_code, d.name AS department, p.position, p.status,
-               (SELECT MAX(t.punch_time) FROM iclock_transaction t WHERE t.emp_code = p.emp_code) AS last_seen
-        FROM personnel p
-        LEFT JOIN departments d ON d.id = p.department_id
-        WHERE p.status = 'ACTIVE'
-        ORDER BY p.first_name
-        LIMIT 2000
-    """)).fetchall()
+    _site_session(db)
+    rows = db.execute(text(_POB_SQL)).fetchall()
     return _csv_response(
-        [[r.name, r.emp_code, r.department, r.position, r.status, r.last_seen] for r in rows],
-        ["Name", "Emp Code", "Department", "Position", "Status", "Last Seen"],
-        f"pob_report_{date.today()}.csv",
+        [[r.name, r.emp_code, r.department, r.position, r.company, r.zone, r.pob_since, r.last_seen] for r in rows],
+        ["Name", "Emp Code", "Department", "Position", "Company", "Zone", "On board since", "Last seen"],
+        f"pob_report_{_site_today()}.csv",
     )
 
 
@@ -216,8 +250,8 @@ async def visitors_csv(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    start = start_date or (date.today() - timedelta(days=30)).isoformat()
-    end   = end_date   or date.today().isoformat()
+    start = start_date or (_site_today() - timedelta(days=30)).isoformat()
+    end   = end_date   or _site_today().isoformat()
     rows = db.execute(text("""
         SELECT vv.full_name, vv.phone, vv.email, vv.company,
                vl.check_in_time, vl.check_out_time,
@@ -265,23 +299,10 @@ async def attendance_pdf(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    start = start_date or (date.today() - timedelta(days=7)).isoformat()
-    end   = end_date   or date.today().isoformat()
-    rows = db.execute(text("""
-        SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
-               p.emp_code, d.name AS department,
-               r.att_date, r.check_in, r.check_out,
-               ROUND(r.work_minutes / 60.0, 2) AS work_hours,
-               r.late_minutes, r.ot_minutes,
-               CASE r.att_status WHEN 0 THEN 'Present' WHEN 1 THEN 'Late'
-                                 WHEN 2 THEN 'Absent'  WHEN 4 THEN 'Day-off' ELSE 'Other' END AS status
-        FROM att_report r
-        LEFT JOIN personnel p ON r.emp_id = p.id
-        LEFT JOIN departments d ON d.id = r.department_id
-        WHERE r.att_date BETWEEN :start AND :end
-        ORDER BY r.att_date DESC, p.first_name
-        LIMIT 2000
-    """), {"start": start, "end": end}).fetchall()
+    start = start_date or (_site_today() - timedelta(days=7)).isoformat()
+    end   = end_date   or _site_today().isoformat()
+    _site_session(db)
+    rows = db.execute(text(_ATTENDANCE_SQL), {"start": start, "end": end, "lim": 2000}).fetchall()
 
     data = [[r.name, r.emp_code, r.department or "", str(r.att_date),
              str(r.check_in or ""), str(r.check_out or ""),
@@ -303,7 +324,7 @@ async def compliance_pdf(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    cutoff = (date.today() + timedelta(days=days)).isoformat()
+    cutoff = (_site_today() + timedelta(days=days)).isoformat()
     rows = db.execute(text("""
         SELECT (c.first_name||' '||c.last_name) AS name,
                c.contractor_code, v.vendor_name AS vendor,
@@ -321,7 +342,7 @@ async def compliance_pdf(
              r.medical_clearance_status or "", r.background_check_status or "", r.status or ""] for r in rows]
     pdf = _build_pdf(
         "Compliance Report",
-        f"Permits expiring within {days} days  •  Generated: {date.today()}",
+        f"Permits expiring within {days} days  •  Generated: {_site_today()}",
         ["Name", "Code", "Vendor", "Permit Expiry", "Medical Status", "Background", "Status"],
         data,
         col_widths=[50, 28, 40, 28, 36, 36, 24],
@@ -334,27 +355,19 @@ async def pob_pdf(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    rows = db.execute(text("""
-        SELECT TRIM(p.first_name||' '||COALESCE(p.last_name,'')) AS name,
-               p.emp_code, d.name AS department, p.position, p.status,
-               (SELECT MAX(t.punch_time) FROM iclock_transaction t WHERE t.emp_code = p.emp_code) AS last_seen
-        FROM personnel p
-        LEFT JOIN departments d ON d.id = p.department_id
-        WHERE p.status = 'ACTIVE'
-        ORDER BY p.first_name
-        LIMIT 2000
-    """)).fetchall()
+    _site_session(db)
+    rows = db.execute(text(_POB_SQL)).fetchall()
 
     data = [[r.name, r.emp_code, r.department or "", r.position or "",
-             r.status or "", str(r.last_seen or "")] for r in rows]
+             r.zone or "", str(r.pob_since or "")] for r in rows]
     pdf = _build_pdf(
         "Personnel On Board (POB) Report",
-        f"As of {date.today()}  •  Active personnel",
-        ["Name", "Emp Code", "Department", "Position", "Status", "Last Seen"],
+        f"As of {_site_today()}  •  {len(data)} on board",
+        ["Name", "Emp Code", "Department", "Position", "Zone", "On board since"],
         data,
-        col_widths=[50, 28, 50, 50, 22, 40],
+        col_widths=[50, 28, 50, 50, 32, 30],
     )
-    return _pdf_response(pdf, f"pob_report_{date.today()}.pdf")
+    return _pdf_response(pdf, f"pob_report_{_site_today()}.pdf")
 
 
 @router.get("/visitors/pdf")
@@ -364,8 +377,8 @@ async def visitors_pdf(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    start = start_date or (date.today() - timedelta(days=30)).isoformat()
-    end   = end_date   or date.today().isoformat()
+    start = start_date or (_site_today() - timedelta(days=30)).isoformat()
+    end   = end_date   or _site_today().isoformat()
     rows = db.execute(text("""
         SELECT vv.full_name, vv.phone, vv.email, vv.company,
                vl.check_in_time::text, vl.check_out_time::text,
