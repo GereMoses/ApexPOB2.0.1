@@ -35,14 +35,14 @@ def configured_channels() -> Dict[str, bool]:
 
 
 def people_from_personnel(db, *, ids: Iterable[int] = (), emp_codes: Iterable[str] = ()) -> List[Dict[str, str]]:
-    """Contact cards for personnel (phone falls back to the emergency-contact phone)."""
+    """Contact cards for personnel (their own phone and email only)."""
     ids, emp_codes = list(ids or []), list(emp_codes or [])
     if not ids and not emp_codes:
         return []
     rows = db.execute(text("""
         SELECT COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name)), emp_code) AS name,
                NULLIF(TRIM(email), '') AS email,
-               COALESCE(NULLIF(TRIM(phone), ''), NULLIF(TRIM(emergency_contact_phone), '')) AS phone
+               NULLIF(TRIM(phone), '') AS phone   -- never the emergency contact: next of kin must not get "evacuate now"
         FROM personnel
         WHERE is_active AND (id = ANY(:ids) OR emp_code = ANY(:codes))
     """), {"ids": ids, "codes": emp_codes}).fetchall()
