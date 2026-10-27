@@ -13,6 +13,8 @@ class AccessReaderBase(BaseModel):
     name: Optional[str] = None
     zone_id: Optional[int] = Field(None, description="Zone this reader-port controls access to")
     status: str = Field("active", pattern="^(active|inactive)$")
+    purpose: str = Field("ACCESS", pattern="^(ATTENDANCE|ACCESS|MUSTERING)$",
+                         description="ATTENDANCE = clock in/out (sent to payroll), ACCESS = door only, MUSTERING = muster point")
 
 
 class AccessReaderCreate(AccessReaderBase):
@@ -25,6 +27,7 @@ class AccessReaderUpdate(BaseModel):
     name: Optional[str] = None
     zone_id: Optional[int] = None
     status: Optional[str] = Field(None, pattern="^(active|inactive)$")
+    purpose: Optional[str] = Field(None, pattern="^(ATTENDANCE|ACCESS|MUSTERING)$")
 
 
 class AccessReaderOut(AccessReaderBase):

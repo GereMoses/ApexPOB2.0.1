@@ -86,3 +86,94 @@ def test_fire_mode_unlocks_then_clear_relocks_and_ends_muster(superuser_headers,
     assert ("aux", ip, 2, 0) in panel                    # siren off
     assert db.execute(text("SELECT count(*) FROM mustering_event WHERE status = 0")).scalar() == 0
     assert ("alert", "muster") in panel and ("alert", "muster_all_clear") in panel
+
+
+# ── taps on C3 reader ports → attendance / POB / muster / unknown cards ──────
+def _controller_with_reader(c, purpose, zone_id, door_count=1):
+    ip = f"10.7.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    ctrl = c.post("/api/v1/access-controllers", json={"name": "Gate", "ip_address": ip, "model": "C3-100", "door_count": door_count}).json()
+    for r in ctrl["readers"]:
+        c.put(f"/api/v1/access-controllers/readers/{r['id']}", json={"purpose": purpose, "zone_id": zone_id})
+    from app.models.access_controller import AccessController
+    return ctrl["id"]
+
+
+def _tap(db, cid, *, pin=None, card=None, direction=0, event_type=0, when=None):
+    from datetime import datetime
+    from app.models.access_controller import AccessController
+    from app.services.access_controller_ingest import ingest_event
+    from app.services.zkteco.c3_controller import C3Event
+    ctrl = db.query(AccessController).get(cid)
+    return ingest_event(ctrl, C3Event(time=when or datetime(2026, 10, 27, 7, 55, 0), card_no=card, pin=pin, door_id=1,
+                                      event_type=event_type, in_out=direction, verify_type=4), db)
+
+
+@needs_db
+def test_c3_attendance_tap_becomes_a_punch_in_utc(superuser_headers, panel, db, make_person, make_zone):
+    c = _client(superuser_headers)
+    gate = make_zone(boundary=True)
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    cid = _controller_with_reader(c, "ATTENDANCE", gate)
+    _tap(db, cid, pin=pin)                               # 07:55 Lagos on the panel
+    row = db.execute(text("SELECT punch_time AT TIME ZONE 'UTC', punch_state, t.reader_purpose FROM iclock_transaction x "
+                          "JOIN iclock_terminal t ON t.sn = x.terminal_sn WHERE x.emp_code = :c"), {"c": p["emp_code"]}).fetchone()
+    assert row is not None and str(row[0]).startswith("2026-10-27 06:55")   # stored in UTC
+    assert row[1] == 0 and row[2] == "ATTENDANCE"
+    assert db.execute(text("SELECT is_onboard FROM personnel WHERE emp_code = :c"), {"c": p["emp_code"]}).scalar()
+
+
+@needs_db
+def test_refused_card_is_logged_and_can_be_issued(superuser_headers, panel, db, make_person, make_zone):
+    c = _client(superuser_headers)
+    gate = make_zone(boundary=True)
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    cid = _controller_with_reader(c, "ATTENDANCE", gate)
+    card = str(uuid.uuid4().int)[:9]
+    _tap(db, cid, card=card, event_type=27)              # unregistered card
+    assert db.execute(text("SELECT count(*) FROM iclock_transaction WHERE terminal_sn LIKE :s"), {"s": f"AC{cid}-%"}).scalar() == 0
+    assert card in [u["card_no"] for u in c.get("/api/v1/access-controllers/cards/unknown").json()]
+    r = c.post("/api/v1/access-controllers/cards/assign", json={"card_no": card, "emp_code": p["emp_code"]})
+    assert r.status_code == 200, r.text
+    _tap(db, cid, card=card)                             # same card, now granted
+    assert db.execute(text("SELECT count(*) FROM iclock_transaction WHERE emp_code = :c"), {"c": p["emp_code"]}).scalar() == 1
+
+
+@needs_db
+def test_access_only_reader_does_not_count_for_attendance(superuser_headers, panel, db, make_person, make_zone):
+    from app.services.attendance_calculation_service import attendance_calculation_service  # noqa: F401
+    c = _client(superuser_headers)
+    room = make_zone()
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    cid = _controller_with_reader(c, "ACCESS", room)
+    _tap(db, cid, pin=pin)
+    assert db.execute(text("SELECT t.reader_purpose FROM iclock_transaction x JOIN iclock_terminal t ON t.sn = x.terminal_sn "
+                           "WHERE x.emp_code = :c"), {"c": p["emp_code"]}).scalar() == "ACCESS_ENTRY"   # not counted as attendance
+
+
+@needs_db
+def test_c3_reader_at_muster_point_counts_people_safe(superuser_headers, panel, db, make_person, make_zone):
+    from datetime import datetime, timezone
+    from app.services.mustering_service import MusteringService
+    c = _client(superuser_headers)
+    area = make_zone()
+    mp = db.execute(text("INSERT INTO zones (name, code, zone_type, status) VALUES (:n, :c, 'MUSTER_POINT', 'active') RETURNING id"),
+                    {"n": "MP " + uuid.uuid4().hex[:5], "c": uuid.uuid4().hex[:10].upper()}).scalar()
+    db.commit()
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    db.execute(text("UPDATE personnel SET is_onboard = TRUE, current_zone_id = :z WHERE emp_code = :c"), {"z": area, "c": p["emp_code"]})
+    db.commit()
+    cid = _controller_with_reader(c, "MUSTERING", mp)
+    for ev in db.execute(text("SELECT id FROM mustering_event WHERE status = 0")).fetchall():
+        db.execute(text("UPDATE mustering_event SET status = 1 WHERE id = :i"), {"i": ev[0]})
+    db.commit()
+    ev = MusteringService(db).start_mustering_event([area], 1, None, muster_zone_ids=[mp])["event_id"]
+    try:
+        _tap(db, cid, pin=pin, when=datetime.now())
+        assert db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                          {"e": ev, "c": p["emp_code"]}).scalar() == 1
+    finally:
+        MusteringService(db).end_mustering_event(ev, None)

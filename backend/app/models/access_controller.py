@@ -97,6 +97,9 @@ class AccessReader(Base):
     zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)
 
     status = Column(String(20), nullable=False, default="active")  # active|inactive
+    # ATTENDANCE = clock in/out → attendance + SeamlessHR; ACCESS = door only (zones,
+    # POB at a site boundary); MUSTERING = reader at an assembly point.
+    purpose = Column(String(12), nullable=False, default="ACCESS", server_default="ACCESS")
     last_event_at = Column(DateTime(timezone=True), nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -158,12 +158,17 @@ class ZKAccessC3Client:
                     "group": u.get("group") or 1,
                 })
                 if acfg is not None:
+                    # AuthorizeDoorId is a BITMASK (door1=1, door2=2, door3=4, door4=8) —
+                    # one record for all doors. Writing the door number itself (as before)
+                    # made "door 3" mean doors 1+2.
+                    mask = 0
                     for dn in (door_nos or [1]):
-                        self._set_record(acfg, {
-                            "pin": pin,
-                            "authorizetimezoneid": int(timezone_id),
-                            "authorizedoorid": int(dn),
-                        })
+                        mask |= 1 << (int(dn) - 1)
+                    self._set_record(acfg, {
+                        "pin": pin,
+                        "authorizetimezoneid": int(timezone_id),
+                        "authorizedoorid": mask,
+                    })
                 pushed += 1
             except Exception as exc:  # noqa: BLE001
                 failed.append({"pin": pin, "error": str(exc)[:200]})

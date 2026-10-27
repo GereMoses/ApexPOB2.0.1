@@ -254,17 +254,7 @@ def enroll_personnel(controller_id: int, body: Optional[dict] = None, db: Sessio
     if not c3_zkaccess.sdk_available():
         raise HTTPException(status_code=503, detail="C3 driver (zkaccess-c3) unavailable")
 
-    from ..models.biotime_models import PersonnelEmployee
-    q = db.query(PersonnelEmployee).filter(PersonnelEmployee.emp_code.isnot(None))
-    emp_codes = (body or {}).get("emp_codes")
-    if emp_codes:
-        q = q.filter(PersonnelEmployee.emp_code.in_(emp_codes))
-    people = q.limit(5000).all()
-    users = [{
-        "pin": p.emp_code,
-        "card_no": p.card_no,
-        "name": (f"{p.first_name or ''} {p.last_name or ''}".strip())[:24],
-    } for p in people]
+    users, skipped = _panel_users(db, (body or {}).get("emp_codes"))
 
     door_nos = list(range(1, (ctrl.door_count or 1) + 1))
     result = c3_zkaccess.enroll_users(
@@ -272,6 +262,7 @@ def enroll_personnel(controller_id: int, body: Optional[dict] = None, db: Sessio
         port=ctrl.port or 4370, password=ctrl.comm_password or "",
     )
     result["prepared"] = len(users)
+    result["skipped_no_attendance_id"] = skipped
     return result
 
 
@@ -385,3 +376,67 @@ def test_aux(controller_id: int, aux_no: int, seconds: int = 3, db: Session = De
         return {"success": True, "message": f"AUX {aux_no} on for {seconds}s"}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
+
+
+
+def _panel_users(db: Session, emp_codes=None):
+    """Active staff as C3 user records. PIN = Attendance ID; staff without one are skipped."""
+    from sqlalchemy import text as _t
+    from ..services.device_pin import is_valid_pin
+    q = """SELECT emp_code, attendance_id, card_number,
+                  COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name))) AS name
+           FROM personnel WHERE is_active AND COALESCE(status, 'ACTIVE') <> 'TERMINATED'"""
+    params = {}
+    if emp_codes:
+        q += " AND emp_code = ANY(:codes)"
+        params["codes"] = list(emp_codes)
+    users, skipped = [], 0
+    for r in db.execute(_t(q), params).fetchall():
+        if not is_valid_pin(r.attendance_id):
+            skipped += 1
+            continue
+        users.append({"pin": str(r.attendance_id), "card_no": str(r.card_number) if r.card_number else "",
+                      "name": (r.name or "")[:24]})
+    return users, skipped
+
+
+# ── issuing cards: tap an unknown card, give it to a person ──────────────────
+class CardAssignIn(BaseModel):
+    card_no: str = Field(..., pattern=r"^\d{1,20}$")
+    emp_code: str
+
+
+@router.get("/cards/unknown", summary="Cards tapped recently that belong to nobody")
+def unknown_cards(db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    rows = db.execute(_t("""SELECT card_no, controller_id, door_no, reader_name, taps,
+                                   last_seen AT TIME ZONE 'Africa/Lagos' AS last_seen
+                            FROM controller_unknown_card ORDER BY last_seen DESC LIMIT 50""")).mappings().all()
+    return [dict(r, last_seen=r["last_seen"].isoformat(sep=" ", timespec="seconds")) for r in rows]
+
+
+@router.post("/cards/assign", summary="Issue a card to a person and load it onto every controller")
+def assign_card(body: CardAssignIn, db: Session = Depends(get_db)):
+    from sqlalchemy import text as _t
+    other = db.execute(_t("SELECT emp_code FROM personnel WHERE card_number = :c AND emp_code <> :e"),
+                       {"c": int(body.card_no), "e": body.emp_code}).fetchone()
+    if other:
+        raise HTTPException(status_code=409, detail=f"Card {body.card_no} already belongs to {other.emp_code}")
+    n = db.execute(_t("UPDATE personnel SET card_number = :c, updated_at = NOW() WHERE emp_code = :e AND is_active"),
+                   {"c": int(body.card_no), "e": body.emp_code}).rowcount
+    if not n:
+        raise HTTPException(status_code=404, detail="No active person with that employee code")
+    db.execute(_t("DELETE FROM controller_unknown_card WHERE card_no = :c"), {"c": body.card_no})
+    db.commit()
+    users, skipped = _panel_users(db, [body.emp_code])
+    loaded = []
+    if users and c3_zkaccess.sdk_available():
+        for ctrl in db.query(AccessController).all():
+            try:
+                r = c3_zkaccess.enroll_users(ctrl.ip_address, users, door_nos=list(range(1, (ctrl.door_count or 1) + 1)),
+                                             port=ctrl.port or 4370, password=ctrl.comm_password or "")
+                loaded.append({"controller": ctrl.name, "ok": bool(r.get("pushed")), "failed": r.get("failed")})
+            except Exception as exc:  # noqa: BLE001
+                loaded.append({"controller": ctrl.name, "ok": False, "error": str(exc)[:200]})
+    note = None if users else "Saved — but this person has no Attendance ID yet, so the card can't be loaded onto the panels."
+    return {"success": True, "card_no": body.card_no, "emp_code": body.emp_code, "controllers": loaded, "note": note}

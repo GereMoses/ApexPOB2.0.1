@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import {
   Button, Input, Select, Switch, Tag, Tooltip, Popconfirm, Form, InputNumber,
-  Space, Spin, App, Empty, Modal, Card, Collapse, Badge, Radio,
+  Space, Spin, App, Empty, Modal, Card, Collapse, Badge, Radio, Drawer,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined,
   SyncOutlined, WifiOutlined, DisconnectOutlined,
   ReloadOutlined, UnlockOutlined, LoginOutlined, LogoutOutlined,
-  ClusterOutlined, AimOutlined, BulbOutlined, FireOutlined, SoundOutlined,
+  ClusterOutlined, AimOutlined, BulbOutlined, FireOutlined, SoundOutlined, CreditCardOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -112,6 +112,15 @@ const ReaderRow = ({ reader, zones, onSave, onDelete, onOpen, saving }) => {
       >
         {zones.map(z => <Option key={z.id} value={z.id}>{z.name}</Option>)}
       </Select>
+      <Tooltip title="What a tap here means">
+        <Select size="small" style={{ width: 168 }} value={reader.purpose || 'ACCESS'} loading={saving}
+          onChange={v => onSave(reader, { purpose: v })}
+          options={[
+            { value: 'ATTENDANCE', label: '🕘 Clock in / out' },
+            { value: 'ACCESS', label: '🚪 Door access only' },
+            { value: 'MUSTERING', label: '🟢 Muster point' },
+          ]} />
+      </Tooltip>
       <Tooltip title="Pulse-open this door">
         <Button size="small" icon={<UnlockOutlined />} onClick={() => onOpen(reader.door_no)} />
       </Tooltip>
@@ -119,6 +128,62 @@ const ReaderRow = ({ reader, zones, onSave, onDelete, onOpen, saving }) => {
         <Button size="small" danger icon={<DeleteOutlined />} />
       </Popconfirm>
     </div>
+  );
+};
+
+/* ── Issue cards: tap a new card on any reader, give it to a person ─────────── */
+const PersonSearch = ({ value, onChange }) => {
+  const [opts, setOpts] = useState([]);
+  const search = async (q) => {
+    if (!q || q.length < 2) return;
+    try {
+      const r = await apiService.get('/api/v1/personnel/', { search: q, page_size: 20 });
+      setOpts((r?.results || []).map(p => ({ value: p.emp_code, label: `${p.full_name || p.first_name} · ${p.emp_code}` })));
+    } catch { /* best effort */ }
+  };
+  return <Select showSearch allowClear filterOption={false} placeholder="Type a name…" style={{ width: 260 }}
+    onSearch={search} options={opts} value={value} onChange={onChange} notFoundContent="Type 2+ letters" />;
+};
+
+const CardsDrawer = ({ open, onClose }) => {
+  const { message } = App.useApp();
+  const qc = useQueryClient();
+  const [who, setWho] = useState({});
+  const { data: cards = [], isFetching } = useQuery({
+    queryKey: ['ac-unknown-cards'], enabled: open, refetchInterval: open ? 3000 : false,
+    queryFn: () => apiService.get(`${BASE}/cards/unknown`),
+  });
+  const assign = useMutation({
+    mutationFn: ({ card_no, emp_code }) => apiService.post(`${BASE}/cards/assign`, { card_no, emp_code }),
+    onSuccess: (r) => {
+      const failed = (r?.controllers || []).filter(c => !c.ok);
+      if (r?.note) message.warning(r.note, 8);
+      else if (failed.length) message.warning(`Card saved, but ${failed.length} controller(s) did not accept it — check they are online`, 8);
+      else message.success(`Card ${r.card_no} issued to ${r.emp_code}${r?.controllers?.length ? ' and loaded onto the controllers' : ''}`);
+      qc.invalidateQueries(['ac-unknown-cards']);
+    },
+    onError: e => message.error(e.message),
+  });
+  return (
+    <Drawer open={open} onClose={onClose} width={640} title={<span><CreditCardOutlined /> Issue cards</span>}
+      extra={isFetching ? <Spin size="small" /> : null}>
+      <div style={{ background: '#f0f9ff', border: '1px solid #bae6fd', borderRadius: 10, padding: '10px 12px', marginBottom: 14, fontSize: 13 }}>
+        Tap a new card on <b>any reader</b>. It is refused (it belongs to nobody yet) and appears below within a few
+        seconds — pick the person and press <b>Issue</b>. The card is saved on their record and loaded onto every controller.
+      </div>
+      {cards.length === 0 && <Empty description="Waiting for a card tap…" />}
+      {cards.map(c => (
+        <div key={c.card_no} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '10px 0', borderBottom: '1px solid #f0f0f0' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontFamily: 'monospace', fontWeight: 700, fontSize: 15 }}>{c.card_no}</div>
+            <div style={{ fontSize: 12, color: '#8c8c8c' }}>{c.reader_name} · {String(c.last_seen).slice(11, 19)} · {c.taps} tap(s)</div>
+          </div>
+          <PersonSearch value={who[c.card_no]} onChange={v => setWho({ ...who, [c.card_no]: v })} />
+          <Button type="primary" disabled={!who[c.card_no]} loading={assign.isPending && assign.variables?.card_no === c.card_no}
+            onClick={() => assign.mutate({ card_no: c.card_no, emp_code: who[c.card_no] })}>Issue</Button>
+        </div>
+      ))}
+    </Drawer>
   );
 };
 
@@ -479,6 +544,7 @@ const Controllers = () => {
   const { message } = App.useApp();
   const qc = useQueryClient();
   const [modal, setModal] = useState(null);   // {mode:'create'|'edit', ctrl?} | {mode:'reader', ctrl}
+  const [cardsOpen, setCardsOpen] = useState(false);
   const [learnId, setLearnId] = useState(null);
   const [readerMode, setReaderMode] = useState('entry_only');  // C3-400: entry_only | entry_exit
   const [form] = Form.useForm();
@@ -562,11 +628,12 @@ const Controllers = () => {
           </div>
         </div>
         <Space>
+          <Button icon={<CreditCardOutlined />} onClick={() => setCardsOpen(true)}>Issue cards</Button>
           <Button icon={<ReloadOutlined />} onClick={() => qc.invalidateQueries({ queryKey: ['ac-controllers'] })}>
             Refresh
           </Button>
           <Button type="primary" icon={<PlusOutlined />}
-            onClick={() => { setReaderMode('entry_only'); setModal({ mode: 'create' }); form.resetFields(); form.setFieldsValue({ port: 4370, door_count: 2, poll_interval_sec: 5, poll_enabled: false }); }}>
+            onClick={() => { setReaderMode('entry_only'); setModal({ mode: 'create' }); form.resetFields(); form.setFieldsValue({ port: 4370, door_count: 2, poll_interval_sec: 5, poll_enabled: true }); }}>
             Add Controller
           </Button>
         </Space>
@@ -578,6 +645,8 @@ const Controllers = () => {
           ? <Empty description="No access controllers yet. Add one to begin." style={{ padding: 60 }} />
           : controllers.map(c => <ControllerCard key={c.id} ctrl={c} zones={zones} api={cardApi} qc={qc} />)
       }
+
+      <CardsDrawer open={cardsOpen} onClose={() => setCardsOpen(false)} />
 
       {/* Learn mode */}
       <LearnModal

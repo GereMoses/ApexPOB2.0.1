@@ -513,3 +513,15 @@ ALTER TABLE mustering_event ADD COLUMN IF NOT EXISTS notify_channels JSONB DEFAU
 ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS controller_id INTEGER REFERENCES access_controllers(id) ON DELETE CASCADE;
 ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS aux_no SMALLINT;
 ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS name VARCHAR(100);
+
+-- C3 / inBio reader ports: what a tap means (clock in/out, door only, muster point)
+ALTER TABLE access_readers ADD COLUMN IF NOT EXISTS purpose VARCHAR(12) NOT NULL DEFAULT 'ACCESS';
+-- Cards tapped that belong to nobody yet — pick one to issue it to a person
+CREATE TABLE IF NOT EXISTS controller_unknown_card (
+    card_no       VARCHAR(32) PRIMARY KEY,
+    controller_id INTEGER REFERENCES access_controllers(id) ON DELETE CASCADE,
+    door_no       INTEGER,
+    reader_name   VARCHAR(100),
+    taps          INTEGER NOT NULL DEFAULT 1,
+    last_seen     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
