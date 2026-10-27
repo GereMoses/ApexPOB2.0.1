@@ -442,6 +442,9 @@ class EmergencyDevice(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     terminal_sn = Column(String(20), ForeignKey("iclock_terminal.sn"))
+    controller_id = Column(Integer, ForeignKey("access_controllers.id", ondelete="CASCADE"), nullable=True)  # C3 panel
+    aux_no = Column(SmallInteger, nullable=True)  # AUX output the siren/strobe is wired to
+    name = Column(String(100), nullable=True)
     device_type = Column(SmallInteger, default=0)  # 0=reader, 1=siren, 2=strobe, 3=alarm
     zone_id = Column(Integer, ForeignKey("zones.id"))
     status = Column(SmallInteger, default=0)  # 0=inactive, 1=active, 2=error

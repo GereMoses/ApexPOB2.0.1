@@ -234,6 +234,23 @@ class EmergencyService:
             )
             return False, str(e)
 
+    async def _switch_controller_aux(self, db: Session, device, on: bool) -> Tuple[bool, Optional[str]]:
+        """Siren / strobe wired to a C3 panel's AUX output: hold on, or switch off."""
+        from ..services.zkteco import c3_zkaccess
+        ctrl = db.query(AccessController).filter(AccessController.id == device.controller_id).first()
+        if not ctrl:
+            return False, "Controller not found"
+
+        def _send():
+            with c3_zkaccess.ZKAccessC3Client(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "") as c:
+                return c.aux_output(int(device.aux_no or 1), 255 if on else 0)
+        try:
+            await asyncio.to_thread(_send)
+            return True, None
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Siren {device.id} (ctrl {device.controller_id} aux {device.aux_no}) {'on' if on else 'off'} failed: {e}")
+            return False, str(e)
+
     async def execute_lockdown(
         self, 
         scope: str,
@@ -254,6 +271,8 @@ class EmergencyService:
             # Validate action
             if action not in ["lock", "unlock"]:
                 raise ValueError("Action must be 'lock' or 'unlock'")
+            from .controller_doors import ensure_all_controller_doors
+            ensure_all_controller_doors(db)
             
             # Determine scope and target doors
             if scope == "global":
@@ -515,6 +534,9 @@ class EmergencyService:
                 "notifications_sent": 0
             }
 
+            from .controller_doors import ensure_all_controller_doors
+            ensure_all_controller_doors(db)
+
             if action == "activate":
                 # 1. Unlock fire exits (emergency_action=2) — scoped to the location's readers when given
                 _fe_q = db.query(AccDoor).filter(AccDoor.emergency_action == 2)
@@ -581,7 +603,11 @@ class EmergencyService:
                 for device in emergency_devices:
                     sp = db.begin_nested()
                     try:
-                        if device.terminal:
+                        if device.controller_id and device.aux_no:
+                            ok, _err = await self._switch_controller_aux(db, device, True)
+                            device.status = 1 if ok else 2
+                            results["sirens_activated"] += 1 if ok else 0
+                        elif device.terminal:
                             await self.zkteco_queue_command(device.terminal.sn, "EMERGENCY_ON")
                             device.status = 1  # ON
                             results["sirens_activated"] += 1
@@ -658,52 +684,63 @@ class EmergencyService:
                     )
                 
             else:  # clear action
-                # Turn OFF sirens/strobes
+                # 1. Sirens / strobes off
                 emergency_devices = db.query(EmergencyDevice).filter(
                     EmergencyDevice.device_type.in_([1, 2]),  # Siren, Strobe
-                    EmergencyDevice.status == 1  # Currently ON
+                    EmergencyDevice.status.in_([1, 2]),
                 ).all()
-                
                 for device in emergency_devices:
                     try:
-                        if device.terminal:
+                        if device.controller_id and device.aux_no:
+                            ok, _err = await self._switch_controller_aux(db, device, False)
+                            device.status = 0 if ok else 2
+                        elif device.terminal:
                             await self.zkteco_queue_command(device.terminal.sn, "EMERGENCY_OFF")
-                            device.status = 0  # OFF
-                            results["sirens_activated"] = len(emergency_devices)
+                            device.status = 0
+                        results["sirens_activated"] += 1
                     except Exception as e:
                         logger.error(f"Error deactivating siren {device.id}: {str(e)}")
-                
                 emergency_event.actions.append({
                     "type": "siren_deactivation",
                     "devices": [d.id for d in emergency_devices],
                     "count": len(emergency_devices),
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-                
-                # End active mustering events. Update status directly so we stay
-                # in the same transaction as the siren deactivation above, then call
-                # _set_mustering_readers() per zone to clear device commands. The
-                # original code only set status — readers were never deactivated.
-                active_mustering = db.query(MusteringEvent).filter(
-                    MusteringEvent.status == 0
-                ).all()
 
-                muster_svc = MusteringService(db)
+                # 2. Re-lock the fire exits that were held open (the old clear left
+                #    every fire exit standing open after the emergency).
+                relocked = 0
+                for door in db.query(AccDoor).filter(AccDoor.emergency_action == 2).all():
+                    try:
+                        if door.controller_id and door.port is not None:
+                            ok, _err = await self._command_controller_door(db, door, "lock")
+                            relocked += 1 if ok else 0
+                        elif door.terminal:
+                            await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF")
+                            relocked += 1
+                    except Exception as e:
+                        logger.error(f"Error re-locking fire exit {door.id}: {e}")
+                results["locked_doors"] = relocked
+                emergency_event.actions.append({"type": "relock_fire_exits", "count": relocked,
+                                                "timestamp": datetime.now(timezone.utc).isoformat()})
+                db.commit()
+
+                # 3. End running musters the proper way: final headcount, muster
+                #    readers back to normal, all-clear to staff + response team.
+                active_mustering = db.query(MusteringEvent).filter(MusteringEvent.status == 0).all()
+                ended = 0
                 for muster in active_mustering:
-                    muster.status = 1  # Completed
-                    muster.end_time = datetime.now(timezone.utc)
-                    for zid in (muster.zone_ids or ([muster.zone_id] if muster.zone_id else [])):
-                        try:
-                            muster_svc._set_mustering_readers(zid, False)
-                        except Exception as _re:
-                            logger.error(f"Error deactivating readers for zone {zid}: {_re}")
+                    try:
+                        MusteringService(db).end_mustering_event(muster.id, initiated_by, "Fire mode cleared")
+                        ended += 1
+                    except Exception as me:
+                        logger.error(f"Error ending muster {muster.id} on fire-mode clear: {me}")
+                        db.rollback()
+                emergency_event = db.merge(emergency_event)
+                emergency_event.actions = list(emergency_event.actions or []) + [{
+                    "type": "end_mustering", "events_ended": ended,
+                    "timestamp": datetime.now(timezone.utc).isoformat()}]
 
-                emergency_event.actions.append({
-                    "type": "end_mustering",
-                    "events_ended": len(active_mustering),
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-            
             # Log operation
             await self.log_emergency_operation(
                 db=db,

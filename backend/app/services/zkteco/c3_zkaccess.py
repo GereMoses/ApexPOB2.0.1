@@ -117,6 +117,16 @@ class ZKAccessC3Client:
         )
         return True
 
+    def aux_output(self, aux_no: int = 1, duration: int = 255) -> bool:
+        """Switch an AUX output (siren / strobe wired to the panel).
+        duration 255 = stay on, 0 = off, 1-254 = seconds on."""
+        from c3 import consts
+        from c3.controldevice import ControlDeviceOutput
+        self._c3.control_device(
+            ControlDeviceOutput(int(aux_no), consts.ControlOutputAddress.AUX_OUTPUT, int(duration))
+        )
+        return True
+
     # ── Enrolment: push users/cards so personnel can badge (write path) ────────
     def push_users(self, users, door_nos=None, timezone_id: int = 1) -> dict:
         """Upload user + card records to the panel so they can badge at its doors.

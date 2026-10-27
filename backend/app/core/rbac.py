@@ -59,6 +59,9 @@ _ROUTE_RULES = [
     ("/api/v1/biotime",               frozenset({"POST","PUT","PATCH","DELETE"}),       "devices.change"),
     ("/api/v1/zkteco",                frozenset({"GET","POST","PUT","PATCH","DELETE"}), "devices.sync"),
     # Access Control
+    ("/api/v1/access-controllers",    frozenset({"GET"}),                               "access_control.view"),
+    ("/api/v1/access-controllers",    frozenset({"POST","PUT","PATCH","DELETE"}),       "access_control.change"),
+    ("/api/v1/settings/alerts",       frozenset({"POST","PUT","PATCH","DELETE"}),       "settings.change"),
     ("/api/access-control",           frozenset({"GET"}),                               "access_control.view"),
     ("/api/access-control",           frozenset({"POST","PUT","PATCH","DELETE"}),       "access_control.change"),
     # Reports

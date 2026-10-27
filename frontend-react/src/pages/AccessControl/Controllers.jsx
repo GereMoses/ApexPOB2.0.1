@@ -7,7 +7,7 @@ import {
   PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined,
   SyncOutlined, WifiOutlined, DisconnectOutlined,
   ReloadOutlined, UnlockOutlined, LoginOutlined, LogoutOutlined,
-  ClusterOutlined, AimOutlined, BulbOutlined,
+  ClusterOutlined, AimOutlined, BulbOutlined, FireOutlined, SoundOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -122,6 +122,83 @@ const ReaderRow = ({ reader, zones, onSave, onDelete, onOpen, saving }) => {
   );
 };
 
+/* ── Emergency: what each door does in a fire + sirens on AUX outputs ───────── */
+const ROLES = [
+  { value: 0, label: 'No change' },
+  { value: 2, label: 'Fire exit — unlock in a fire' },
+  { value: 1, label: 'Lock in a fire' },
+];
+
+const EmergencyOutputs = ({ ctrl }) => {
+  const { message } = App.useApp();
+  const qc = useQueryClient();
+  const [aux, setAux] = useState({ aux_no: 1, name: 'Siren', device_type: 1 });
+  const { data: doors = [], isLoading } = useQuery({
+    queryKey: ['ctrl-doors', ctrl.id], queryFn: () => apiService.get(`${BASE}/${ctrl.id}/doors`),
+  });
+  const { data: sirens = [] } = useQuery({
+    queryKey: ['ctrl-sirens', ctrl.id], queryFn: () => apiService.get(`${BASE}/${ctrl.id}/sirens`),
+  });
+  const saveDoor = useMutation({
+    mutationFn: ({ id, patch }) => apiService.put(`${BASE}/doors/${id}`, patch),
+    onSuccess: () => { qc.invalidateQueries(['ctrl-doors', ctrl.id]); message.success('Saved'); },
+    onError: e => message.error(e.message),
+  });
+  const addSiren = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/sirens`, aux),
+    onSuccess: () => { qc.invalidateQueries(['ctrl-sirens', ctrl.id]); message.success('Added — it sounds when fire mode is activated'); },
+    onError: e => message.error(e.message),
+  });
+  const delSiren = useMutation({
+    mutationFn: id => apiService.delete(`${BASE}/sirens/${id}`),
+    onSuccess: () => qc.invalidateQueries(['ctrl-sirens', ctrl.id]),
+  });
+  const test = useMutation({
+    mutationFn: n => apiService.post(`${BASE}/${ctrl.id}/aux/${n}/test?seconds=3`),
+    onSuccess: r => (r?.success ? message.success(r.message) : message.error(r?.error || 'Panel did not respond')),
+  });
+  const outputs = Math.max(1, ctrl.door_count || 1);   // C3 / inBio: one AUX output per door
+
+  return (
+    <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 12 }}>
+      <div style={{ fontSize: 12.5, color: '#64748b', marginBottom: 10 }}>
+        Fire mode holds every <b>fire exit</b> open and switches the sirens on; clearing fire mode locks them again and silences the sirens.
+      </div>
+      {isLoading ? <Spin /> : doors.map(d => (
+        <div key={d.id} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '6px 0', borderBottom: '1px dashed #f0f0f0' }}>
+          <Tag style={{ minWidth: 58, textAlign: 'center' }}>Door {d.port}</Tag>
+          <Input size="small" defaultValue={d.name} style={{ maxWidth: 260 }}
+            onBlur={e => e.target.value !== d.name && saveDoor.mutate({ id: d.id, patch: { name: e.target.value } })} />
+          <Select size="small" value={d.emergency_action} style={{ width: 230 }} options={ROLES}
+            onChange={v => saveDoor.mutate({ id: d.id, patch: { emergency_action: v } })} />
+          {d.emergency_action === 2 && <Tag color="green" icon={<FireOutlined />}>fire exit</Tag>}
+        </div>
+      ))}
+
+      <div style={{ fontWeight: 600, fontSize: 13, margin: '14px 0 8px' }}><SoundOutlined /> Sirens / strobes on AUX outputs</div>
+      {sirens.length === 0 && <div style={{ fontSize: 12.5, color: '#94a3b8', marginBottom: 8 }}>None yet — add the AUX output each siren or strobe is wired to.</div>}
+      {sirens.map(sv => (
+        <div key={sv.id} style={{ display: 'flex', gap: 10, alignItems: 'center', padding: '4px 0' }}>
+          <Tag color="orange">AUX {sv.aux_no}</Tag>
+          <span style={{ flex: 1 }}>{sv.name} <span style={{ color: '#94a3b8' }}>· {sv.device_type === 2 ? 'strobe' : 'siren'}</span></span>
+          <Button size="small" loading={test.isPending && test.variables === sv.aux_no} onClick={() => test.mutate(sv.aux_no)}>Test 3 s</Button>
+          <Popconfirm title="Remove this siren?" onConfirm={() => delSiren.mutate(sv.id)}>
+            <Button size="small" danger icon={<DeleteOutlined />} />
+          </Popconfirm>
+        </div>
+      ))}
+      <Space wrap style={{ marginTop: 8 }}>
+        <Select size="small" value={aux.aux_no} style={{ width: 100 }} onChange={v => setAux({ ...aux, aux_no: v })}
+          options={Array.from({ length: outputs }, (_, i) => ({ value: i + 1, label: `AUX ${i + 1}` }))} />
+        <Input size="small" value={aux.name} style={{ width: 180 }} onChange={e => setAux({ ...aux, name: e.target.value })} />
+        <Select size="small" value={aux.device_type} style={{ width: 100 }} onChange={v => setAux({ ...aux, device_type: v })}
+          options={[{ value: 1, label: 'Siren' }, { value: 2, label: 'Strobe' }]} />
+        <Button size="small" type="dashed" icon={<PlusOutlined />} loading={addSiren.isPending} onClick={() => addSiren.mutate()}>Add</Button>
+      </Space>
+    </div>
+  );
+};
+
 /* ── One controller card ──────────────────────────────────────────────────── */
 const ControllerCard = ({ ctrl, zones, api, qc }) => {
   const { message } = App.useApp();
@@ -231,6 +308,10 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
               </div>
             </div>
           ),
+        }, {
+          key: 'emergency',
+          label: <span style={{ fontWeight: 600, fontSize: 13 }}><FireOutlined style={{ color: '#f97316' }} /> In an emergency — fire exits &amp; sirens</span>,
+          children: <EmergencyOutputs ctrl={ctrl} />,
         }]}
       />
 

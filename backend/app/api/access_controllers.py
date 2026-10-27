@@ -9,6 +9,7 @@ different hardware, different protocol (C3 PULL, not ADMS push), different topol
 
 from typing import List, Optional
 
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,7 @@ from ..services.zkteco import c3_controller as c3
 from ..services.zkteco import c3_pull_sdk
 from ..services.zkteco import c3_zkaccess
 from ..services.access_controller_ingest import poll_controller_once, learn_controller_ports
+from ..services.controller_doors import ensure_controller_doors
 
 router = APIRouter(prefix="/access-controllers", tags=["Access Control Controllers"])
 
@@ -100,6 +102,7 @@ def create_controller(body: AccessControllerCreate, db: Session = Depends(get_db
     db.add(ctrl)
     db.commit()
     db.refresh(ctrl)
+    ensure_controller_doors(db, ctrl)       # every port becomes a door emergencies can act on
     return _controller_out(ctrl, db)
 
 
@@ -120,6 +123,7 @@ def update_controller(controller_id: int, body: AccessControllerUpdate, db: Sess
         setattr(ctrl, key, value)
     db.commit()
     db.refresh(ctrl)
+    ensure_controller_doors(db, ctrl)
     return _controller_out(ctrl, db)
 
 
@@ -289,3 +293,95 @@ def learn_ports(controller_id: int, db: Session = Depends(get_db)):
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller not found")
     return learn_controller_ports(ctrl, db)
+
+
+# ── doors: what each one does in an emergency ─────────────────────────────────
+_ROLE = {0: "No change", 1: "Lock in a fire", 2: "Fire exit — unlock in a fire"}
+
+
+class DoorRoleIn(BaseModel):
+    name: Optional[str] = None
+    emergency_action: Optional[int] = Field(None, ge=0, le=2)
+
+
+@router.get("/{controller_id}/doors", summary="This controller's doors and their emergency role")
+def controller_doors(controller_id: int, db: Session = Depends(get_db)):
+    from ..models.biotime_models import AccDoor
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    ensure_controller_doors(db, ctrl)
+    doors = db.query(AccDoor).filter(AccDoor.controller_id == controller_id).order_by(AccDoor.port).all()
+    return [{"id": d.id, "port": d.port, "name": d.name, "emergency_action": d.emergency_action or 0,
+             "role": _ROLE.get(d.emergency_action or 0)} for d in doors]
+
+
+@router.put("/doors/{door_id}", summary="Rename a door or set what it does in a fire")
+def update_door_role(door_id: int, body: DoorRoleIn, db: Session = Depends(get_db)):
+    from ..models.biotime_models import AccDoor
+    d = db.query(AccDoor).filter(AccDoor.id == door_id).first()
+    if not d:
+        raise HTTPException(status_code=404, detail="Door not found")
+    if body.name is not None and body.name.strip():
+        d.name = body.name.strip()[:50]
+    if body.emergency_action is not None:
+        d.emergency_action = body.emergency_action
+    db.commit()
+    return {"id": d.id, "port": d.port, "name": d.name, "emergency_action": d.emergency_action,
+            "role": _ROLE.get(d.emergency_action or 0)}
+
+
+# ── sirens / strobes on AUX outputs ───────────────────────────────────────────
+class SirenIn(BaseModel):
+    aux_no: int = Field(..., ge=1, le=8)
+    name: str = Field("Siren", max_length=100)
+    device_type: int = Field(1, ge=1, le=2)        # 1 = siren, 2 = strobe
+    zone_id: Optional[int] = None
+
+
+@router.get("/{controller_id}/sirens", summary="Sirens / strobes wired to this controller")
+def list_sirens(controller_id: int, db: Session = Depends(get_db)):
+    from ..models.biotime_models import EmergencyDevice
+    rows = db.query(EmergencyDevice).filter(EmergencyDevice.controller_id == controller_id).order_by(EmergencyDevice.aux_no).all()
+    return [{"id": r.id, "aux_no": r.aux_no, "name": r.name, "device_type": r.device_type,
+             "zone_id": r.zone_id, "status": r.status} for r in rows]
+
+
+@router.post("/{controller_id}/sirens", status_code=status.HTTP_201_CREATED)
+def add_siren(controller_id: int, body: SirenIn, db: Session = Depends(get_db)):
+    from ..models.biotime_models import EmergencyDevice
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    if db.query(EmergencyDevice).filter(EmergencyDevice.controller_id == controller_id,
+                                        EmergencyDevice.aux_no == body.aux_no).first():
+        raise HTTPException(status_code=409, detail=f"AUX output {body.aux_no} already has a device")
+    dev = EmergencyDevice(controller_id=controller_id, aux_no=body.aux_no, name=body.name.strip() or "Siren",
+                          device_type=body.device_type, zone_id=body.zone_id, status=0)
+    db.add(dev)
+    db.commit()
+    return {"id": dev.id, "aux_no": dev.aux_no, "name": dev.name, "device_type": dev.device_type,
+            "zone_id": dev.zone_id, "status": dev.status}
+
+
+@router.delete("/sirens/{device_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_siren(device_id: int, db: Session = Depends(get_db)):
+    from ..models.biotime_models import EmergencyDevice
+    dev = db.query(EmergencyDevice).filter(EmergencyDevice.id == device_id, EmergencyDevice.controller_id.isnot(None)).first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    db.delete(dev)
+    db.commit()
+
+
+@router.post("/{controller_id}/aux/{aux_no}/test", summary="Sound an AUX output for a few seconds")
+def test_aux(controller_id: int, aux_no: int, seconds: int = 3, db: Session = Depends(get_db)):
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    try:
+        with c3_zkaccess.ZKAccessC3Client(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "") as c:
+            c.aux_output(aux_no, max(1, min(30, seconds)))
+        return {"success": True, "message": f"AUX {aux_no} on for {seconds}s"}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": str(exc)}

@@ -508,3 +508,8 @@ CREATE INDEX IF NOT EXISTS idx_notify_delivery_created ON notify_delivery (creat
 
 -- Channels a muster alerted on at start (so the all-clear goes out the same way)
 ALTER TABLE mustering_event ADD COLUMN IF NOT EXISTS notify_channels JSONB DEFAULT '[]'::jsonb;
+
+-- Sirens / strobes wired to a ZKTeco controller's AUX output
+ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS controller_id INTEGER REFERENCES access_controllers(id) ON DELETE CASCADE;
+ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS aux_no SMALLINT;
+ALTER TABLE emergency_device ADD COLUMN IF NOT EXISTS name VARCHAR(100);
