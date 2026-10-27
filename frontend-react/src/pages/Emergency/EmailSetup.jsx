@@ -10,12 +10,12 @@
 import React, { useState, useEffect } from 'react';
 import {
   Card, Form, Input, Button, Switch, Space, Typography, Tag, message,
-  Skeleton, Tooltip, theme as antdTheme,
+  Skeleton, Tooltip, Collapse, Alert, theme as antdTheme,
 } from 'antd';
 import {
   MailOutlined, CloudServerOutlined, GlobalOutlined, SafetyCertificateOutlined,
   SendOutlined, KeyOutlined, SaveOutlined, CheckOutlined, CopyOutlined,
-  ThunderboltOutlined, LockOutlined,
+  ThunderboltOutlined, LockOutlined, CheckCircleFilled, LinkOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import { api } from '../../services/api';
 
@@ -24,6 +24,15 @@ const { Text } = Typography;
 const CSS = `
 .es-root{ --r:18px; width:100%; padding-bottom:24px; }
 .es-fields{ display:grid; grid-template-columns:1fr 1fr; gap:0 18px; }
+.es-quick{ display:grid; grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); gap:18px; margin-bottom:18px; align-items:start; }
+.es-quick .es-fields{ grid-template-columns:1.3fr 1fr 1fr; gap:14px; }
+.es-lbl{ font-size:12.5px; font-weight:600; color:var(--es-muted); margin-bottom:6px; }
+.es-detect{ display:flex; gap:10px; align-items:center; margin-top:7px; font-size:12px; color:var(--es-muted); min-height:22px; }
+.es-connected{ display:flex; gap:14px; align-items:center; padding:14px 16px; border-radius:14px; background:#f0fdf4; border:1px solid #bbf7d0; }
+.es-ok{ font-size:28px; color:#16a34a; }
+.es-adv{ background:var(--es-card); border:1px solid var(--es-bd); border-radius:18px; }
+.es-adv .ant-collapse-content-box{ padding-top:4px !important; }
+@media (max-width: 1100px){ .es-quick{ grid-template-columns:1fr; } .es-quick .es-fields{ grid-template-columns:1fr; } }
 .es-hero{
   position:relative; overflow:hidden; border-radius:var(--r); padding:26px 28px;
   background:linear-gradient(120deg,#1e3a8a 0%,#4f46e5 48%,#7c3aed 100%);
@@ -110,6 +119,38 @@ const EmailSetup = () => {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [copied, setCopied] = useState('');
+  const [quick, setQuick] = useState({ email: '', app_password: '', from_name: 'Apex POB' });
+  const [detected, setDetected] = useState(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectErr, setConnectErr] = useState(null);
+  const [editing, setEditing] = useState(false);
+
+  // Show which provider the address belongs to while the admin types.
+  useEffect(() => {
+    const e = quick.email.trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { setDetected(null); return undefined; }
+    const t = setTimeout(async () => {
+      try { setDetected((await api.get(`/api/v1/settings/email/detect?email=${encodeURIComponent(e)}`)).data.data); }
+      catch { setDetected(null); }
+    }, 450);
+    return () => clearTimeout(t);
+  }, [quick.email]);
+
+  const connect = async () => {
+    setConnecting(true); setConnectErr(null);
+    try {
+      const res = await api.post('/api/v1/settings/email/quick-setup', quick);
+      if (res.data.success) {
+        message.success(res.data.message, 6);
+        await load();
+        setEditing(false);
+        setQuick(q => ({ ...q, app_password: '' }));
+      } else {
+        setConnectErr({ text: res.data.message, help: res.data.data?.help_url });
+      }
+    } catch (e) { setConnectErr({ text: e?.response?.data?.detail || e.message }); }
+    finally { setConnecting(false); }
+  };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
@@ -125,6 +166,7 @@ const EmailSetup = () => {
         sending_domain: d.sending_domain || '', dkim_selector: d.dkim_selector || 'pob',
       });
       applyResult(d);
+      setQuick(q => ({ ...q, email: q.email || d.smtp_user || '', from_name: d.from_name || q.from_name }));
     } catch { message.error('Could not load email settings'); }
     finally { setLoading(false); }
   };
@@ -133,6 +175,8 @@ const EmailSetup = () => {
     setMeta({
       has_password: !!d.has_password, has_dkim: !!d.has_dkim,
       configured: !!d.configured, sending_domain: d.sending_domain || '',
+      smtp_user: d.smtp_user || '', smtp_host: d.smtp_host || '', smtp_port: d.smtp_port || '',
+      from_address: d.from_address || '',
     });
     setDns(d.dns_records || []);
   };
@@ -236,6 +280,104 @@ const EmailSetup = () => {
         </div>
       </div>
 
+      {/* Simple setup: address + app password */}
+      <div className="es-quick">
+        <div className="es-card">
+          <div className="es-card-h">
+            {tile(MailOutlined, '#2563eb', '#4f46e5')}
+            <div style={{ flex: 1 }}>
+              <div className="es-card-t">Connect your mailbox</div>
+              <div className="es-card-s">Just the email address and an app password — ApexPOB finds the mail server.</div>
+            </div>
+          </div>
+          <div className="es-card-b">
+            {meta.configured && meta.has_password && !editing ? (
+              <div className="es-connected">
+                <CheckCircleFilled className="es-ok" />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontWeight: 650, fontSize: 15 }}>Sending from {meta.from_address || meta.smtp_user}</div>
+                  <div style={{ fontSize: 12.5, color: token.colorTextTertiary }}>via {meta.smtp_host}:{meta.smtp_port}</div>
+                </div>
+                <Button onClick={() => setEditing(true)}>Change</Button>
+              </div>
+            ) : (
+              <>
+                <div className="es-fields">
+                  <div>
+                    <div className="es-lbl">Email address</div>
+                    <Input size="large" prefix={<MailOutlined style={{ color: token.colorTextTertiary }} />} placeholder="alerts@yourcompany.com"
+                      value={quick.email} onChange={(e) => setQuick({ ...quick, email: e.target.value })} autoComplete="off" />
+                    <div className="es-detect">
+                      {detected ? <><Tag color="blue" bordered={false} style={{ margin: 0 }}>{detected.provider_name}</Tag>
+                        {detected.help_url && <a href={detected.help_url} target="_blank" rel="noreferrer"><LinkOutlined /> Create an app password</a>}</>
+                        : <span>We detect Gmail, Microsoft 365, Outlook, Yahoo, Zoho and company domains.</span>}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="es-lbl">App password</div>
+                    <Input.Password size="large" prefix={<LockOutlined style={{ color: token.colorTextTertiary }} />} placeholder="16-character app password"
+                      value={quick.app_password} onChange={(e) => setQuick({ ...quick, app_password: e.target.value })} autoComplete="new-password"
+                      onPressEnter={connect} />
+                  </div>
+                  <div>
+                    <div className="es-lbl">Sender name</div>
+                    <Input size="large" placeholder="Apex POB" value={quick.from_name} onChange={(e) => setQuick({ ...quick, from_name: e.target.value })} />
+                  </div>
+                </div>
+                {detected?.provider === 'microsoft' && (
+                  <Alert type="info" showIcon style={{ marginTop: 14, borderRadius: 10 }}
+                    message="Microsoft 365 mailbox"
+                    description="App passwords need multi-factor sign-in on the account, and an admin must allow “Authenticated SMTP” for this mailbox (Microsoft 365 admin centre → Users → the user → Mail → Manage email apps)." />
+                )}
+                {detected?.provider === 'google' && (
+                  <Alert type="info" showIcon style={{ marginTop: 14, borderRadius: 10 }}
+                    message="Gmail / Google Workspace"
+                    description="Turn on 2-Step Verification, then create an app password at myaccount.google.com/apppasswords and paste the 16 characters here." />
+                )}
+                {connectErr && (
+                  <Alert type="error" showIcon style={{ marginTop: 14, borderRadius: 10 }} message={connectErr.text}
+                    description={connectErr.help ? <a href={connectErr.help} target="_blank" rel="noreferrer">Create an app password</a> : null} />
+                )}
+                <div style={{ display: 'flex', gap: 10, marginTop: 16, alignItems: 'center' }}>
+                  <Button type="primary" size="large" icon={<LinkOutlined />} loading={connecting} onClick={connect}
+                    disabled={!quick.email.includes('@') || quick.app_password.length < 4}>
+                    {connecting ? 'Checking the login…' : 'Connect'}
+                  </Button>
+                  {editing && <Button size="large" onClick={() => setEditing(false)}>Cancel</Button>}
+                  <span style={{ fontSize: 12.5, color: token.colorTextTertiary }}>We sign in once to prove it works before saving. The password is stored encrypted.</span>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="es-card">
+          <div className="es-card-h">{tile(SendOutlined, '#10b981', '#0ea5e9')}
+            <div><div className="es-card-t">Send a test</div><div className="es-card-s">Uses the saved mailbox</div></div>
+          </div>
+          <div className="es-card-b">
+            <Input value={testAddr} onChange={(e) => setTestAddr(e.target.value)} onPressEnter={sendTest}
+              placeholder="you@example.com" prefix={<MailOutlined style={{ color: token.colorTextTertiary }} />} style={{ marginBottom: 10 }} />
+            <Button type="primary" icon={<ThunderboltOutlined />} onClick={sendTest} loading={testing} block disabled={!meta.configured}>Send test email</Button>
+            {testResult && (
+              <div style={{
+                marginTop: 12, padding: '10px 12px', borderRadius: 10, fontSize: 12.5,
+                background: testResult.sent ? token.colorSuccessBg : token.colorErrorBg,
+                color: testResult.sent ? token.colorSuccessText : token.colorErrorText,
+                border: `1px solid ${testResult.sent ? token.colorSuccessBorder : token.colorErrorBorder}`,
+              }}>
+                {testResult.sent ? `✓ Sent to ${testResult.address}. Check the inbox.` : `✕ ${testResult.error || 'Send failed'}`}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <Collapse className="es-adv" bordered={false} items={[{
+        key: 'adv',
+        label: <span style={{ fontWeight: 650 }}><SettingOutlined /> Advanced — custom mail server, sending domain &amp; DKIM</span>,
+        children: (
+          <>
       {/* Stepper */}
       <div className="es-steps">
         {steps.map((s, i) => (
@@ -341,26 +483,6 @@ const EmailSetup = () => {
             </div>
           </div>
 
-          <div className="es-card">
-            <div className="es-card-h">{tile(SendOutlined, '#10b981', '#0ea5e9')}
-              <div><div className="es-card-t">Send a test</div><div className="es-card-s">Uses saved settings</div></div>
-            </div>
-            <div className="es-card-b">
-              <Input value={testAddr} onChange={(e) => setTestAddr(e.target.value)} onPressEnter={sendTest}
-                placeholder="you@example.com" prefix={<MailOutlined style={{ color: token.colorTextTertiary }} />} style={{ marginBottom: 10 }} />
-              <Button type="primary" icon={<ThunderboltOutlined />} onClick={sendTest} loading={testing} block>Send test email</Button>
-              {testResult && (
-                <div style={{
-                  marginTop: 12, padding: '10px 12px', borderRadius: 10, fontSize: 12.5,
-                  background: testResult.sent ? token.colorSuccessBg : token.colorErrorBg,
-                  color: testResult.sent ? token.colorSuccessText : token.colorErrorText,
-                  border: `1px solid ${testResult.sent ? token.colorSuccessBorder : token.colorErrorBorder}`,
-                }}>
-                  {testResult.sent ? `✓ Sent to ${testResult.address}. Check the inbox.` : `✕ ${testResult.error || 'Send failed'}`}
-                </div>
-              )}
-            </div>
-          </div>
         </aside>
       </div>
 
@@ -403,6 +525,9 @@ const EmailSetup = () => {
           })}
         </div>
       </div>
+          </>
+        ),
+      }]} />
     </div>
   );
 };

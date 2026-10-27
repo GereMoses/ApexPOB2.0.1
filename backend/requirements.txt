@@ -55,3 +55,4 @@ zkaccess-c3==0.0.15
 
 # DKIM signing for UI-configured email domains (Settings → Email)
 dkimpy==1.1.5
+dnspython==2.8.0

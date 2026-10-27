@@ -151,3 +151,47 @@ async def send_test(
             "error": result.get("error"),
         },
     }
+
+
+# ── Simple setup: address + app password ───────────────────────────────────
+
+class QuickSetupRequest(BaseModel):
+    email: str = Field(..., description="The mailbox alerts are sent from")
+    app_password: str = Field(..., min_length=4, description="App password for that mailbox")
+    from_name: Optional[str] = Field(None, description="Name shown as the sender")
+
+
+@router.get("/detect")
+async def detect_provider(email: str, current_user=Depends(get_current_user)):
+    """Which mail provider an address belongs to (shown as the admin types)."""
+    from ..services.email_autoconfig import detect
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a full email address")
+    info = await asyncio.to_thread(detect, email.strip())
+    info.pop("candidates", None)
+    return {"success": True, "data": info}
+
+
+@router.post("/quick-setup")
+async def quick_setup(
+    payload: QuickSetupRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Find the right server for the address, prove the login works, then save."""
+    from ..services.email_autoconfig import auto_configure
+    email = payload.email.strip()
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="Enter a full email address")
+    pw = payload.app_password.replace(" ", "")     # Google shows app passwords in groups of 4
+    found = await asyncio.to_thread(auto_configure, email, pw)
+    if not found["ok"]:
+        return {"success": False, "message": found["error"],
+                "data": {k: found.get(k) for k in ("provider", "provider_name", "help_url")}}
+    updated = save_email_settings(db, {
+        "enabled": True, "smtp_host": found["smtp_host"], "smtp_port": found["smtp_port"],
+        "smtp_user": email, "smtp_password": pw, "from_address": email,
+        "from_name": (payload.from_name or "").strip() or "Apex POB", "use_tls": True,
+    }, updated_by=getattr(current_user, "username", None))
+    return {"success": True, "message": f"Connected — alerts will be sent from {email} via {found['provider_name']}.",
+            "data": {**_public_view(updated), "provider_name": found["provider_name"]}}
