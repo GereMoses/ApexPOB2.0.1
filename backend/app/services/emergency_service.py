@@ -606,19 +606,21 @@ class EmergencyService:
                 # was committed above, its own rollback cannot affect it.
                 # Affected/source zones = the fired zone, or (global) every active
                 # OPERATIONAL zone — never a muster point (those are the destinations).
-                mustering_zone_ids = [zone_id] if zone_id else [
-                    z.id for z in db.query(Zone).filter(
-                        Zone.is_active == True,
-                        Zone.zone_type != "MUSTER_POINT",
-                    ).limit(10).all()
-                ]
+                # Every operational zone (no cap — a "site-wide" fire must list the
+                # whole POB; zones with no type set are operational too).
+                mustering_zone_ids = [zone_id] if zone_id else MusteringService.operational_zone_ids(db)
+                from .notify_dispatch import configured_channels
+                live = configured_channels()
                 try:
                     muster_result = MusteringService(db).start_mustering_event(
                         zone_ids=mustering_zone_ids,
                         muster_zone_ids=muster_zone_ids,  # chosen assembly points (optional)
-                        event_type=2,  # Fire
-                        initiated_by=initiated_by or 0,
-                        notes="Fire evacuation — auto-started by fire mode activation",
+                        event_type=3 if "gas" in (reason or "").lower() else 2,  # Gas / Fire
+                        initiated_by=initiated_by,
+                        notes=f"Evacuation — auto-started by fire mode: {reason or ''}".strip(),
+                        # The muster's own alerts: instruction + assembly point to staff and
+                        # visitors, situation to the response team, then the all-clear.
+                        notify_whatsapp=live["whatsapp"], notify_email=live["email"], notify_sms=live["sms"],
                     )
                     mustering_event_id = muster_result["event_id"]
                     # Update the already-committed emergency event with the muster link
@@ -644,13 +646,16 @@ class EmergencyService:
                     except Exception:
                         pass
 
-                # 5. Send notifications
-                notification_count = await self.send_emergency_notifications(
-                    emergency_event.id,
-                    [NotificationChannel.WHATSAPP.value, NotificationChannel.EMAIL.value, NotificationChannel.SMS.value],
-                    db
-                )
-                results["notifications_sent"] = notification_count
+                # 5. Alerts — the muster sent them; only fall back to a general
+                # emergency alert if the muster could not start.
+                if results.get("mustering_started"):
+                    results["notifications_sent"] = muster_result.get("total_expected", 0)
+                else:
+                    results["notifications_sent"] = await self.send_emergency_notifications(
+                        emergency_event.id,
+                        [NotificationChannel.WHATSAPP.value, NotificationChannel.EMAIL.value, NotificationChannel.SMS.value],
+                        db
+                    )
                 
             else:  # clear action
                 # Turn OFF sirens/strobes

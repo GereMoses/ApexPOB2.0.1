@@ -962,3 +962,20 @@ def dispatch_alert(source_type, source_id, people, subject, message, channels=No
     """Send one alert on every configured channel (see notify_dispatch)."""
     from app.services.notify_dispatch import dispatch
     return dispatch(source_type, source_id, people, subject, message, channels, include_responders)
+
+
+@celery_app.task(name="app.services.mustering_celery_tasks.email_muster_list")
+def email_muster_list():
+    """Shift change: email the printable muster list to the response team."""
+    from app.services.muster_list import email_to_responders
+    db = SessionLocal()
+    try:
+        return email_to_responders(db)
+    finally:
+        db.close()
+
+
+celery_app.conf.beat_schedule["email-muster-list-shift-change"] = {
+    "task": "app.services.mustering_celery_tasks.email_muster_list",
+    "schedule": crontab(minute=0, hour="5,17"),   # 06:00 and 18:00 Lagos (beat runs in UTC)
+}

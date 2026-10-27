@@ -971,6 +971,23 @@ class MusteringService:
     
     VISITOR_PREFIX = "VIS-"
 
+    @staticmethod
+    def operational_zone_ids(db) -> List[int]:
+        """Active zones people work/live in — everything except muster points."""
+        return [r[0] for r in db.query(Zone.id).filter(
+            or_(Zone.is_active.is_(None), Zone.is_active == True),  # noqa: E712
+            or_(Zone.zone_type.is_(None), Zone.zone_type != "MUSTER_POINT")).all()]
+
+    def start_site_muster(self, kind: str, initiated_by, muster_zone_ids=None, notes=None) -> Dict[str, Any]:
+        """One-tap response: whole-site muster, every configured alert channel."""
+        from .notify_dispatch import configured_channels
+        etype = {"general": 0, "drill": 1, "fire": 2, "gas": 3, "mandown": 4}.get(kind, 0)
+        live = configured_channels()
+        return self.start_mustering_event(
+            zone_ids=self.operational_zone_ids(self.db), event_type=etype, initiated_by=initiated_by,
+            muster_zone_ids=muster_zone_ids or None, notes=notes,
+            notify_whatsapp=live["whatsapp"], notify_email=live["email"], notify_sms=live["sms"])
+
     def _visitors_on_site(self) -> List[Dict[str, Any]]:
         """Checked-in visitors as muster rows (emp_code VIS-<visit id>)."""
         try:
@@ -1049,8 +1066,7 @@ class MusteringService:
             unlocated = and_(Personnel.is_onboard == True,  # noqa: E712
                              or_(Personnel.current_zone_id.is_(None),
                                  Personnel.current_zone_id.in_(boundary_ids or [-1])))
-            operational = {r[0] for r in self.db.query(Zone.id).filter(
-                or_(Zone.zone_type.is_(None), Zone.zone_type != "MUSTER_POINT")).all()}
+            operational = set(self.operational_zone_ids(self.db))
             covers_site = operational.issubset(set(zone_ids))
 
             if covers_site:

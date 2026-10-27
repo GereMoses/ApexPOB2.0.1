@@ -239,3 +239,38 @@ def test_any_reader_at_a_muster_point_counts_people_safe(db, make_person, make_z
                           {"e": ev, "c": p["emp_code"]}).scalar() == 1
     finally:
         _end(db, ev)
+
+
+@needs_db
+def test_printable_muster_list_has_everyone_on_board_and_visitors(db, make_person, sent):
+    from app.services.muster_list import build_pdf, muster_roster
+    p = make_person(name="Paper Person")
+    _set(db, p["emp_code"], True, None)
+    visit = _visitor_on_site(db, "Paper Visitor")
+    try:
+        staff, visitors = muster_roster(db)
+        assert p["emp_code"] in {s["emp_code"] for s in staff}
+        assert f"VIS-{visit}" in {v["emp_code"] for v in visitors}
+        pdf = build_pdf(db)
+        assert pdf[:4] == b"%PDF" and len(pdf) > 1500
+    finally:
+        db.execute(text("UPDATE vis_visit_log SET status = 1, check_out_time = NOW() WHERE id = :i"), {"i": visit})
+        db.commit()
+
+
+@needs_db
+def test_one_tap_site_muster_alerts_on_configured_channels(db, make_person, make_zone, sent, monkeypatch):
+    import app.services.notify_dispatch as nd
+    from app.services.mustering_service import MusteringService
+    monkeypatch.setattr(nd, "configured_channels", lambda: {"email": True, "whatsapp": True, "sms": False})
+    make_zone()
+    p = make_person()
+    _set(db, p["emp_code"], True, None)
+    res = MusteringService(db).start_site_muster("mandown", 1)
+    try:
+        assert res["total_expected"] >= 1
+        assert db.execute(text("SELECT event_type, notify_channels FROM mustering_event WHERE id = :e"),
+                          {"e": res["event_id"]}).fetchone() == (4, ["whatsapp", "email"])
+        assert any(c["source_type"] == "muster" for c in sent)
+    finally:
+        _end(db, res["event_id"])

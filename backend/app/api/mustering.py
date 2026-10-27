@@ -479,6 +479,44 @@ async def start_mustering_event(
         logger.error(f"Error starting mustering event: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class QuickStartRequest(BaseModel):
+    kind: str = Field(..., pattern="^(general|fire|gas|mandown|drill)$")
+    muster_zone_ids: Optional[List[int]] = None
+    notes: Optional[str] = None
+
+
+@router.post("/api/mustering/events/quick-start")
+async def quick_start_muster(
+    body: QuickStartRequest,
+    current_user: AuthUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """One-tap response. Whole-site muster with every configured alert channel.
+    Fire / gas go through fire mode: fire exits unlocked, sirens on, muster, alerts."""
+    try:
+        if body.kind in ("fire", "gas"):
+            from app.services.emergency_service import emergency_service
+            res = await emergency_service.activate_fire_mode(
+                zone_id=None, location_id=None, muster_zone_ids=body.muster_zone_ids, action="activate",
+                reason=f"{body.kind.upper()} — {body.notes or 'general alarm'}", initiated_by=current_user.id, db=db)
+            ev = db.query(MusteringEvent).filter(MusteringEvent.status == 0).order_by(MusteringEvent.id.desc()).first()
+            return {"success": True, "data": {"event_id": ev.id if ev else None, "fire_mode": res}}
+        res = MusteringService(db).start_site_muster(body.kind, current_user.id, body.muster_zone_ids, body.notes)
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/api/mustering/muster-list.pdf")
+async def muster_list_pdf(current_user: AuthUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Printable muster list (everyone on board + visitors), the paper fallback."""
+    from fastapi.responses import Response
+    from app.services.muster_list import build_pdf
+    pdf = build_pdf(db)
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="muster_list_{datetime.now().strftime("%Y%m%d_%H%M")}.pdf"'})
+
+
 @router.post("/api/mustering/events/{event_id}/end")
 async def end_mustering_event(
     event_id: int,
