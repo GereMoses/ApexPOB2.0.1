@@ -133,9 +133,11 @@ def send_email(
 
     sent, failed = 0, []
     try:
-        with smtplib.SMTP(host, port, timeout=10) as server:
+        # Port 465 = implicit SSL (SMTPS); 587/25 = plain connection upgraded by STARTTLS.
+        conn = smtplib.SMTP_SSL(host, port, timeout=15) if port == 465 else smtplib.SMTP(host, port, timeout=15)
+        with conn as server:
             server.ehlo()
-            if use_tls:
+            if use_tls and port != 465:
                 try:
                     server.starttls()
                     server.ehlo()

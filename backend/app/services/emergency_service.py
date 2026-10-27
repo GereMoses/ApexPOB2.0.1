@@ -647,7 +647,7 @@ class EmergencyService:
                 # 5. Send notifications
                 notification_count = await self.send_emergency_notifications(
                     emergency_event.id,
-                    [NotificationChannel.SMS.value, NotificationChannel.EMAIL.value, NotificationChannel.PA.value],
+                    [NotificationChannel.WHATSAPP.value, NotificationChannel.EMAIL.value, NotificationChannel.SMS.value],
                     db
                 )
                 results["notifications_sent"] = notification_count
@@ -743,82 +743,37 @@ class EmergencyService:
         channels: List[int],
         db: Session
     ) -> int:
-        """Send emergency notifications through multiple channels"""
-        
-        try:
-            emergency_event = db.query(EmergencyEvent).filter(
-                EmergencyEvent.id == emergency_event_id
-            ).first()
-            
-            if not emergency_event:
-                raise ValueError(f"Emergency event {emergency_event_id} not found")
-            
-            # Get notification template
-            template = db.query(EmergencyTemplate).filter(
-                EmergencyTemplate.event_type == emergency_event.event_type,
-                EmergencyTemplate.is_active == True
-            ).first()
-            
-            if not template:
-                template = db.query(EmergencyTemplate).filter(
-                    EmergencyTemplate.event_type == EmergencyEventType.LOCKDOWN.value,
-                    EmergencyTemplate.is_default == True
-                ).first()
-            
-            # Prepare message
-            event_type_name = self.emergency_type_names.get(emergency_event.event_type, "EMERGENCY")
-            message = f"EMERGENCY ALERT: {event_type_name} activated"
-            if emergency_event.reason:
-                message += f". Reason: {emergency_event.reason}"
-            
-            sent_count = 0
-            
-            for channel in channels:
-                try:
-                    # Get recipients based on channel and scope
-                    recipients = await self.get_notification_recipients(
-                        channel, emergency_event.scope, emergency_event.zone_ids, db
-                    )
-                    
-                    for recipient in recipients:
-                        notification = EmergencyNotification(
-                            emergency_event_id=emergency_event_id,
-                            channel=channel,
-                            recipient_type=recipient["type"],
-                            recipient_id=recipient.get("id"),
-                            recipient_addr=recipient["address"],
-                            message=message,
-                            template_vars={
-                                "event_type": event_type_name,
-                                "reason": emergency_event.reason or "",
-                                "timestamp": emergency_event.start_time.isoformat()
-                            }
-                        )
-                        
-                        db.add(notification)
-                        db.flush()
-                        
-                        # Send notification (implement actual sending logic)
-                        send_result = await self.send_notification(
-                            channel, recipient["address"], message
-                        )
-                        
-                        if send_result.get("success"):
-                            notification.status = NotificationStatus.SENT.value
-                            notification.sent_time = datetime.now(timezone.utc)
-                            sent_count += 1
-                        else:
-                            notification.status = NotificationStatus.FAILED.value
-                            notification.error_msg = send_result.get("error", "Send failed")
-                
-                except Exception as e:
-                    logger.error(f"Error sending notifications on channel {channel}: {str(e)}")
-            
-            return sent_count
-            
-        except Exception as e:
-            logger.error(f"Error sending emergency notifications: {str(e)}")
-            raise
+        """Alert everyone on board in scope + the response team, on the requested
+        channels that are configured. Sent in the background and logged per recipient
+        (notify_delivery). Returns the number of people queued.
+
+        Recipients are people ON BOARD — not every active staff record. Staff at home
+        on their off-rotation must not be told to evacuate a site they are not on.
+        """
+        from .notify_dispatch import dispatch_background, onboard_people
+        event = db.query(EmergencyEvent).filter(EmergencyEvent.id == emergency_event_id).first()
+        if not event:
+            raise ValueError(f"Emergency event {emergency_event_id} not found")
+
+        names = {NotificationChannel.SMS.value: "sms", NotificationChannel.EMAIL.value: "email",
+                 NotificationChannel.WHATSAPP.value: "whatsapp"}
+        wanted = [names[c] for c in channels if c in names]
+        if not wanted:
+            return 0
+
+        type_name = self.emergency_type_names.get(event.event_type, "EMERGENCY")
+        zone_ids = event.zone_ids if event.scope == EmergencyScope.ZONE.value else None
+        people = onboard_people(db, zone_ids) if (zone_ids or event.scope != EmergencyScope.ZONE.value) else []
+        instruction = {
+            "FIRE": "Leave the building by the nearest exit and go to your assembly point. Do not use lifts.",
+            "GAS": "Stop work, move upwind and go to your assembly point.",
+            "LOCKDOWN": "Stay where you are, secure the door and wait for instructions.",
+            "MEDICAL": "Keep the area clear for the medical team.",
+        }.get(type_name.upper(), "Follow the instructions of your warden.")
+        text_msg = f"EMERGENCY — {type_name}: {event.reason or 'emergency declared'}. {instruction}"
+        subject = f"EMERGENCY — {type_name}"
+        dispatch_background("emergency", event.id, people, subject, text_msg, wanted, include_responders=True)
+        return len(people)
 
     async def get_notification_recipients(
         self,

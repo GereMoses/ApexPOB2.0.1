@@ -15,7 +15,7 @@ import {
   ApiOutlined, LinkOutlined,
   FilterOutlined, EyeOutlined, CopyOutlined, IdcardOutlined,
   InfoCircleOutlined, ThunderboltOutlined,
-  MailOutlined, MoreOutlined, StopOutlined,
+  MailOutlined, MoreOutlined, StopOutlined, WhatsAppOutlined,
   SearchOutlined, DesktopOutlined, FileTextOutlined,
   BarChartOutlined, AlertOutlined, RightOutlined, GlobalOutlined,
   UploadOutlined, RollbackOutlined, ExclamationCircleOutlined,
@@ -23,6 +23,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 import EmailSetup from '../Emergency/EmailSetup';
+import AlertsTab from './AlertsTab';
 import DatabaseTab from './DatabaseTab';
 import AttendanceIdsDrawer from './AttendanceIdsDrawer';
 import dayjs from 'dayjs';
@@ -3567,6 +3568,7 @@ const Settings = () => {
     { key: 'roles',     label: <Space><LockOutlined />Roles & Permissions</Space>, children: <RolesTab /> },
     { key: 'company',   label: <Space><BankOutlined />Company</Space>,             children: <CompanyTab /> },
     { key: 'email',     label: <Space><MailOutlined />Email</Space>,               children: <EmailSetup /> },
+    { key: 'alerts',    label: <Space><WhatsAppOutlined />WhatsApp &amp; Alerts</Space>, children: <AlertsTab /> },
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'sessions',  label: <Space><DesktopOutlined />Active Sessions</Space>,  children: <SessionsTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },

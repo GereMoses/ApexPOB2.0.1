@@ -577,6 +577,7 @@ def check_missing_escalations(self):
         active_events = db.query(MusteringEvent).filter(MusteringEvent.status == 0).all()
 
         total_notified = 0
+        new_by_level = {}
         for event in active_events:
             start = event.start_time
             if hasattr(start, 'tzinfo') and start.tzinfo is not None:
@@ -644,18 +645,10 @@ def check_missing_escalations(self):
                         "emp_code": log.emp_code,
                         "level": level,
                     })
-                    # For level 2+ (SEARCH_ORDERED and above) dispatch external alerts
-                    if level >= 2:
-                        recipients_sms = get_emergency_recipients(event.zone_id, 'sms')
-                        if recipients_sms:
-                            send_sms_notification.delay(message=msg, recipients=recipients_sms)
-                        recipients_email = get_emergency_recipients(event.zone_id, 'email')
-                        if recipients_email:
-                            send_email_notification.delay(
-                                subject=f"Muster Escalation [{notif_type}] — Event {event.id}",
-                                message=msg,
-                                recipients=recipients_email,
-                            )
+                    # External alert: ONE message per event per level to the response
+                    # team (not one per missing person), sent after the loop.
+                    new_by_level.setdefault((event, level, notif_type, threshold_min), []).append(
+                        log.emp_name or log.emp_code)
 
                     record = MusteringEscalationRecord(
                         event_id=event.id,
@@ -667,6 +660,19 @@ def check_missing_escalations(self):
                     total_notified += 1
 
         db.commit()
+
+        from app.services.notify_dispatch import dispatch_background
+        for (event, level, notif_type, mins), names in new_by_level.items():
+            label = {1: "STILL MISSING", 2: "SEARCH NEEDED", 3: "CRITICAL", 4: "MAYDAY"}.get(level, notif_type)
+            head = (f"{'DRILL — ' if event.event_type == 1 else ''}MUSTER {label} — "
+                    f"{len(names)} unaccounted after {mins} min")
+            body = (f"{head}: " + ", ".join(names[:20]) + ("…" if len(names) > 20 else "") + ". "
+                    + {1: "Wardens: check your areas and radios.",
+                       2: "Deploy the search team to last known locations (ApexPOB → Missing persons).",
+                       3: "Escalate to the OIM / site manager now.",
+                       4: "Start search and rescue per the emergency response plan."}.get(level, ""))
+            dispatch_background("muster_escalation", event.id, [], head, body,
+                                channels=event.notify_channels or None, include_responders=True)
         logger.info(f"check_missing_escalations: {len(active_events)} active events, {total_notified} new escalations fired")
 
     except Exception as exc:
@@ -927,7 +933,7 @@ celery_app.conf.beat_schedule = {
     },
     'check-missing-escalations': {
         'task': 'app.services.mustering_celery_tasks.check_missing_escalations',
-        'schedule': crontab(minute='*/5'),
+        'schedule': crontab(minute='*'),   # every minute — a 10-min threshold must not fire at 14
     },
     'check-overdue-journeys': {
         'task': 'app.services.mustering_celery_tasks.check_overdue_journeys',
@@ -949,3 +955,10 @@ celery_app.conf.beat_schedule = {
 }
 
 import os
+
+
+@celery_app.task(name="app.services.mustering_celery_tasks.dispatch_alert")
+def dispatch_alert(source_type, source_id, people, subject, message, channels=None, include_responders=True):
+    """Send one alert on every configured channel (see notify_dispatch)."""
+    from app.services.notify_dispatch import dispatch
+    return dispatch(source_type, source_id, people, subject, message, channels, include_responders)

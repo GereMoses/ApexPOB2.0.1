@@ -161,7 +161,7 @@ const Dashboard = ({ statusData, isLoading, refetch }) => {
       qc.invalidateQueries(['emergency-status']);
       setLockdownOpen(false); form.resetFields();
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Lockdown failed'),
+    onError: (e) => message.error(e?.message || 'Lockdown failed'),
   });
 
   const fireModeM = useMutation({
@@ -171,7 +171,7 @@ const Dashboard = ({ statusData, isLoading, refetch }) => {
       qc.invalidateQueries(['emergency-status']);
       setFireOpen(false);
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Fire mode failed'),
+    onError: (e) => message.error(e?.message || 'Fire mode failed'),
   });
 
   const d = statusData || {};
@@ -461,7 +461,7 @@ const Lockdown = () => {
       qc.invalidateQueries(['emergency-status']);
       form.resetFields(); setScopeVal('global');
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Action failed'),
+    onError: (e) => message.error(e?.message || 'Action failed'),
   });
 
   const handleSubmit = (values) => {
@@ -635,7 +635,7 @@ const FireMode = () => {
       message.success(v.action === 'activate' ? 'Fire mode activated — evacuation in progress' : 'All Clear issued — fire mode deactivated');
       qc.invalidateQueries(['emergency-status']);
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Action failed'),
+    onError: (e) => message.error(e?.message || 'Action failed'),
   });
 
   const confirmFire = (zoneId, zoneName) => {
@@ -801,22 +801,22 @@ const Notifications = () => {
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const [sendOpen, setSendOpen] = useState(false);
-  const [activeChannels, setActiveChannels] = useState({ email: true, push: true });
+  const [activeChannels, setActiveChannels] = useState({ whatsapp: true, email: true });
 
   const { data: notifData, isLoading, refetch } = useQuery({
     queryKey: ['emergency-notifications'],
     queryFn: () => apiService.get('/api/emergency/notifications/'),
   });
-  const notifications = notifData?.data?.data || notifData?.data || [];
+  const notifications = notifData?.data || [];
 
   const sendM = useMutation({
     mutationFn: (body) => apiService.post('/api/emergency/notify/', body),
     onSuccess: (r) => {
-      message.success(`Notification broadcast to ${r.data?.data?.notifications_sent || 0} recipients`);
+      message.success(r?.data?.message || 'Alert sent', 8);
       qc.invalidateQueries(['emergency-notifications']);
-      setSendOpen(false); form.resetFields(); setActiveChannels({ email: true, push: true });
+      setSendOpen(false); form.resetFields(); setActiveChannels({ whatsapp: true, email: true });
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Send failed'),
+    onError: (e) => message.error(e?.message || 'Send failed'),
   });
 
   const NOTIF_STATUS = {
@@ -824,14 +824,19 @@ const Notifications = () => {
     SENT:      { color: '#096dd9', bg: '#e6f7ff', border: '#91d5ff' },
     DELIVERED: { color: '#389e0d', bg: '#f6ffed', border: '#b7eb8f' },
     FAILED:    { color: '#cf1322', bg: '#fff1f0', border: '#ffa39e' },
+    SKIPPED:   { color: '#8c8c8c', bg: '#fafafa', border: '#d9d9d9' },
   };
+  const SOURCE = { emergency: 'Emergency', muster: 'Muster', muster_all_clear: 'All clear',
+    muster_escalation: 'Escalation', panic: 'Panic', test: 'Test' };
 
   const cols = [
     { title: 'Time', dataIndex: 'created_at', width: 150,
-      render: v => <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#595959' }}>{v ? new Date(v).toLocaleString() : '—'}</span> },
+      render: v => <span style={{ fontSize: 11, fontFamily: 'monospace', color: '#595959' }}>{v ? String(v).slice(0, 16) : '—'}</span> },
+    { title: 'Alert', dataIndex: 'source_type', width: 110,
+      render: v => <Tag style={{ marginInlineEnd: 0 }}>{SOURCE[v] || v}</Tag> },
     { title: 'Channel', dataIndex: 'channel_name', width: 110,
       render: v => {
-        const ch = Object.values(CHANNEL_CFG).find(c => c.label === v) || { color: '#595959', bg: '#f5f5f5', border: '#d9d9d9' };
+        const ch = Object.values(CHANNEL_CFG).find(c => c.label.toUpperCase() === String(v).toUpperCase()) || { color: '#595959', bg: '#f5f5f5', border: '#d9d9d9' };
         return (
           <div style={{ display: 'inline-flex', background: ch.bg, border: `1px solid ${ch.border}`, borderRadius: 16, padding: '2px 10px', color: ch.color, fontWeight: 700, fontSize: 11 }}>
             {v}
@@ -839,19 +844,25 @@ const Notifications = () => {
         );
       }},
     { title: 'Status', dataIndex: 'status_name', width: 110,
-      render: v => {
+      render: (v, r) => {
         const s = NOTIF_STATUS[v] || { color: '#595959', bg: '#f5f5f5', border: '#d9d9d9' };
-        return <div style={{ display: 'inline-flex', background: s.bg, border: `1px solid ${s.border}`, borderRadius: 16, padding: '2px 10px', color: s.color, fontWeight: 700, fontSize: 11 }}>{v}</div>;
+        return (
+          <Tooltip title={r.error_msg || ''}>
+            <div style={{ display: 'inline-flex', background: s.bg, border: `1px solid ${s.border}`, borderRadius: 16, padding: '2px 10px', color: s.color, fontWeight: 700, fontSize: 11 }}>{v}</div>
+          </Tooltip>
+        );
       }},
     { title: 'Recipient', dataIndex: 'recipient_addr', ellipsis: true,
-      render: v => <span style={{ fontSize: 12 }}>{v || '—'}</span> },
+      render: (v, r) => <span style={{ fontSize: 12 }}><b>{r.recipient_name}</b>{r.recipient_name ? ' · ' : ''}{v || '—'}</span> },
+    { title: 'Why not sent', dataIndex: 'error_msg', ellipsis: true,
+      render: v => <span style={{ fontSize: 12, color: '#b45309' }}>{v || ''}</span> },
     { title: 'Message', dataIndex: 'message', ellipsis: true,
       render: v => <span style={{ fontSize: 12, color: '#595959' }}>{v}</span> },
   ];
 
   const sent = notifications.filter(n => ['SENT', 'DELIVERED'].includes(n.status_name)).length;
   const failed = notifications.filter(n => n.status_name === 'FAILED').length;
-  const pending = notifications.filter(n => n.status_name === 'PENDING').length;
+  const pending = notifications.filter(n => n.status_name === 'SKIPPED').length;
 
   return (
     <div style={{ padding: '24px 28px' }}>
@@ -869,9 +880,9 @@ const Notifications = () => {
 
       <Row gutter={16} style={{ marginBottom: 24 }}>
         {[
-          { label: 'Total Sent', value: notifications.length, from: '#096dd9', to: '#003a8c' },
-          { label: 'Delivered', value: sent, from: '#389e0d', to: '#135200' },
-          { label: 'Pending', value: pending, from: '#d48806', to: '#874d00' },
+          { label: 'Messages', value: notifications.length, from: '#096dd9', to: '#003a8c' },
+          { label: 'Sent', value: sent, from: '#389e0d', to: '#135200' },
+          { label: 'Skipped (channel not set up)', value: pending, from: '#8c8c8c', to: '#434343' },
           { label: 'Failed', value: failed, from: '#cf1322', to: '#820014' },
         ].map(s => (
           <Col key={s.label} xs={12} sm={6}><GradStat {...s} /></Col>
@@ -896,7 +907,7 @@ const Notifications = () => {
             </div>
             <div>
               <div style={{ fontWeight: 700, fontSize: 15 }}>Send Emergency Notification</div>
-              <div style={{ fontSize: 11, color: '#8c8c8c', fontWeight: 400 }}>Broadcast to all personnel</div>
+              <div style={{ fontSize: 11, color: '#8c8c8c', fontWeight: 400 }}>Everyone on board + the emergency response team</div>
             </div>
           </div>
         }
@@ -925,7 +936,7 @@ const Notifications = () => {
           </Form.Item>
           <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12, color: '#141414' }}>Channels</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
-            {Object.entries(CHANNEL_CFG).map(([key, ch]) => (
+            {Object.entries(CHANNEL_CFG).filter(([key]) => ['whatsapp', 'email', 'sms'].includes(key)).map(([key, ch]) => (
               <div
                 key={key}
                 onClick={() => setActiveChannels(p => ({ ...p, [key]: !p[key] }))}
@@ -962,21 +973,21 @@ const Devices = () => {
     queryKey: ['emergency-devices'],
     queryFn: () => apiService.get('/api/emergency/devices/'),
   });
-  const devices = data?.data?.data || data?.data || [];
+  const devices = data?.data || [];
 
   const toggleM = useMutation({
     mutationFn: ({ id, status }) => apiService.post(`/api/emergency/devices/${id}/toggle/?status=${status}`),
     onSuccess: () => { message.success('Device updated'); qc.invalidateQueries(['emergency-devices']); },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Toggle failed'),
+    onError: (e) => message.error(e?.message || 'Toggle failed'),
   });
 
   const testAllM = useMutation({
     mutationFn: () => apiService.post('/api/emergency/devices/test-all/'),
     onSuccess: (r) => {
-      const d = r.data?.data;
+      const d = r?.data;
       message.success(`Test complete — ${d?.successful_tests}/${d?.total_devices} devices responded`);
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Test failed'),
+    onError: (e) => message.error(e?.message || 'Test failed'),
   });
 
   const on = devices.filter(d => d.status === 1).length;
@@ -1107,14 +1118,14 @@ const Triggers = () => {
       qc.invalidateQueries(['emergency-status', 'em-triggers-audit']);
       setPanicOpen(false); form.resetFields();
     },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Panic trigger failed'),
+    onError: (e) => message.error(e?.message || 'Panic trigger failed'),
   });
 
   const { data: auditData } = useQuery({
     queryKey: ['em-triggers-audit'],
     queryFn: () => apiService.get('/api/emergency/audit/?limit=20'),
   });
-  const recentTriggers = auditData?.data?.data || [];
+  const recentTriggers = auditData?.data || [];
 
   return (
     <div style={{ padding: '24px 28px' }}>
@@ -1258,18 +1269,18 @@ const Plans = () => {
     queryKey: ['emergency-plans'],
     queryFn: () => apiService.get('/api/emergency/plans/'),
   });
-  const plans = data?.data?.data || data?.data || [];
+  const plans = data?.data || [];
 
   const createM = useMutation({
     mutationFn: (body) => apiService.post('/api/emergency/plans/', body),
     onSuccess: () => { message.success('Emergency plan created'); qc.invalidateQueries(['emergency-plans']); setCreateOpen(false); form.resetFields(); },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Create failed'),
+    onError: (e) => message.error(e?.message || 'Create failed'),
   });
 
   const deleteM = useMutation({
     mutationFn: (id) => apiService.delete(`/api/emergency/plans/${id}`),
     onSuccess: () => { message.success('Plan removed'); qc.invalidateQueries(['emergency-plans']); },
-    onError: (e) => message.error(e?.response?.data?.detail || 'Delete failed'),
+    onError: (e) => message.error(e?.message || 'Delete failed'),
   });
 
   const planColors = [
@@ -1465,7 +1476,7 @@ const AuditTrail = () => {
     queryKey: ['em-audit', qParams.toString()],
     queryFn: () => apiService.get(`/api/emergency/audit/?${qParams}`),
   });
-  const rows = data?.data?.data || [];
+  const rows = data?.data || [];
 
   const exportCSV = () => {
     const hdr = ['Event ID','Type','Status','Start','End','Initiated By','Trigger','Reason','Scope'];
@@ -1666,7 +1677,7 @@ const EmergencyManagement = ({ embedded = false }) => {
     queryFn: () => apiService.get('/api/emergency/status/'),
     refetchInterval: 30000,
   });
-  const d = statusData?.data?.data || {};
+  const d = statusData?.data || {};
   const isEmergency = d.system_status === 'EMERGENCY';
 
   useEffect(() => {

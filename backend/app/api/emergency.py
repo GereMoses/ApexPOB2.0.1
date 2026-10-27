@@ -378,12 +378,11 @@ async def send_emergency_notification(
         unconfigured = sorted(
             c for c in requested if c in cfg and not cfg[c]
         )
-        message = f"Emergency notification sent to {sent_count} recipients"
-        if sent_count == 0 and unconfigured:
-            message += (f". Note: {', '.join(unconfigured)} "
-                        f"{'is' if len(unconfigured) == 1 else 'are'} not configured on the server.")
-        elif sent_count == 0:
-            message += ". No recipients had a contact address for the selected channels."
+        message = (f"Alert is going out to {sent_count} people on board and the response team — "
+                   f"see the delivery log for each message")
+        if unconfigured:
+            message += (f". Not set up: {', '.join(unconfigured)} "
+                        f"(Settings → {'Email' if unconfigured == ['email'] else 'WhatsApp & Alerts'}).")
 
         return {
             "success": True,
@@ -481,51 +480,33 @@ async def send_notification_test(
 @router.get("/notifications/")
 async def list_emergency_notifications(
     event_id: Optional[int] = Query(None, description="Filter by emergency event ID"),
-    status: Optional[int] = Query(None, description="Filter by status"),
+    status: Optional[str] = Query(None, description="SENT | FAILED | SKIPPED"),
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    List emergency notifications
-    """
-    try:
-        query = db.query(EmergencyNotification)
-        
-        if event_id is not None:
-            query = query.filter(EmergencyNotification.emergency_event_id == event_id)
-        
-        if status is not None:
-            query = query.filter(EmergencyNotification.status == status)
-        
-        notifications = query.order_by(EmergencyNotification.created_at.desc()).limit(100).all()
-        
-        return {
-            "success": True,
-            "data": [
-                {
-                    "id": n.id,
-                    "emergency_event_id": n.emergency_event_id,
-                    "channel": n.channel,
-                    "channel_name": ["SMS", "EMAIL", "WHATSAPP", "PUSH", "PA", "SIREN"][n.channel],
-                    "recipient_type": n.recipient_type,
-                    "recipient_addr": n.recipient_addr,
-                    "message": n.message,
-                    "status": n.status,
-                    "status_name": ["PENDING", "SENT", "FAILED", "DELIVERED"][n.status],
-                    "sent_time": n.sent_time.isoformat() if n.sent_time else None,
-                    "error_msg": n.error_msg,
-                    "created_at": n.created_at.isoformat()
-                }
-                for n in notifications
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"Error listing emergency notifications: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    """Every alert delivery (emergency, muster, all-clear, escalation, panic, test) —
+    one row per recipient × channel, newest first."""
+    from sqlalchemy import text as _t
+    where, params = ["TRUE"], {}
+    if event_id is not None:
+        where.append("source_type = 'emergency' AND source_id = :eid"); params["eid"] = event_id
+    if status:
+        where.append("status = :st"); params["st"] = str(status).upper()
+    rows = db.execute(_t(f"""
+        SELECT id, source_type, source_id, channel, recipient_name, address, status, error, subject, message,
+               created_at AT TIME ZONE 'Africa/Lagos' AS created_at
+        FROM notify_delivery WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT 500
+    """), params).mappings().all()
+    return {"success": True, "data": [{
+        "id": r["id"], "source_type": r["source_type"], "source_id": r["source_id"],
+        "emergency_event_id": r["source_id"] if r["source_type"] == "emergency" else None,
+        "channel_name": r["channel"].upper(), "recipient_name": r["recipient_name"],
+        "recipient_addr": r["address"], "message": r["message"], "subject": r["subject"],
+        "status_name": r["status"], "error_msg": r["error"],
+        "sent_time": r["created_at"].isoformat(sep=" ", timespec="seconds") if r["status"] == "SENT" else None,
+        "created_at": r["created_at"].isoformat(sep=" ", timespec="seconds"),
+    } for r in rows]}
+
 
 # Siren/Strobe Control Endpoints
 
@@ -768,7 +749,17 @@ async def panic_button_trigger(
                     )
         
         db.commit()
-        
+
+        # A panic with nobody told is useless: alert the response team immediately.
+        from app.services.notify_dispatch import dispatch_background
+        who = getattr(current_user, "first_name", None) or current_user.username
+        dispatch_background(
+            "panic", emergency_event.id, [],
+            f"PANIC ALARM — {request.location or 'location not given'}",
+            f"PANIC ALARM raised by {who} at {request.location or 'unknown location'}"
+            f"{': ' + request.reason if request.reason else ''}. Respond now and confirm in ApexPOB.",
+            include_responders=True)
+
         return {
             "success": True,
             "data": {
@@ -848,20 +839,30 @@ async def emergency_trigger_webhook(
         db.add(emergency_event)
         db.flush()
         
-        # Execute template if provided
-        if template_id:
-            template = db.query(EmergencyTemplate).filter(
-                EmergencyTemplate.id == template_id,
-                EmergencyTemplate.is_active == True
-            ).first()
-            
-            if template:
-                # Execute template actions
-                for action in template.actions:
-                    # Implement action execution based on type
-                    pass
-        
         db.commit()
+
+        # Respond — before this, a fire-panel alarm only wrote a row and did nothing.
+        #   fire / gas → fire mode: unlock fire exits, sirens, site-wide muster, alerts
+        #   panic / medical → alert the response team (and everyone on board for panic)
+        response: Dict[str, Any] = {}
+        try:
+            if trigger_type.lower() in ("fire", "gas"):
+                emergency_event.status = EmergencyStatus.RESOLVED.value  # fire mode raises its own event
+                db.commit()
+                response = await emergency_service.activate_fire_mode(
+                    zone_id=None, location_id=None, muster_zone_ids=None, action="activate",
+                    reason=f"{trigger_type.upper()} alarm from {source}" + (f" at {location}" if location else ""),
+                    initiated_by=None, db=db)
+            else:
+                from app.services.notify_dispatch import dispatch_background
+                what = "PANIC ALARM" if trigger_type.lower() == "panic" else "MEDICAL EMERGENCY"
+                dispatch_background("emergency", emergency_event.id, [], f"{what} — {location or source}",
+                                    f"{what} from {source}" + (f" at {location}" if location else "")
+                                    + ". Respond now and confirm in ApexPOB.", include_responders=True)
+                response = {"alerted": "response team"}
+        except Exception as resp_err:
+            logger.error(f"External trigger response failed: {resp_err}")
+            response = {"error": str(resp_err)}
         
         return {
             "success": True,
@@ -869,6 +870,7 @@ async def emergency_trigger_webhook(
                 "emergency_event_id": emergency_event.id,
                 "trigger_type": trigger_type,
                 "source": source,
+                "response": response,
                 "message": "Emergency trigger processed successfully"
             }
         }

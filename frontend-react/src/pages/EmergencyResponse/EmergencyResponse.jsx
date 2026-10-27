@@ -20,7 +20,7 @@ const EmergencyResponse = () => {
     queryFn:  () => apiService.get('/api/emergency/status/'),
     refetchInterval: 30000,
   });
-  const d = statusData?.data?.data || {};
+  const d = statusData?.data || {};
   const isEmergency = d.system_status === 'EMERGENCY';
 
   const { data: musterRaw, refetch: refetchMuster } = useQuery({

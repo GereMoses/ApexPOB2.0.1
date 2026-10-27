@@ -10,6 +10,11 @@ from typing import List, Dict, Any, Optional
 import logging
 import json
 
+
+def _site_tz():
+    from .attendance_calculation_service import SITE_TZ
+    return SITE_TZ
+
 from app.models.biotime_models import (
     MusteringEvent, MusteringLog, MusteringExpected,
     MusteringSearchSweep, MusteringEscalationRecord,
@@ -37,6 +42,7 @@ class MusteringService:
         delta_safe: int = 0,
         delta_missing: int = 0,
         delta_injured: int = 0,
+        delta_expected: int = 0,
     ) -> None:
         """Atomically adjust mustering event counters in a single SQL UPDATE.
 
@@ -51,6 +57,7 @@ class MusteringService:
                 total_safe=MusteringEvent.total_safe + delta_safe,
                 total_missing=MusteringEvent.total_missing + delta_missing,
                 total_injured=MusteringEvent.total_injured + delta_injured,
+                total_expected=MusteringEvent.total_expected + delta_expected,
             )
         )
 
@@ -146,6 +153,8 @@ class MusteringService:
                 total_missing=total_expected,
                 total_injured=0,
                 notes=notes,
+                notify_channels=[c for c, on in (("whatsapp", notify_whatsapp), ("email", notify_email),
+                                                 ("sms", notify_sms)) if on],
             )
 
             self.db.add(event)
@@ -347,6 +356,7 @@ class MusteringService:
                     except Exception:
                         pass
 
+            self._send_all_clear(event, headcount)
             logger.info(f"Mustering event {event_id} ended")
             
             return {
@@ -517,8 +527,12 @@ class MusteringService:
                 )
                 self.db.add(log)
                 
-                # Update event counts atomically
-                self._adjust_event_counters(event.id, delta_safe=+1, delta_missing=-1)
+                # Not on the expected roster (location unknown, visitor badge, new
+                # starter…) but standing at the assembly point: count them as safe AND
+                # add them to the expected total. Taking one off "missing" here — as
+                # before — made the missing count drop for someone who was never
+                # missing, hiding a genuinely missing person.
+                self._adjust_event_counters(event.id, delta_safe=+1, delta_expected=+1)
 
             self.db.commit()
 
@@ -979,34 +993,29 @@ class MusteringService:
                     .all()
                 )
 
-            rows = _build_rows(Personnel.current_zone_id.in_(zone_ids))
-            used_source = "live_location"
+            # Who counts as "on site but not pinned to a zone": on board with no zone,
+            # or last seen only at the site boundary (gate) level.
+            boundary_ids = [r[0] for r in self.db.query(Zone.id).filter(Zone.is_site_boundary.is_(True)).all()]
+            unlocated = and_(Personnel.is_onboard == True,  # noqa: E712
+                             or_(Personnel.current_zone_id.is_(None),
+                                 Personnel.current_zone_id.in_(boundary_ids or [-1])))
+            operational = {r[0] for r in self.db.query(Zone.id).filter(
+                or_(Zone.zone_type.is_(None), Zone.zone_type != "MUSTER_POINT")).all()}
+            covers_site = operational.issubset(set(zone_ids))
 
+            if covers_site:
+                # Site-wide muster: the muster list IS the POB list — everyone on board,
+                # plus anyone a reader still places in a zone.
+                rows = _build_rows(or_(Personnel.is_onboard == True,  # noqa: E712
+                                       Personnel.current_zone_id.in_(zone_ids)))
+                used_source = "site_pob"
+            else:
+                # Area muster: people a reader places in the area, plus on-board people
+                # whose location is unknown — they could be in the area, so they are
+                # never left off the list.
+                rows = _build_rows(or_(Personnel.current_zone_id.in_(zone_ids), unlocated))
+                used_source = "area"
             used_fallback = False
-            if not rows:
-                # Tier 2 — administrative roster (works without live readers).
-                assigned_pids = [
-                    r[0] for r in self.db.query(ZonePersonnelAssignment.personnel_id)
-                    .filter(
-                        ZonePersonnelAssignment.zone_id.in_(zone_ids),
-                        ZonePersonnelAssignment.status == "ACTIVE",
-                        ZonePersonnelAssignment.unassigned_at.is_(None),
-                    ).distinct().all()
-                ]
-                if assigned_pids:
-                    rows = _build_rows(Personnel.id.in_(assigned_pids))
-                    if rows:
-                        used_source = "zone_assignment"
-
-            if not rows:
-                logger.warning(
-                    "Zones %s: no personnel by current_zone_id or zone assignment — "
-                    "falling back to all is_onboard=True personnel",
-                    zone_ids,
-                )
-                rows = _build_rows(Personnel.is_onboard == True)
-                used_fallback = True
-                used_source = "all_onboard_fallback"
 
             expected = []
             for person, bio_emp, zone in rows:
@@ -1273,90 +1282,71 @@ class MusteringService:
             for s in sweeps
         ]
 
+    def _event_words(self, event) -> Dict[str, str]:
+        mp_ids = event.muster_zone_ids or ([event.muster_zone_id] if event.muster_zone_id else [])
+        names = {z.id: z.name for z in self.db.query(Zone).filter(
+            Zone.id.in_(list(mp_ids) + list(event.zone_ids or []))).all()} if (mp_ids or event.zone_ids) else {}
+        return {
+            "type": self._EVENT_TYPE_LABELS.get(event.event_type, "Emergency"),
+            "points": ", ".join(names[z] for z in mp_ids if z in names) or "your nearest assembly point",
+            "zones": ", ".join(names[z] for z in (event.zone_ids or []) if z in names) or "site",
+        }
+
     def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool) -> Dict[str, Any]:
-        """Alert the expected personnel to proceed to their assembly point.
+        """Alert the expected people and the response team (background, logged).
 
-        All three channels go through the SHARED env-configured senders
-        (notify_email / notify_sms / notify_whatsapp), so one set of gateway env
-        vars turns them on everywhere. Each returns {"sent": N, ...} and never
-        raises — a mail/gateway outage must not fail the muster it belongs to.
+        Personnel get the instruction; the response team gets the situation. Both
+        go out on every requested channel that is configured — see notify_dispatch.
         """
-        result: Dict[str, Any] = {"email": None, "sms": None, "whatsapp": None}
+        from .notify_dispatch import dispatch_background, people_from_personnel
+        channels = [c for c, on in (("whatsapp", whatsapp), ("email", email), ("sms", sms)) if on]
         try:
-            from .notify_email import send_email, smtp_configured
-            from .notify_sms import send_sms, sms_configured
-            from .notify_whatsapp import send_whatsapp, whatsapp_configured
-
             event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
-            if not event:
-                return result
-
-            mp_ids = event.muster_zone_ids or ([event.muster_zone_id] if event.muster_zone_id else [])
-            mp_names = [z.name for z in self.db.query(Zone).filter(Zone.id.in_(mp_ids)).all()] if mp_ids else []
-            where = (" — nearest: " + ", ".join(mp_names)) if mp_names else ""
-            etype = {0: "Roll call", 1: "Drill", 2: "FIRE", 3: "GAS", 4: "Man-down"}.get(event.event_type, "Muster")
-
-            # Resolve the expected roster once, then pull each contact channel from it.
-            expected = self._calculate_expected_personnel(event.zone_ids or [])
-            codes = [e["emp_code"] for e in expected if e.get("emp_code")]
-
-            text = f"{etype} muster activated. Proceed to your assembly point{where} and scan in to be marked safe."
-
-            if email:
-                if not smtp_configured():
-                    logger.warning("Muster %s: email requested but SMTP not configured — nothing sent", event_id)
-                    result["email"] = {"sent": 0, "error": "SMTP not configured"}
-                else:
-                    emails = []
-                    if codes:
-                        emails = [
-                            r[0] for r in self.db.query(Personnel.email).filter(
-                                Personnel.emp_code.in_(codes),
-                                Personnel.email.isnot(None), Personnel.email != "",
-                            ).all()
-                        ]
-                    emails = sorted(set(emails))
-                    subject = f"⚠ {etype} muster activated — proceed to assembly point"
-                    html = (f"<p><b>{etype} muster activated.</b></p>"
-                            f"<p>Proceed immediately to your assembly point{where}, and scan in "
-                            f"at the muster reader so you are accounted for as safe.</p>")
-                    result["email"] = send_email(emails, subject, html, body_text=text)
-                    logger.info("Muster %s email notify: %s (%d recipients)", event_id, result["email"], len(emails))
-
-            if sms or whatsapp:
-                # Both channels use the same phone list (phone, then emergency contact).
-                phones = []
-                if codes:
-                    phones = [
-                        (r[0] or r[1]) for r in self.db.query(
-                            Personnel.phone, Personnel.emergency_contact_phone
-                        ).filter(
-                            Personnel.emp_code.in_(codes),
-                            or_(
-                                and_(Personnel.phone.isnot(None), Personnel.phone != ""),
-                                and_(Personnel.emergency_contact_phone.isnot(None),
-                                     Personnel.emergency_contact_phone != ""),
-                            ),
-                        ).all()
-                    ]
-                phones = sorted({p.strip() for p in phones if p and p.strip()})
-
-                if sms:
-                    if not sms_configured():
-                        logger.warning("Muster %s: SMS requested but no SMS gateway configured", event_id)
-                        result["sms"] = {"sent": 0, "error": "SMS gateway not configured"}
-                    else:
-                        result["sms"] = send_sms(phones, text)
-                        logger.info("Muster %s SMS notify: %s (%d recipients)", event_id, result["sms"], len(phones))
-
-                if whatsapp:
-                    if not whatsapp_configured():
-                        logger.warning("Muster %s: WhatsApp requested but no provider configured", event_id)
-                        result["whatsapp"] = {"sent": 0, "error": "WhatsApp not configured"}
-                    else:
-                        result["whatsapp"] = send_whatsapp(phones, text)
-                        logger.info("Muster %s WhatsApp notify: %s (%d recipients)", event_id, result["whatsapp"], len(phones))
+            if not event or not channels:
+                return {}
+            w = self._event_words(event)
+            drill = event.event_type == 1
+            codes = [r[0] for r in self.db.query(MusteringLog.emp_code).filter(MusteringLog.event_id == event_id).all()]
+            people = people_from_personnel(self.db, emp_codes=codes)
+            head = f"{'DRILL — ' if drill else ''}{w['type'].upper()} MUSTER"
+            to_staff = (f"{head}: Stop work and go to {w['points']} now. Scan your badge at the muster "
+                        f"reader so you are counted safe. Do not use lifts. Follow your warden.")
+            to_team = (f"{head} started at {datetime.now(_site_tz()).strftime('%H:%M')} — area: {w['zones']}. "
+                       f"{event.total_expected} people expected at {w['points']}. Track live in ApexPOB → Emergency & Mustering.")
+            staff = dispatch_background("muster", event_id, people, f"{head} — go to {w['points']}", to_staff,
+                                        channels, include_responders=False)
+            team = dispatch_background("muster", event_id, [], f"{head} started — {event.total_expected} expected",
+                                       to_team, channels, include_responders=True)
+            return {"channels": channels, "personnel": len(people), "queued": staff, "team": team}
         except Exception as e:  # noqa: BLE001 — notifications must never fail the muster
             logger.error("Muster %s notification error: %s", event_id, e)
-            result["error"] = str(e)
-        return result
+            return {"error": str(e)}
+
+    def _send_all_clear(self, event, headcount: Dict[str, Any]) -> None:
+        """When a notified muster ends: tell staff it's over, give the team the result."""
+        from .notify_dispatch import dispatch_background, people_from_personnel
+        channels = list(event.notify_channels or [])
+        if not channels:
+            return
+        try:
+            w = self._event_words(event)
+            codes = [r[0] for r in self.db.query(MusteringLog.emp_code).filter(MusteringLog.event_id == event.id).all()]
+            missing = [r[0] or r[1] for r in self.db.query(MusteringLog.emp_name, MusteringLog.emp_code)
+                       .filter(MusteringLog.event_id == event.id, MusteringLog.status == 0).limit(15).all()]
+            def _n(d):
+                return d.replace(tzinfo=None) if d is not None and d.tzinfo else d
+            mins = int((_n(event.end_time) - _n(event.start_time)).total_seconds() // 60) \
+                if event.end_time and event.start_time else 0
+            dispatch_background("muster_all_clear", event.id, people_from_personnel(self.db, emp_codes=codes),
+                                f"ALL CLEAR — {w['type']} muster ended",
+                                f"ALL CLEAR: the {w['type'].lower()} muster has ended. Return to normal duties as "
+                                f"directed by your supervisor.", channels, include_responders=False)
+            summary = (f"ALL CLEAR — {w['type']} muster closed after {mins} min. "
+                       f"Safe {headcount.get('total_safe', 0)} / expected {headcount.get('total_expected', 0)}; "
+                       f"injured {headcount.get('total_injured', 0)}; unaccounted {headcount.get('total_missing', 0)}.")
+            if missing:
+                summary += " Unaccounted: " + ", ".join(missing) + ("…" if len(missing) == 15 else "")
+            dispatch_background("muster_all_clear", event.id, [], f"Muster closed — {headcount.get('total_missing', 0)} unaccounted",
+                                summary, channels, include_responders=True)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Muster %s all-clear notification error: %s", event.id, e)

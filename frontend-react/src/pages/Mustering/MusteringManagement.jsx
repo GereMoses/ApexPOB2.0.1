@@ -455,6 +455,9 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   const [templateForm] = Form.useForm();
 
   /* ── Queries ── */
+  const { data: pobRaw } = useQuery({
+    queryKey: ['muster-pob'], queryFn: () => apiService.get('/api/v1/pob-status/dashboard'), refetchInterval: 30000,
+  });
   const { data: zonesRaw, isLoading: zonesLoading } = useQuery({
     queryKey: ['muster-zones'],
     queryFn:  () => apiService.get('/api/mustering/zones/'),
@@ -616,7 +619,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       const evId = data.event_id;
       if (evId) { setSelectedEventId(evId); setActiveTab('live'); }
     },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed to start event'),
+    onError: e => message.error(e?.message || 'Failed to start event'),
   });
 
   const endMut = useMutation({
@@ -628,7 +631,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       setEndModal(null); endForm.resetFields();
       if (selectedEventId === v.id) setSelectedEventId(null);
     },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const markMut = useMutation({
@@ -639,7 +642,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       qc.invalidateQueries(['muster-logs', selectedEventId]);
       setSelectedRowKeys([]);
     },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const bulkMarkMut = useMutation({
@@ -651,29 +654,29 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       qc.invalidateQueries(['muster-logs', selectedEventId]);
       setSelectedRowKeys([]);
     },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const createZoneMut = useMutation({
     mutationFn: (v) => apiService.post('/api/mustering/zones/', v),
     onSuccess: () => { message.success('Zone created'); qc.invalidateQueries(['muster-zones']); setZoneModal(null); zoneForm.resetFields(); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
   const updateZoneMut = useMutation({
     mutationFn: ({ id, ...v }) => apiService.put(`/api/mustering/zones/${id}/`, v),
     onSuccess: () => { message.success('Zone updated'); qc.invalidateQueries(['muster-zones']); setZoneModal(null); zoneForm.resetFields(); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
   const deleteZoneMut = useMutation({
     mutationFn: (id) => apiService.delete(`/api/mustering/zones/${id}`),
     onSuccess: () => { message.success('Zone deleted'); qc.invalidateQueries(['muster-zones']); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const createDrillMut = useMutation({
     mutationFn: (v) => apiService.post('/api/mustering/drills/', v),
     onSuccess: () => { message.success('Drill scheduled'); qc.invalidateQueries(['muster-drills']); setDrillModal(false); drillForm.resetFields(); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
   const triggerDrillMut = useMutation({
     mutationFn: (id) => apiService.post(`/api/mustering/drills/${id}/trigger/`),
@@ -683,24 +686,24 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       const evId = d?.data?.event_id;
       if (evId) { setSelectedEventId(evId); setActiveTab('live'); }
     },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const createTemplateMut = useMutation({
     mutationFn: (v) => apiService.post('/api/mustering/templates/', v),
     onSuccess: () => { message.success('Template created'); qc.invalidateQueries(['muster-templates']); setTemplateModal(null); templateForm.resetFields(); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
   const deleteTemplateMut = useMutation({
     mutationFn: (id) => apiService.delete(`/api/mustering/templates/${id}`),
     onSuccess: () => { message.success('Template deleted'); qc.invalidateQueries(['muster-templates']); },
-    onError: e => message.error(e?.response?.data?.detail || 'Failed'),
+    onError: e => message.error(e?.message || 'Failed'),
   });
 
   const lockdownMut = useMutation({
     mutationFn: ({ action }) => apiService.post('/emergency/api/lockdown/', { action }),
     onSuccess: (_, v) => message.success(v.action === 'lock_all' ? 'All terminals locked' : 'All terminals unlocked'),
-    onError: e => message.error(e?.response?.data?.detail || 'Lockdown failed'),
+    onError: e => message.error(e?.message || 'Lockdown failed'),
   });
 
   const saveZoneMapMut = useMutation({
@@ -775,7 +778,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         {[
           { label: 'Active Events',    value: activeEvents.length, icon: <AlertOutlined />,        color: '#ef4444', bg: '#fff1f0', sub: isActive ? 'In progress' : 'All clear',   onClick: () => setActiveTab('events') },
-          { label: 'Personnel on Site', value: totalPOB || '—',    icon: <TeamOutlined />,          color: '#1890ff', bg: '#e6f4ff', sub: `${zones.length} zones configured` },
+          { label: isActive ? 'Expected at Muster' : 'Personnel on Board', value: isActive ? totalPOB : (pobRaw?.total ?? '—'), icon: <TeamOutlined />, color: '#1890ff', bg: '#e6f4ff', sub: isActive ? 'on the muster list' : `${zones.length} zones configured` },
           { label: 'Confirmed Safe',    value: safeCount,           icon: <CheckCircleOutlined />,   color: '#52c41a', bg: '#f6ffed', sub: safePercent > 0 ? `${safePercent}% accounted` : 'No active event' },
           { label: 'Not Accounted',     value: missingCount,        icon: <CloseCircleOutlined />,   color: missingCount > 0 ? '#f5222d' : '#52c41a', bg: missingCount > 0 ? '#fff1f0' : '#f6ffed', sub: injuredCount > 0 ? `${injuredCount} injured` : 'No missing' },
         ].map(s => (
@@ -1950,11 +1953,11 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             name="zone_ids"
             label="Coverage Areas (Work Zones)"
             rules={[{ required: true, type: 'array', min: 1, message: 'Select at least one work zone' }]}
-            extra="Select the work areas to cover. Muster points are excluded — personnel will scan in there to mark themselves safe."
+            extra={<span>Pick the affected areas, or <a onClick={() => startForm.setFieldsValue({ zone_ids: zones.filter(z => z.zone_kind !== 'MUSTER_POINT').map(z => z.id) })}>select the whole site</a> — a whole-site muster lists everyone on board. People on board whose location is unknown are always included.</span>}
           >
             <Select
               mode="multiple"
-              placeholder="Select work zones — leave blank to cover all onboard personnel"
+              placeholder="Select the affected work zones"
               showSearch
               optionFilterProp="label"
               size="large"
@@ -2008,6 +2011,13 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
           </Form.Item>
           <Form.Item name="notes" label="Notes / Reason">
             <TextArea rows={2} placeholder="Optional — reason for this event" />
+          </Form.Item>
+          <Form.Item label="Alert by" extra="Everyone expected gets the instruction; the response team (Settings → WhatsApp & Alerts) gets the situation. An all-clear goes out the same way when you end the event." style={{ marginBottom: 0 }}>
+            <Space size={16}>
+              <Form.Item name="notify_whatsapp" valuePropName="checked" initialValue noStyle><Checkbox>WhatsApp</Checkbox></Form.Item>
+              <Form.Item name="notify_email" valuePropName="checked" initialValue noStyle><Checkbox>Email</Checkbox></Form.Item>
+              <Form.Item name="notify_sms" valuePropName="checked" initialValue={false} noStyle><Checkbox>SMS</Checkbox></Form.Item>
+            </Space>
           </Form.Item>
         </Form>
       </Modal>

@@ -488,3 +488,23 @@ CREATE TABLE IF NOT EXISTS public.pob_daily_snapshot (
     by_company     jsonb,                           -- latest {company: count}
     updated_at     timestamptz NOT NULL DEFAULT now()
 );
+
+-- ── Alert delivery log (email / WhatsApp / SMS), one row per recipient × channel ──
+CREATE TABLE IF NOT EXISTS notify_delivery (
+    id             BIGSERIAL PRIMARY KEY,
+    source_type    VARCHAR(30)  NOT NULL,          -- muster | muster_all_clear | muster_escalation | emergency | panic | test
+    source_id      BIGINT,
+    channel        VARCHAR(12)  NOT NULL,          -- email | whatsapp | sms
+    recipient_name VARCHAR(150),
+    address        VARCHAR(200) NOT NULL,
+    status         VARCHAR(10)  NOT NULL,          -- SENT | FAILED | SKIPPED
+    error          TEXT,
+    subject        VARCHAR(255),
+    message        TEXT,
+    created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_notify_delivery_source ON notify_delivery (source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_notify_delivery_created ON notify_delivery (created_at DESC);
+
+-- Channels a muster alerted on at start (so the all-clear goes out the same way)
+ALTER TABLE mustering_event ADD COLUMN IF NOT EXISTS notify_channels JSONB DEFAULT '[]'::jsonb;

@@ -1,7 +1,15 @@
 """
-Shared, env-configured WhatsApp sender.
+Shared WhatsApp sender — DB-configured first (Settings → WhatsApp & Alerts), env as fallback.
 
-Provider is chosen by WHATSAPP_PROVIDER (termii | twilio | generic); if unset it
+DB providers (services/whatsapp_config.py):
+  meta    Meta WhatsApp Cloud API — the OFFICIAL route (no ban risk). Business-initiated
+          messages must use an APPROVED TEMPLATE; ours has one body variable {{1}} that
+          carries the alert text. Without a template, a plain text message is sent, which
+          WhatsApp only delivers inside 24 h of the recipient last messaging the number.
+  termii  Termii WhatsApp channel (Nigeria).
+  twilio  Twilio WhatsApp.
+
+Env fallback (unchanged): provider is chosen by WHATSAPP_PROVIDER (termii | twilio | generic); if unset it
 falls back to SMS_PROVIDER (so a single Termii account powers both), then to
 auto-detection.
 
@@ -36,6 +44,22 @@ from .notify_sms import normalize_msisdn, TERMII_DEFAULT_BASE
 logger = logging.getLogger(__name__)
 
 
+def _db_settings() -> Dict[str, object]:
+    """Stored settings when switched on and complete, else {} (→ env fallback)."""
+    try:
+        from ..core.database import SessionLocal
+        from .whatsapp_config import get_whatsapp_settings, db_whatsapp_ready
+        db = SessionLocal()
+        try:
+            s = get_whatsapp_settings(db)
+            return s if db_whatsapp_ready(s) else {}
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 — DB down must not stop env-based sending
+        logger.warning("notify_whatsapp: could not load DB settings (%s) — using env", exc)
+        return {}
+
+
 def _provider() -> str:
     """Which WhatsApp backend is usable, or '' when WhatsApp is off."""
     explicit = os.getenv("WHATSAPP_PROVIDER", "").strip().lower()
@@ -53,6 +77,8 @@ def _provider() -> str:
 
 def whatsapp_configured() -> bool:
     """True if the selected WhatsApp provider has the creds it needs to send."""
+    if _db_settings():
+        return True
     provider = _provider()
     if provider == "termii":
         return bool(os.getenv("SMS_API_KEY"))
@@ -76,9 +102,13 @@ def send_whatsapp(to: Union[str, Iterable[str]], message: str) -> Dict[str, obje
 
     Returns {"sent": N, "failed": [num, ...], "error"?: str}. Fails soft.
     """
-    recipients = _clean(to)
+    recipients = list(dict.fromkeys(_clean(to)))
     if not recipients:
         return {"sent": 0, "failed": [], "error": "no recipients with a phone number"}
+
+    db_cfg = _db_settings()
+    if db_cfg:
+        return _send_db(db_cfg, recipients, message)
 
     provider = _provider()
     if not whatsapp_configured():
@@ -230,3 +260,105 @@ def _send_twilio(recipients: List[str], message: str) -> Dict[str, object]:
             failed.append(number)
             logger.warning("Twilio WhatsApp to %s failed: %s", number, exc)
     return _finish(sent, failed, "twilio")
+
+
+# ── DB-configured providers ────────────────────────────────────────────────
+
+def _flat(text: str, limit: int = 1000) -> str:
+    """Template variables may not contain newlines/tabs or 4+ spaces (Meta rule)."""
+    import re
+    t = re.sub(r"[\r\n\t]+", " · ", text or "")
+    t = re.sub(r" {4,}", "   ", t).strip()
+    return t[:limit]
+
+
+def _parallel(recipients: List[str], one, tag: str) -> Dict[str, object]:
+    """Send to many numbers concurrently (an emergency to 300 people must not take
+    300 × round-trip). `one(number)` returns None on success or an error string."""
+    from concurrent.futures import ThreadPoolExecutor
+    workers = max(1, min(8, len(recipients)))
+    sent, failed, errors = 0, [], {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for number, err in zip(recipients, pool.map(one, recipients)):
+            if err:
+                failed.append(number)
+                errors[number] = err
+            else:
+                sent += 1
+    out = _finish(sent, failed, tag)
+    if errors:
+        out["errors"] = errors
+        if sent == 0:
+            out["error"] = next(iter(errors.values()))
+    return out
+
+
+def _send_db(cfg: Dict[str, object], recipients: List[str], message: str) -> Dict[str, object]:
+    import requests
+    cc = str(cfg.get("country_code") or "234")
+    # One message per real number: '0803…' and '+234803…' are the same phone.
+    seen, unique = set(), []
+    for n in recipients:
+        key = normalize_msisdn(n, cc)
+        if key not in seen:
+            seen.add(key)
+            unique.append(n)
+    recipients = unique
+    provider = cfg.get("provider")
+
+    if provider == "meta":
+        ver = str(cfg.get("meta_api_version") or "v21.0")
+        url = f"https://graph.facebook.com/{ver}/{cfg['meta_phone_number_id']}/messages"
+        headers = {"Authorization": f"Bearer {cfg['meta_access_token']}"}
+        template = str(cfg.get("meta_template") or "").strip()
+
+        def one(number: str):
+            to = normalize_msisdn(number, cc)
+            if template:
+                body = {"messaging_product": "whatsapp", "to": to, "type": "template",
+                        "template": {"name": template, "language": {"code": cfg.get("meta_template_lang") or "en"},
+                                     "components": [{"type": "body", "parameters": [{"type": "text", "text": _flat(message)}]}]}}
+            else:
+                body = {"messaging_product": "whatsapp", "to": to, "type": "text",
+                        "text": {"preview_url": False, "body": message[:4096]}}
+            try:
+                r = requests.post(url, json=body, headers=headers, timeout=15)
+                data = r.json() if r.content else {}
+                if r.ok and data.get("messages"):
+                    return None
+                err = (data.get("error") or {})
+                return f"{err.get('message') or r.status_code}" + (f" ({err.get('code')})" if err.get("code") else "")
+            except Exception as exc:  # noqa: BLE001
+                return str(exc)
+        return _parallel(recipients, one, "meta")
+
+    if provider == "termii":
+        url = f"{str(cfg.get('termii_base_url') or TERMII_DEFAULT_BASE).rstrip('/')}/api/sms/send"
+
+        def one(number: str):
+            try:
+                r = requests.post(url, json={"to": normalize_msisdn(number, cc), "from": cfg["termii_sender"],
+                                             "sms": message, "type": "plain", "channel": "whatsapp",
+                                             "api_key": cfg["termii_api_key"]}, timeout=15)
+                data = r.json() if r.content else {}
+                return None if data.get("message_id") else str(data.get("message") or data or r.status_code)
+            except Exception as exc:  # noqa: BLE001
+                return str(exc)
+        return _parallel(recipients, one, "termii")
+
+    if provider == "twilio":
+        sid, token = str(cfg["twilio_sid"]), str(cfg["twilio_token"])
+        frm = str(cfg["twilio_from"])
+        frm = frm if frm.startswith("whatsapp:") else f"whatsapp:{frm if frm.startswith('+') else '+' + frm}"
+        url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+
+        def one(number: str):
+            try:
+                r = requests.post(url, data={"From": frm, "To": f"whatsapp:+{normalize_msisdn(number, cc)}", "Body": message},
+                                  auth=(sid, token), timeout=15)
+                return None if r.ok else str((r.json() if r.content else {}).get("message") or r.status_code)
+            except Exception as exc:  # noqa: BLE001
+                return str(exc)
+        return _parallel(recipients, one, "twilio")
+
+    return {"sent": 0, "failed": recipients, "error": f"unknown WhatsApp provider {provider!r}"}

@@ -106,13 +106,17 @@ def test_missing_person_reported_with_last_known_zone(site):
     assert row.get("last_known_zone_id") == site["work"]          # where rescue should look
 
 
-def test_fallback_roster_is_everyone_on_board_when_nobody_is_located(site):
-    """A zone with nobody tracked in it must not produce an EMPTY muster."""
-    empty = _zone(site["db"], "Empty " + uuid.uuid4().hex[:4])
-    ev = _start(site, zones=[empty])
+def test_area_muster_includes_on_board_people_with_unknown_location(site):
+    """An area muster lists people located in the area AND everyone on board whose
+    location is unknown (they could be there) — never someone a reader places in a
+    different zone, never someone off site."""
     db = site["db"]
-    assert _status(db, ev, site["elsewhere"]["emp_code"]) == 0     # on board -> expected
-    assert _status(db, ev, site["ashore"]["emp_code"]) is None      # off site -> not expected
+    unknown = _person(db, None)                                       # on board, no zone
+    empty = _zone(db, "Empty " + uuid.uuid4().hex[:4])
+    ev = _start(site, zones=[empty])
+    assert _status(db, ev, unknown["emp_code"]) == 0                  # expected (location unknown)
+    assert _status(db, ev, site["elsewhere"]["emp_code"]) is None     # placed in another zone
+    assert _status(db, ev, site["ashore"]["emp_code"]) is None        # off site
 
 
 def test_manual_mark_and_end_event(site):
