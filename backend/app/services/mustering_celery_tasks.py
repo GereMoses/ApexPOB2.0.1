@@ -856,7 +856,67 @@ def daily_auto_checkout():
         db.close()
 
 
+@celery_app.task
+def run_due_report_schedules():
+    """Scheduled reports: build + email whatever is due (report_scheduler)."""
+    from app.services.report_scheduler import run_due
+    db = SessionLocal()
+    try:
+        n = run_due(db)
+        if n:
+            logger.info("run_due_report_schedules: ran %d schedule(s)", n)
+        return {"ran": n}
+    except Exception as e:
+        logger.error("run_due_report_schedules error: %s", e)
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task
+def snapshot_pob():
+    """Record today's POB (latest, peak, low, by company) for the POB trend report.
+    There was no history of POB at all — only "now"."""
+    from sqlalchemy import text as _t
+    from app.services.attendance_calculation_service import SITE_TZ
+    db = SessionLocal()
+    try:
+        today = datetime.now(SITE_TZ).date()
+        rows = db.execute(_t("""
+            SELECT COALESCE(NULLIF(company, ''), 'Unknown') AS company, COUNT(*) AS n
+            FROM personnel WHERE is_onboard = TRUE AND is_active = TRUE GROUP BY 1
+        """)).fetchall()
+        by_company = {r.company: int(r.n) for r in rows}
+        total = sum(by_company.values())
+        db.execute(_t("""
+            INSERT INTO pob_daily_snapshot (snap_date, pob_last, pob_peak, pob_low, by_company, updated_at)
+            VALUES (:d, :n, :n, :n, CAST(:bc AS jsonb), now())
+            ON CONFLICT (snap_date) DO UPDATE SET
+                pob_last = EXCLUDED.pob_last,
+                pob_peak = GREATEST(pob_daily_snapshot.pob_peak, EXCLUDED.pob_last),
+                pob_low  = LEAST(COALESCE(pob_daily_snapshot.pob_low, EXCLUDED.pob_last), EXCLUDED.pob_last),
+                by_company = EXCLUDED.by_company, updated_at = now()
+        """), {"d": today, "n": total, "bc": __import__("json").dumps(by_company)})
+        db.commit()
+        return {"date": str(today), "pob": total}
+    except Exception as e:
+        logger.error("snapshot_pob error: %s", e)
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 celery_app.conf.beat_schedule = {
+    'run-due-report-schedules': {
+        'task': 'app.services.mustering_celery_tasks.run_due_report_schedules',
+        'schedule': crontab(minute='*/5'),
+    },
+    'snapshot-pob': {
+        'task': 'app.services.mustering_celery_tasks.snapshot_pob',
+        'schedule': crontab(minute='*/15'),
+    },
     'check-scheduled-drills': {
         'task': 'app.services.mustering_celery_tasks.check_scheduled_drills',
         'schedule': crontab(minute='*'),

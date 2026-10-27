@@ -7,12 +7,13 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Input, Button, Table, Tag, Select, DatePicker, Segmented, Dropdown, Empty, App,
-  Tooltip, Drawer, Skeleton,
+  Tooltip, Drawer, Skeleton, Modal, Form, TimePicker, Popconfirm, Switch,
 } from 'antd';
 import {
   SearchOutlined, StarOutlined, StarFilled, ArrowLeftOutlined, DownloadOutlined,
   ReloadOutlined, BarChartOutlined, FilePdfOutlined, FileExcelOutlined, FileTextOutlined,
-  ToolOutlined, RightOutlined, ClockCircleOutlined,
+  ToolOutlined, RightOutlined, ClockCircleOutlined, ScheduleOutlined, PlayCircleOutlined,
+  DeleteOutlined, LockOutlined,
 } from '@ant-design/icons';
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import dayjs from 'dayjs';
@@ -50,7 +51,17 @@ export default function Reports() {
   const code = params.get('r');
   const report = code ? findReport(code) : null;
   const [builderOpen, setBuilderOpen] = useState(false);
+  const [schedOpen, setSchedOpen] = useState(false);
   const [pins, setPins] = useState(() => store.get(PINS, []));
+  // Which reports this user may open / export (null until known = show all).
+  const [access, setAccess] = useState(null);
+  useEffect(() => {
+    apiService.get('/api/v1/report/allowed')
+      .then(r => setAccess({ view: new Set(r?.codes || []), exp: new Set(r?.can_export || []) }))
+      .catch(() => setAccess(null));
+  }, []);
+  const canView = (c) => !access || access.view.has(c);
+  const canExport = (c) => !access || access.exp.has(c);
 
   const togglePin = (c) => setPins(prev => {
     const next = prev.includes(c) ? prev.filter(x => x !== c) : [...prev, c];
@@ -65,10 +76,20 @@ export default function Reports() {
 
   return (
     <div className="apx-reports" style={{ background: T.bg, minHeight: '100%', padding: '28px 32px 48px' }}>
-      {report
-        ? <ReportView key={report.code} report={report} pinned={pins.includes(report.code)}
+      {report && !canView(report.code) ? (
+        <div style={{ maxWidth: 640, margin: '80px auto', textAlign: 'center' }}>
+          <LockOutlined style={{ fontSize: 34, color: T.faint }} />
+          <h2 style={{ marginTop: 12 }}>You don’t have access to this report</h2>
+          <div className="apx-sub">Ask an administrator for the matching report permission.</div>
+          <Button style={{ marginTop: 18 }} onClick={() => setParams({})}>Back to reports</Button>
+        </div>
+      ) : report
+        ? <ReportView key={report.code} report={report} pinned={pins.includes(report.code)} canExport={canExport(report.code)}
             onPin={() => togglePin(report.code)} onBack={() => setParams({})} />
-        : <Library pins={pins} onPin={togglePin} onOpen={open} onBuilder={() => setBuilderOpen(true)} />}
+        : <Library pins={pins} onPin={togglePin} onOpen={open} onBuilder={() => setBuilderOpen(true)}
+            onScheduled={() => setSchedOpen(true)} canView={canView} />}
+
+      <ScheduledDrawer open={schedOpen} onClose={() => setSchedOpen(false)} onOpenReport={(c) => { setSchedOpen(false); open(c); }} />
 
       <Drawer title="Custom report" width={1100} open={builderOpen} onClose={() => setBuilderOpen(false)} destroyOnClose>
         <CustomReportBuilder />
@@ -81,14 +102,15 @@ export default function Reports() {
 
 /* ── Library ──────────────────────────────────────────────────────────────── */
 
-function Library({ pins, onPin, onOpen, onBuilder }) {
+function Library({ pins, onPin, onOpen, onBuilder, onScheduled, canView }) {
   const [q, setQ] = useState('');
-  const recent = store.get(RECENT, []).map(findReport).filter(Boolean);
-  const pinned = pins.map(findReport).filter(Boolean);
+  const recent = store.get(RECENT, []).map(findReport).filter(r => r && canView(r.code));
+  const pinned = pins.map(findReport).filter(r => r && canView(r.code));
   const term = q.trim().toLowerCase();
+  const visible = ALL_REPORTS.filter(r => canView(r.code)).length;
   const groups = REPORT_GROUPS.map(g => ({
     ...g,
-    reports: g.reports.filter(r => !term || `${r.title} ${r.desc} ${g.title}`.toLowerCase().includes(term)),
+    reports: g.reports.filter(r => canView(r.code) && (!term || `${r.title} ${r.desc} ${g.title}`.toLowerCase().includes(term))),
   })).filter(g => g.reports.length);
 
   return (
@@ -96,11 +118,12 @@ function Library({ pins, onPin, onOpen, onBuilder }) {
       <div className="apx-lib-head">
         <div>
           <h1 className="apx-h1">Reports</h1>
-          <div className="apx-sub">{ALL_REPORTS.length} reports · times shown in site time (Lagos)</div>
+          <div className="apx-sub">{visible} reports · times shown in site time (Lagos)</div>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <Input allowClear size="large" prefix={<SearchOutlined style={{ color: T.faint }} />}
             placeholder="Search reports…" value={q} onChange={e => setQ(e.target.value)} style={{ width: 300 }} />
+          <Button size="large" icon={<ScheduleOutlined />} onClick={onScheduled}>Scheduled</Button>
           <Button size="large" icon={<ToolOutlined />} onClick={onBuilder}>Custom report</Button>
         </div>
       </div>
@@ -169,7 +192,7 @@ const PRESETS = {
 
 function initialFilters(report) {
   const f = report.filters || {};
-  if (f.date === 'range') return { _preset: '7d', _range: PRESETS['7d']() };
+  if (f.date === 'range') { const p = f.defaultPreset || '7d'; return { _preset: p, _range: PRESETS[p]() }; }
   if (f.date === 'single') return { _date: f.dateDefault === 'today' ? dayjs() : dayjs().subtract(1, 'day') };
   if (f.date === 'month') return { _month: dayjs() };
   if (f.date === 'monthNumber') return { _monthNo: dayjs().month() + 1 };
@@ -184,12 +207,13 @@ function toApiFilters(report, s) {
   if (f.date === 'month' && s._month) out.month = s._month.format('YYYY-MM');
   if (f.date === 'monthNumber' && s._monthNo) out.month = s._monthNo;
   const map = { department: 'department', zone: 'zone_id', company: 'company', person: 'emp_code', search: 'search',
-    flightStatus: 'status', journeyStatus: 'status', direction: 'direction', musterEvent: 'event_id', changeType: 'change_type' };
+    flightStatus: 'status', journeyStatus: 'status', direction: 'direction', musterEvent: 'event_id', changeType: 'change_type',
+    musterStatus: 'status' };
   Object.entries(map).forEach(([k, api]) => { if (s[k] !== undefined && s[k] !== null && s[k] !== '') out[api] = s[k]; });
   return out;
 }
 
-function ReportView({ report, pinned, onPin, onBack }) {
+function ReportView({ report, pinned, onPin, onBack, canExport = true }) {
   const { message } = App.useApp();
   const [filters, setFilters] = useState(() => initialFilters(report));
   const [page, setPage] = useState(1);
@@ -199,6 +223,7 @@ function ReportView({ report, pinned, onPin, onBack }) {
   const [error, setError] = useState(null);
   const [showChart, setShowChart] = useState(false);
   const [exporting, setExporting] = useState(null);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
 
   const missing = (report.filters?.required || []).filter(k => !filters[k]);
   const apiFilters = useMemo(() => toApiFilters(report, filters), [report, filters]);
@@ -287,20 +312,25 @@ function ReportView({ report, pinned, onPin, onBack }) {
           <Tooltip title="Refresh"><Button icon={<ReloadOutlined />} onClick={load} loading={loading} /></Tooltip>
           {chart && <Button icon={<BarChartOutlined />} type={showChart ? 'primary' : 'default'} ghost={showChart}
             onClick={() => setShowChart(v => !v)}>Chart</Button>}
-          <Dropdown menu={{
-            items: [
-              { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
-              { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
-              { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
-            ],
-            onClick: ({ key }) => exportAs(key),
-          }}>
-            <Button type="primary" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
-          </Dropdown>
+          {canExport && (
+            <Dropdown menu={{
+              items: [
+                { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
+                { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
+                { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
+                { type: 'divider' },
+                { key: 'schedule', icon: <ScheduleOutlined style={{ color: T.accent }} />, label: 'Schedule…' },
+              ],
+              onClick: ({ key }) => (key === 'schedule' ? setScheduleOpen(true) : exportAs(key)),
+            }}>
+              <Button type="primary" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
+            </Dropdown>
+          )}
         </div>
       </div>
 
       <FilterBar report={report} filters={filters} set={set} setFilters={(f) => { setPage(1); setFilters(f); }} />
+      <ScheduleModal open={scheduleOpen} onClose={() => setScheduleOpen(false)} report={report} filters={filters} />
 
       {missing.length > 0 ? (
         <div className="apx-panel" style={{ padding: 56 }}>
@@ -475,11 +505,172 @@ function FilterBar({ report, filters, set, setFilters }) {
           onChange={(v) => set('journeyStatus', v)}
           options={['DRAFT', 'SUBMITTED', 'APPROVED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'REJECTED'].map(s => ({ value: s, label: humanize(s.toLowerCase()) }))} />
       )}
+      {extra.includes('musterStatus') && (
+        <Segmented value={filters.musterStatus || ''} onChange={(v) => set('musterStatus', v || undefined)}
+          options={[{ label: 'All', value: '' }, { label: 'Safe', value: 'safe' }, { label: 'Missing', value: 'missing' }]} />
+      )}
       {extra.includes('musterEvent') && (
         <Select allowClear placeholder="Muster event" style={{ width: 300 }} value={filters.musterEvent}
           onChange={(v) => set('musterEvent', v)} options={events} notFoundContent="No muster events yet" />
       )}
     </div>
+  );
+}
+
+/* ── Scheduling ───────────────────────────────────────────────────────────── */
+
+const RELATIVE = {
+  range: [['yesterday', 'Yesterday'], ['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['last_week', 'Last week (Mon–Sun)'],
+          ['month', 'This month so far'], ['last_month', 'Last month']],
+  single: [['yesterday', 'Yesterday'], ['today', 'Today']],
+  month: [['month', 'This month'], ['last_month', 'Last month']],
+  monthNumber: [['month', 'This month'], ['last_month', 'Last month']],
+};
+
+function ScheduleModal({ open, onClose, report, filters }) {
+  const { message } = App.useApp();
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const mode = report.filters?.date || 'none';
+  const freq = Form.useWatch('frequency', form);
+  useEffect(() => {
+    if (open) form.setFieldsValue({
+      name: report.title, frequency: 'daily', time: dayjs().hour(7).minute(0), weekday: 1, format: 'xlsx', emails: [],
+      relative: mode === 'range' ? (filters._preset && filters._preset !== 'custom' ? filters._preset : '7d')
+        : mode === 'single' ? 'yesterday' : 'month',
+    });
+  }, [open]); // eslint-disable-line
+
+  const save = async () => {
+    const v = await form.validateFields();
+    const fixed = toApiFilters({ ...report, filters: { ...report.filters, date: 'none' } }, filters);
+    setSaving(true);
+    try {
+      await apiService.post('/api/v1/report/scheduled', {
+        report_code: report.code, name: v.name, frequency: v.frequency, time: v.time.format('HH:mm'),
+        weekday: v.frequency === 'weekly' ? v.weekday : null, format: v.format, emails: v.emails || [],
+        filters: fixed, date_mode: mode, relative: mode === 'none' ? null : v.relative,
+      });
+      message.success('Scheduled — find it under Reports → Scheduled');
+      onClose();
+    } catch (e) {
+      message.error(e?.response?.data?.detail || e?.message || 'Could not schedule');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <Modal title={<span><ScheduleOutlined style={{ color: T.accent }} /> Schedule “{report.title}”</span>}
+      open={open} onCancel={onClose} onOk={save} okText="Schedule" confirmLoading={saving} destroyOnClose>
+      <Form form={form} layout="vertical" requiredMark={false} style={{ marginTop: 12 }}>
+        <Form.Item name="name" label="Name" rules={[{ required: true }]}><Input /></Form.Item>
+        <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <Form.Item name="frequency" label="Every">
+            <Segmented options={[{ label: 'Day', value: 'daily' }, { label: 'Week', value: 'weekly' }, { label: 'Month (1st)', value: 'monthly' }]} />
+          </Form.Item>
+          {freq === 'weekly' && (
+            <Form.Item name="weekday" label="On">
+              <Select style={{ width: 130 }} options={['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                .map((d, i) => ({ value: i + 1, label: d }))} />
+            </Form.Item>
+          )}
+          <Form.Item name="time" label="At (site time)"><TimePicker format="HH:mm" minuteStep={5} allowClear={false} /></Form.Item>
+        </div>
+        {mode !== 'none' && (
+          <Form.Item name="relative" label="Period covered by each run"
+            tooltip="Saved relative to the run date, so each run reports a fresh period.">
+            <Select options={(RELATIVE[mode] || []).map(([value, label]) => ({ value, label }))} />
+          </Form.Item>
+        )}
+        <Form.Item name="format" label="Format">
+          <Segmented options={[{ label: 'Excel', value: 'xlsx' }, { label: 'PDF', value: 'pdf' }, { label: 'CSV', value: 'csv' }]} />
+        </Form.Item>
+        <Form.Item name="emails" label="Email to" extra="Type an address and press Enter. Leave empty to only keep the file for download.">
+          <Select mode="tags" tokenSeparators={[',', ' ', ';']} placeholder="name@company.com" open={false} />
+        </Form.Item>
+        <div className="apx-sub" style={{ fontSize: 12.5 }}>Other filters currently set on this report (department, zone…) are kept.</div>
+      </Form>
+    </Modal>
+  );
+}
+
+function ScheduledDrawer({ open, onClose, onOpenReport }) {
+  const { message } = App.useApp();
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(null);
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setRows(await apiService.get('/api/v1/report/scheduled') || []); }
+    catch { setRows([]); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { if (open) load(); }, [open, load]);
+
+  const act = async (id, fn) => {
+    setBusy(id);
+    try { await fn(); await load(); } catch (e) { message.error(e?.response?.data?.detail || e?.message || 'Failed'); }
+    finally { setBusy(null); }
+  };
+  const download = async (s) => {
+    const res = await fetch(`/api/v1/report/scheduled/${s.id}/file`, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } });
+    if (!res.ok) { message.error('No file yet — run it first'); return; }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${s.name.replace(/[^\w]+/g, '_')}.${s.format}`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+  };
+  const statusTag = (s) => {
+    if (!s.last_run) return <Tag>Not run yet</Tag>;
+    const c = { ok: 'green', emailed: 'green', email_failed: 'orange', failed: 'red' }[s.last_status] || 'default';
+    const l = { ok: 'Ran', emailed: 'Emailed', email_failed: 'Email failed', failed: 'Failed' }[s.last_status] || s.last_status;
+    return <Tooltip title={s.last_error || ''}><Tag color={c}>{l}</Tag></Tooltip>;
+  };
+
+  return (
+    <Drawer title={<span><ScheduleOutlined /> Scheduled reports</span>} width={760} open={open} onClose={onClose}
+      extra={<Button icon={<ReloadOutlined />} onClick={load} loading={loading} />}>
+      {rows.length === 0 && !loading && (
+        <Empty description={<span>No scheduled reports yet.<br />Open a report and choose <b>Export → Schedule…</b></span>} />
+      )}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {rows.map(s => {
+          const r = findReport(s.report_code);
+          return (
+            <div key={s.id} className="apx-panel" style={{ padding: 14, opacity: s.is_active ? 1 : 0.6 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 650, fontSize: 15 }}>{s.name} {statusTag(s)}</div>
+                  <div className="apx-sub" style={{ fontSize: 13 }}>
+                    <a onClick={() => onOpenReport(s.report_code)}>{r?.title || s.report_code}</a>
+                    {' · '}{s.schedule}{' · '}{s.format.toUpperCase()}
+                    {s.emails?.length ? ` · to ${s.emails.join(', ')}` : ' · download only'}
+                  </div>
+                  <div className="apx-sub" style={{ fontSize: 12.5 }}>
+                    {s.last_run ? `Last run ${dayjs(s.last_run + 'Z').format('DD MMM HH:mm')}${s.last_rows != null ? ` · ${s.last_rows} rows` : ''}` : 'Never run'}
+                    {s.is_active && s.next_run ? ` · next ${dayjs(s.next_run + 'Z').format('ddd DD MMM HH:mm')}` : ''}
+                  </div>
+                  {s.last_error && <div style={{ color: '#b45309', fontSize: 12.5, marginTop: 4 }}>{s.last_error}</div>}
+                </div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }}>
+                  <Tooltip title={s.is_active ? 'Active' : 'Paused'}>
+                    <Switch size="small" checked={s.is_active} loading={busy === s.id}
+                      onChange={(v) => act(s.id, () => apiService.patch(`/api/v1/report/scheduled/${s.id}`, { is_active: v }))} />
+                  </Tooltip>
+                  <Tooltip title="Run now"><Button size="small" icon={<PlayCircleOutlined />} loading={busy === s.id}
+                    onClick={() => act(s.id, () => apiService.post(`/api/v1/report/scheduled/${s.id}/run`))} /></Tooltip>
+                  <Tooltip title="Download last file"><Button size="small" icon={<DownloadOutlined />} disabled={!s.has_file}
+                    onClick={() => download(s)} /></Tooltip>
+                  <Popconfirm title="Delete this schedule?" onConfirm={() => act(s.id, () => apiService.delete(`/api/v1/report/scheduled/${s.id}`))}>
+                    <Button size="small" danger icon={<DeleteOutlined />} />
+                  </Popconfirm>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Drawer>
   );
 }
 

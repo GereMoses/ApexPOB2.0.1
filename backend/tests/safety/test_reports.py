@@ -100,3 +100,78 @@ def test_date_range_includes_its_last_day(db, make_person, make_zone):
     today = str(_site_today())
     rows = _rows_for(_report(db, "zone.access_log", date_from=today, date_to=today), p["emp_code"])
     assert rows, "an event from today must be inside the range today..today"
+
+
+# ── Reports v2: scheduling, access list and the gap reports ──────────────────
+
+def test_schedule_times_are_site_time_and_naive_utc():
+    from datetime import date, timezone
+    from app.services.report_scheduler import make_cron, next_run, resolve_filters
+    cron = make_cron("weekly", "07:30", 1)                      # Mondays 07:30 Lagos
+    after = datetime(2026, 10, 27, 12, 0, tzinfo=timezone.utc)  # a Tuesday
+    nxt = next_run(cron, after)
+    assert nxt.tzinfo is None and nxt == datetime(2026, 11, 2, 6, 30)   # 07:30 Lagos = 06:30 UTC
+    assert next_run(make_cron("monthly", "06:00"), after) == datetime(2026, 11, 1, 5, 0)
+    today = date(2026, 10, 27)
+    assert resolve_filters({"date_mode": "single", "relative": "yesterday", "department": 4}, today) == \
+        {"department": 4, "date": "2026-10-26"}
+    r = resolve_filters({"date_mode": "range", "relative": "last_month"}, today)
+    assert (r["date_from"], r["date_to"]) == ("2026-09-01", "2026-09-30")
+    r = resolve_filters({"date_mode": "range", "relative": "last_week"}, today)
+    assert (r["date_from"], r["date_to"]) == ("2026-10-19", "2026-10-25")
+
+
+@needs_db
+def test_gap_reports_run(db, make_person):
+    make_person(attendance_id=None)
+    for code in ("pob.trend", "att.hr_sync", "personnel.no_pin", "muster.roll_call"):
+        res = _report(db, code, date_from="2026-10-01", date_to="2026-10-27")
+        assert "data" in res and "total" in res, code
+    nopin = _report(db, "personnel.no_pin")
+    assert nopin["total"] >= 1
+
+
+@needs_db
+def test_scheduled_report_runs_and_keeps_its_file(db):
+    from app.models.report import ReportSchedule, ReportTemplate
+    from app.services.report_scheduler import make_cron, next_run, run_due, file_exists
+    cron = make_cron("daily", "07:00")
+    tpl = ReportTemplate(template_name="[schedule] t", module="personnel", report_code="personnel.employee_list",
+                         filters={"date_mode": "none", "relative": None}, created_by=1)
+    db.add(tpl); db.flush()
+    s = ReportSchedule(template_id=tpl.id, schedule_name="Test sched", cron=cron, format="csv",
+                       recipients={"emails": []}, is_active=True, created_by=1,
+                       report_code="personnel.employee_list", next_run=datetime(2000, 1, 1))
+    db.add(s); db.commit()
+    assert run_due(db) >= 1
+    db.refresh(s)
+    assert s.last_status == "ok", s.last_error
+    assert file_exists(s.last_file_path)
+    assert s.next_run > datetime.utcnow() and s.last_run is not None
+    assert run_due(db) == 0 or s.id not in [x.id for x in db.query(ReportSchedule).filter(ReportSchedule.next_run <= datetime.utcnow())]
+
+
+@needs_db
+def test_allowed_and_schedule_api(db, superuser_headers):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    c = TestClient(app)
+    h = superuser_headers
+    a = c.get("/api/v1/report/allowed", headers=h)
+    assert a.status_code == 200, a.text
+    assert "pob.trend" in a.json()["codes"]
+    r = c.post("/api/v1/report/scheduled", headers=h, json={
+        "report_code": "att.late", "name": "Late daily", "frequency": "daily", "time": "07:00",
+        "format": "xlsx", "emails": ["ops@example.com"], "filters": {}, "date_mode": "single", "relative": "yesterday"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+    assert r.json()["schedule"] == "Every day at 07:00"
+    run = c.post(f"/api/v1/report/scheduled/{sid}/run", headers=h)
+    assert run.status_code == 200, run.text
+    lst = {x["id"]: x for x in c.get("/api/v1/report/scheduled", headers=h).json()}
+    assert lst[sid]["has_file"] and lst[sid]["last_status"] in ("ok", "emailed", "email_failed")
+    f = c.get(f"/api/v1/report/scheduled/{sid}/file", headers=h)
+    assert f.status_code == 200 and len(f.content) > 100
+    assert c.delete(f"/api/v1/report/scheduled/{sid}", headers=h).status_code == 200
+    assert "Late daily" not in {t.get("template_name") for t in (c.get("/api/v1/report/templates", headers=h).json() or [])
+                                if isinstance(t, dict)}

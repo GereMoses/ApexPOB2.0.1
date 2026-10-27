@@ -57,6 +57,12 @@ class ReportSchedule(Base):
     last_run = Column(DateTime)
     next_run = Column(DateTime)
     is_active = Column(Boolean, default=True)
+    # Outcome of the last run (rpt_schedule runner in mustering_celery_tasks)
+    report_code = Column(String(100))
+    last_status = Column(String(20))       # ok | emailed | email_failed | failed
+    last_error = Column(Text)
+    last_file_path = Column(String(500))
+    last_rows = Column(Integer)
     created_by = Column(Integer, ForeignKey('auth_user.id'))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

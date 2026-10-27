@@ -99,9 +99,11 @@ def send_email(
     subject: str,
     body_html: str,
     body_text: Optional[str] = None,
+    attachments: Optional[List[tuple]] = None,
 ) -> Dict[str, object]:
     """Send one email (to one or many recipients) via DB/env-configured SMTP.
 
+    attachments: optional [(filename, bytes, mime_type), ...] (e.g. scheduled reports).
     Returns {"sent": N, "failed": [addr, ...], "error"?: str}. Fails soft.
     """
     recipients: List[str] = [to] if isinstance(to, str) else [r for r in to if r]
@@ -143,13 +145,23 @@ def send_email(
                 server.login(user, password)
             for addr in recipients:
                 try:
-                    msg = MIMEMultipart("alternative")
+                    body = MIMEMultipart("alternative")
+                    if body_text:
+                        body.attach(MIMEText(body_text, "plain"))
+                    body.attach(MIMEText(body_html, "html"))
+                    if attachments:
+                        from email.mime.application import MIMEApplication
+                        msg = MIMEMultipart("mixed")
+                        msg.attach(body)
+                        for fname, data, mime in attachments:
+                            part = MIMEApplication(data, _subtype=(mime or "octet-stream").split("/")[-1])
+                            part.add_header("Content-Disposition", "attachment", filename=fname)
+                            msg.attach(part)
+                    else:
+                        msg = body
                     msg["Subject"] = subject
                     msg["From"] = from_header
                     msg["To"] = addr
-                    if body_text:
-                        msg.attach(MIMEText(body_text, "plain"))
-                    msg.attach(MIMEText(body_html, "html"))
                     raw = _maybe_dkim_sign(msg.as_bytes(), s)
                     server.sendmail(sender, [addr], raw)
                     sent += 1

@@ -471,3 +471,20 @@ SET dept_id = p.department_id,
 FROM public.personnel p
 WHERE p.emp_code = pe.emp_code
   AND (pe.dept_id IS DISTINCT FROM p.department_id OR (COALESCE(p.is_active, TRUE) = FALSE AND pe.status <> 1));
+
+-- ── Scheduled reports: last-run outcome + the file it produced ──────────────────
+ALTER TABLE public.rpt_schedule ADD COLUMN IF NOT EXISTS report_code varchar(100);
+ALTER TABLE public.rpt_schedule ADD COLUMN IF NOT EXISTS last_status varchar(20);
+ALTER TABLE public.rpt_schedule ADD COLUMN IF NOT EXISTS last_error text;
+ALTER TABLE public.rpt_schedule ADD COLUMN IF NOT EXISTS last_file_path varchar(500);
+ALTER TABLE public.rpt_schedule ADD COLUMN IF NOT EXISTS last_rows integer;
+
+-- ── POB trend: one row per site day (updated through the day by a beat job) ─────
+CREATE TABLE IF NOT EXISTS public.pob_daily_snapshot (
+    snap_date      date PRIMARY KEY,
+    pob_last       integer NOT NULL DEFAULT 0,      -- latest count seen that day
+    pob_peak       integer NOT NULL DEFAULT 0,
+    pob_low        integer,
+    by_company     jsonb,                           -- latest {company: count}
+    updated_at     timestamptz NOT NULL DEFAULT now()
+);

@@ -137,6 +137,10 @@ class ReportService:
         'pob.rotation_overdue':         {'threshold_days': int, 'department': str, 'company': str},
         'pob.zone_occupancy_history':   {'zone_id': int, 'date_from': str, 'date_to': str},
         'travel.flights':               {'date_from': str, 'date_to': str, 'status': str},
+        'pob.trend':                    {'date_from': str, 'date_to': str},
+        'att.hr_sync':                  {'date_from': str, 'date_to': str, 'status': str},
+        'personnel.no_pin':             {'department': str},
+        'muster.roll_call':             {'event_id': int, 'status': str},
         'travel.passengers':            {'date_from': str, 'date_to': str, 'direction': str, 'search': str},
         'travel.journeys':              {'date_from': str, 'date_to': str, 'status': str},
         'pob.headcount_by_company':     {'company': str},
@@ -319,6 +323,10 @@ class ReportService:
             'pob.rotation_overdue':         self.pob_rotation_overdue,
             'pob.zone_occupancy_history':   self.pob_zone_occupancy_history,
             'travel.flights':               self.travel_flights,
+            'pob.trend':                    self.pob_trend,
+            'att.hr_sync':                  self.attendance_hr_sync,
+            'personnel.no_pin':             self.personnel_no_pin,
+            'muster.roll_call':             self.muster_roll_call,
             'travel.passengers':            self.travel_passengers,
             'travel.journeys':              self.travel_journeys,
             'pob.headcount_by_company':     self.pob_headcount_by_company,
@@ -5422,6 +5430,163 @@ class ReportService:
                 'net_change':        mobilize_count - demobilize_count,
             },
         }
+
+    # ==================== GAP REPORTS ====================
+
+    def pob_trend(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """POB per day over a range (pob_daily_snapshot, recorded every 15 min)."""
+        df, dt = self._range(filters, back_days=29)
+        rows = self.db.execute(text("""
+            SELECT snap_date, pob_last, pob_peak, pob_low, by_company
+            FROM pob_daily_snapshot WHERE snap_date BETWEEN CAST(:df AS date) AND CAST(:dt AS date)
+            ORDER BY snap_date
+        """), {'df': df, 'dt': dt}).fetchall()
+        moves = {str(r.d): (int(r.arr), int(r.dep)) for r in self.db.execute(text("""
+            SELECT d, SUM(arr) arr, SUM(dep) dep FROM (
+              SELECT me.pob_applied_at::date d, (me.direction='INBOUND')::int arr, (me.direction='OUTBOUND')::int dep
+              FROM manifest_entry me WHERE me.pob_applied_at::date BETWEEN CAST(:df AS date) AND CAST(:dt AS date)
+              UNION ALL
+              SELECT j.pob_applied_at::date, CASE WHEN j.pob_movement='INBOUND' THEN jsonb_array_length(COALESCE(j.pob_applied_ids,'[]')) ELSE 0 END,
+                     CASE WHEN j.pob_movement='OUTBOUND' THEN jsonb_array_length(COALESCE(j.pob_applied_ids,'[]')) ELSE 0 END
+              FROM journey_plan j WHERE j.pob_applied_at::date BETWEEN CAST(:df AS date) AND CAST(:dt AS date)
+            ) x GROUP BY d
+        """), {'df': df, 'dt': dt}).fetchall()}
+        data = []
+        for r in rows:
+            arr, dep = moves.get(str(r.snap_date), (0, 0))
+            top = sorted((r.by_company or {}).items(), key=lambda kv: -kv[1])[:3]
+            data.append({'date': str(r.snap_date), 'pob': r.pob_last, 'peak': r.pob_peak, 'low': r.pob_low,
+                         'arrivals': arr, 'departures': dep,
+                         'top_companies': ', '.join(f"{k} {v}" for k, v in top) or '—'})
+        columns = [
+            {'field': 'date', 'label': 'Date', 'type': 'date'},
+            {'field': 'pob', 'label': 'POB (end of day)', 'type': 'number'},
+            {'field': 'peak', 'label': 'Peak', 'type': 'number'},
+            {'field': 'low', 'label': 'Low', 'type': 'number'},
+            {'field': 'arrivals', 'label': 'Arrivals', 'type': 'number'},
+            {'field': 'departures', 'label': 'Departures', 'type': 'number'},
+            {'field': 'top_companies', 'label': 'Largest companies', 'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data,
+                'chart_data': {'labels': [d['date'][5:] for d in data],
+                               'datasets': [{'label': 'POB', 'data': [d['pob'] for d in data]}]},
+                'summary': {'days': len(data),
+                            'latest_pob': data[-1]['pob'] if data else None,
+                            'highest': max((d['peak'] for d in data), default=None),
+                            'average': round(sum(d['pob'] for d in data) / len(data)) if data else None}}
+
+    def attendance_hr_sync(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Every SeamlessHR run: attendance pushed for payroll and staff pulled — with
+        failures, so payroll problems are visible before pay day."""
+        df, dt = self._range(filters, back_days=29)
+        params: Dict[str, Any] = {'df': df, 'dt': dt}
+        where = "created_at >= CAST(:df AS date) AND created_at < CAST(:dt AS date) + INTERVAL '1 day'"
+        if filters.get('status'):
+            where += " AND status = :st"
+            params['st'] = filters['status'].lower()
+        rows = self.db.execute(text(f"""
+            SELECT created_at, sync_date, triggered_by, status, records_built, records_sent, records_failed, message
+            FROM hr_sync_log WHERE {where} ORDER BY created_at DESC
+        """), params).fetchall()
+        data = [{
+            'run_at': self._fmt_dt(r.created_at, '%Y-%m-%d %H:%M'),
+            'kind': 'Staff pull' if (r.message or '').lower().startswith('employee pull') else 'Attendance push',
+            'for_date': str(r.sync_date) if r.sync_date else '—',
+            'triggered_by': r.triggered_by or '—',
+            'status': (r.status or '').title(),
+            'built': r.records_built or 0, 'sent': r.records_sent or 0, 'failed': r.records_failed or 0,
+            'message': r.message or '',
+        } for r in rows]
+        columns = [
+            {'field': 'run_at', 'label': 'Run at', 'type': 'datetime'},
+            {'field': 'kind', 'label': 'Type', 'type': 'text'},
+            {'field': 'for_date', 'label': 'For date', 'type': 'date'},
+            {'field': 'status', 'label': 'Result', 'type': 'status'},
+            {'field': 'sent', 'label': 'Sent', 'type': 'number'},
+            {'field': 'failed', 'label': 'Failed', 'type': 'number'},
+            {'field': 'triggered_by', 'label': 'By', 'type': 'text'},
+            {'field': 'message', 'label': 'Message', 'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data, 'summary': {
+            'runs': len(data),
+            'failed_runs': sum(1 for d in data if d['status'] in ('Error', 'Failed')),
+            'records_sent': sum(d['sent'] for d in data if d['kind'] == 'Attendance push'),
+            'records_failed': sum(d['failed'] for d in data if d['kind'] == 'Attendance push'),
+        }}
+
+    def personnel_no_pin(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Active staff without an Attendance ID: they cannot be enrolled on a reader,
+        and none of their attendance can be sent to SeamlessHR for payroll."""
+        params: Dict[str, Any] = {}
+        where = "p.is_active = TRUE AND (p.attendance_id IS NULL OR p.attendance_id = '')"
+        if filters.get('department'):
+            where += " AND p.department = :dep"
+            params['dep'] = filters['department']
+        rows = self.db.execute(text(f"""
+            SELECT p.emp_code, COALESCE(p.full_name, TRIM(p.first_name || ' ' || p.last_name)) AS name,
+                   p.department, p.position, p.company, p.hr_source, p.is_onboard
+            FROM personnel p WHERE {where} ORDER BY p.department NULLS LAST, name
+        """), params).fetchall()
+        active = self.db.execute(text("SELECT count(*) FROM personnel WHERE is_active = TRUE")).scalar() or 0
+        data = [{'emp_code': r.emp_code, 'full_name': r.name, 'department': r.department or '—',
+                 'position': r.position or '—', 'company': r.company or '—',
+                 'source': 'SeamlessHR' if r.hr_source == 'SEAMLESSHR' else 'ApexPOB',
+                 'on_board': 'Yes' if r.is_onboard else 'No'} for r in rows]
+        columns = [
+            {'field': 'emp_code', 'label': 'Staff code', 'type': 'text'},
+            {'field': 'full_name', 'label': 'Name', 'type': 'text'},
+            {'field': 'department', 'label': 'Department', 'type': 'text'},
+            {'field': 'position', 'label': 'Position', 'type': 'text'},
+            {'field': 'company', 'label': 'Company', 'type': 'text'},
+            {'field': 'source', 'label': 'Record from', 'type': 'text'},
+            {'field': 'on_board', 'label': 'On board', 'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data, 'summary': {
+            'without_pin': len(data), 'active_staff': active,
+            'coverage_pct': round((active - len(data)) / active * 100) if active else None,
+        }}
+
+    def muster_roll_call(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Everyone expected at one muster, with their outcome and where they were."""
+        ev = filters.get('event_id')
+        if not ev:
+            ev = self.db.execute(text("SELECT id FROM mustering_event ORDER BY start_time DESC LIMIT 1")).scalar()
+        if not ev:
+            return {'columns': [], 'data': [], 'summary': {}}
+        params: Dict[str, Any] = {'e': ev}
+        where = "ml.event_id = :e"
+        st = {'safe': 1, 'missing': 0, 'injured': 2}.get((filters.get('status') or '').lower())
+        if st is not None:
+            where += " AND ml.status = :s"
+            params['s'] = st
+        rows = self.db.execute(text(f"""
+            SELECT ml.emp_code, COALESCE(ml.emp_name, p.full_name) AS name, COALESCE(ml.dept_name, p.department) AS dept,
+                   ml.status, ml.check_time, ml.device_alias, ml.location, ml.last_punch_area, z.name AS live_zone
+            FROM mustering_log ml
+            LEFT JOIN personnel p ON p.emp_code = ml.emp_code
+            LEFT JOIN zones z ON z.id = p.current_zone_id
+            WHERE {where} ORDER BY ml.status, name
+        """), params).fetchall()
+        label = {0: 'Missing', 1: 'Safe', 2: 'Injured'}
+        data = [{'emp_code': r.emp_code, 'full_name': r.name or r.emp_code, 'department': r.dept or '—',
+                 'status': label.get(r.status, str(r.status)),
+                 'accounted_at': self._fmt_dt(r.check_time, '%Y-%m-%d %H:%M') if r.status != 0 else '',
+                 'where': r.device_alias or r.location or '',
+                 'last_zone': r.last_punch_area or r.live_zone or '—'} for r in rows]
+        columns = [
+            {'field': 'full_name', 'label': 'Name', 'type': 'text'},
+            {'field': 'emp_code', 'label': 'Staff code', 'type': 'text'},
+            {'field': 'department', 'label': 'Department', 'type': 'text'},
+            {'field': 'status', 'label': 'Status', 'type': 'status'},
+            {'field': 'accounted_at', 'label': 'Accounted at', 'type': 'datetime'},
+            {'field': 'where', 'label': 'Mustered at', 'type': 'text'},
+            {'field': 'last_zone', 'label': 'Last known zone', 'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data, 'summary': {
+            'event': int(ev), 'expected': len(data),
+            'safe': sum(1 for d in data if d['status'] == 'Safe'),
+            'missing': sum(1 for d in data if d['status'] == 'Missing'),
+        }}
 
     # ==================== TRAVEL (flights / voyages / land journeys) ====================
 

@@ -99,7 +99,8 @@ async def get_report_templates(
     current_user: AuthUser = Depends(get_current_active_user)
 ):
     """Get report templates with filtering"""
-    query = db.query(ReportTemplate)
+    # Templates backing scheduled reports are internal — keep them out of this list.
+    query = db.query(ReportTemplate).filter(~ReportTemplate.template_name.like('[schedule]%'))
     
     # Apply filters
     if module:
@@ -1201,3 +1202,159 @@ async def execute_custom_report(
     except Exception as e:
         logger.error(f"Error executing custom report: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ═══ Report access + scheduled reports (Reports v2) ══════════════════════════════
+
+@router.get("/allowed", response_model=Dict[str, Any])
+async def allowed_reports(
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_active_user),
+):
+    """Report codes this user may open — the library hides the rest instead of
+    showing cards that answer "Insufficient permissions"."""
+    from ..services.report_service import ReportService
+    codes = list(ReportService(db).REPORT_REGISTRY.keys())
+    cache: Dict[str, bool] = {}
+    allowed = []
+    for c in codes:
+        m = report_permission_module(c)
+        if m not in cache:
+            cache[m] = check_report_permission(current_user, m, "view", db)
+        if cache[m]:
+            allowed.append(c)
+    exportable = {m for m in cache if check_report_permission(current_user, m, "export", db)}
+    return {"codes": allowed, "can_export": sorted(c for c in allowed if report_permission_module(c) in exportable)}
+
+
+class ScheduledReportIn(BaseModel):
+    report_code: str
+    name: str = Field(..., min_length=1, max_length=100)
+    frequency: str = Field("daily", pattern="^(daily|weekly|monthly)$")
+    time: str = Field("07:00", pattern=r"^\d{1,2}:\d{2}$")
+    weekday: Optional[int] = Field(None, ge=1, le=7)
+    format: str = Field("xlsx", pattern="^(pdf|xlsx|csv)$")
+    emails: List[str] = Field(default_factory=list)
+    filters: Dict[str, Any] = Field(default_factory=dict)   # fixed filters (department, zone …)
+    date_mode: str = Field("none", pattern="^(none|single|range|month|monthNumber)$")
+    relative: Optional[str] = None                           # today | yesterday | 7d | 30d | month | last_week | last_month
+
+
+def _schedule_dict(s, db) -> Dict[str, Any]:
+    from ..services.report_scheduler import describe_cron, file_exists
+    d = describe_cron(s.cron)
+    t = s.template
+    return {
+        "id": s.id, "name": s.schedule_name, "report_code": s.report_code,
+        "format": s.format, "is_active": s.is_active,
+        "emails": (s.recipients or {}).get("emails") or [],
+        "schedule": d["label"], "frequency": d["frequency"], "time": d["time"], "weekday": d.get("weekday"),
+        "relative": ((t.filters or {}).get("relative") if t else None),
+        "last_run": s.last_run.isoformat() if s.last_run else None,
+        "next_run": s.next_run.isoformat() if s.next_run else None,
+        "last_status": s.last_status, "last_error": s.last_error, "last_rows": s.last_rows,
+        "has_file": file_exists(s.last_file_path),
+        "created_by": s.created_by,
+    }
+
+
+def _own_schedule(db: Session, schedule_id: int, user) -> "ReportSchedule":
+    s = db.query(ReportSchedule).filter(ReportSchedule.id == schedule_id,
+                                        ReportSchedule.report_code.isnot(None)).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Scheduled report not found")
+    if s.created_by != user.id and not getattr(user, "is_superuser", False):
+        raise HTTPException(status_code=403, detail="Only the owner or an administrator can change this schedule")
+    return s
+
+
+@router.get("/scheduled", response_model=List[Dict[str, Any]])
+async def list_scheduled_reports(db: Session = Depends(get_db),
+                                 current_user: AuthUser = Depends(get_current_active_user)):
+    q = db.query(ReportSchedule).filter(ReportSchedule.report_code.isnot(None))
+    if not getattr(current_user, "is_superuser", False):
+        q = q.filter(ReportSchedule.created_by == current_user.id)
+    return [_schedule_dict(s, db) for s in q.order_by(ReportSchedule.schedule_name).all()]
+
+
+@router.post("/scheduled", response_model=Dict[str, Any])
+async def create_scheduled_report(body: ScheduledReportIn, db: Session = Depends(get_db),
+                                  current_user: AuthUser = Depends(get_current_active_user)):
+    from ..services.report_service import ReportService
+    from ..services.report_scheduler import make_cron, next_run
+    if body.report_code not in ReportService(db).REPORT_REGISTRY:
+        raise HTTPException(status_code=400, detail="Unknown report")
+    module = report_permission_module(body.report_code)
+    if not check_report_permission(current_user, module, "export", db):
+        raise HTTPException(status_code=403, detail="You need export rights on this report to schedule it")
+    try:
+        cron = make_cron(body.frequency, body.time, body.weekday)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    emails = sorted({e.strip() for e in body.emails if e and "@" in e})
+    tpl = ReportTemplate(template_name=f"[schedule] {body.name}"[:100], module=module, report_code=body.report_code,
+                         filters={**body.filters, "date_mode": body.date_mode, "relative": body.relative},
+                         created_by=current_user.id)
+    db.add(tpl)
+    db.flush()
+    s = ReportSchedule(template_id=tpl.id, schedule_name=body.name, cron=cron, format=body.format,
+                       recipients={"emails": emails, "users": [], "roles": []}, is_active=True,
+                       created_by=current_user.id, report_code=body.report_code, next_run=next_run(cron))
+    db.add(s)
+    db.commit()
+    db.refresh(s)
+    return _schedule_dict(s, db)
+
+
+@router.patch("/scheduled/{schedule_id}", response_model=Dict[str, Any])
+async def update_scheduled_report(schedule_id: int, body: Dict[str, Any], db: Session = Depends(get_db),
+                                  current_user: AuthUser = Depends(get_current_active_user)):
+    from ..services.report_scheduler import next_run
+    s = _own_schedule(db, schedule_id, current_user)
+    if "is_active" in body:
+        s.is_active = bool(body["is_active"])
+        if s.is_active:
+            s.next_run = next_run(s.cron)
+    if "emails" in body:
+        s.recipients = {**(s.recipients or {}), "emails": sorted({e.strip() for e in body["emails"] if e and "@" in e})}
+    db.commit()
+    return _schedule_dict(s, db)
+
+
+@router.post("/scheduled/{schedule_id}/run", response_model=Dict[str, Any])
+async def run_scheduled_report(schedule_id: int, db: Session = Depends(get_db),
+                               current_user: AuthUser = Depends(get_current_active_user)):
+    from ..services.report_scheduler import run_schedule
+    s = _own_schedule(db, schedule_id, current_user)
+    run_schedule(db, s)
+    db.refresh(s)
+    return _schedule_dict(s, db)
+
+
+@router.delete("/scheduled/{schedule_id}", response_model=Dict[str, Any])
+async def delete_scheduled_report(schedule_id: int, db: Session = Depends(get_db),
+                                  current_user: AuthUser = Depends(get_current_active_user)):
+    s = _own_schedule(db, schedule_id, current_user)
+    tpl_id = s.template_id
+    db.delete(s)
+    db.flush()
+    # Keep the export history, just detach it from the template being removed.
+    db.query(ReportExportLog).filter(ReportExportLog.template_id == tpl_id).update(
+        {ReportExportLog.template_id: None}, synchronize_session=False)
+    db.query(ReportTemplate).filter(ReportTemplate.id == tpl_id,
+                                    ReportTemplate.template_name.like("[schedule]%")).delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": schedule_id}
+
+
+@router.get("/scheduled/{schedule_id}/file")
+async def scheduled_report_file(schedule_id: int, db: Session = Depends(get_db),
+                                current_user: AuthUser = Depends(get_current_active_user)):
+    from fastapi.responses import FileResponse
+    from ..services.report_scheduler import FORMAT_MIME, file_exists
+    s = _own_schedule(db, schedule_id, current_user)
+    if not file_exists(s.last_file_path):
+        raise HTTPException(status_code=404, detail="No file yet — run it first")
+    stamp = (s.last_run or datetime.utcnow()).strftime("%Y%m%d_%H%M")
+    return FileResponse(s.last_file_path, media_type=FORMAT_MIME.get(s.format, "application/octet-stream"),
+                        filename=f"{s.schedule_name}_{stamp}.{s.format}".replace(" ", "_"))
