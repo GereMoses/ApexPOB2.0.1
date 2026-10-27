@@ -86,6 +86,7 @@ def detect(email: str) -> Dict[str, object]:
 
 def try_login(host: str, port: int, user: str, password: str, timeout: int = 12) -> Optional[str]:
     """None when the login works, else a plain-English reason."""
+    stage = "connect"
     try:
         if port == 465:
             server = smtplib.SMTP_SSL(host, port, timeout=timeout, context=ssl.create_default_context())
@@ -95,6 +96,7 @@ def try_login(host: str, port: int, user: str, password: str, timeout: int = 12)
             server.starttls(context=ssl.create_default_context())
             server.ehlo()
         with server:
+            stage = "login"
             server.login(user, password)
         return None
     except smtplib.SMTPAuthenticationError as e:
@@ -105,6 +107,10 @@ def try_login(host: str, port: int, user: str, password: str, timeout: int = 12)
         if "Application-specific password required" in msg or "InvalidSecondFactor" in msg:
             return "This account needs an APP password, not the normal sign-in password."
         return "The email or app password was not accepted. Check both and try again."
+    except smtplib.SMTPServerDisconnected:
+        if stage == "login":   # Gmail hangs up instead of answering 535 on a bad login
+            return "The email or app password was not accepted (the server closed the sign-in). Check both and try again."
+        return f"{host}:{port} closed the connection before sign-in."
     except (socket.gaierror, socket.timeout, ConnectionRefusedError, OSError) as e:
         return f"Could not reach {host}:{port} ({e.__class__.__name__})."
     except smtplib.SMTPException as e:
