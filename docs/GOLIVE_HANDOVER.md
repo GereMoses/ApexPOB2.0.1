@@ -100,7 +100,9 @@ Open with SeamlessHR (sandbox): records rejected with "0 sent, 1 failed" and no 
 
 ## 11. Site setup (before go-live)
 - **Zones**: replace the 7 demo zones with the real layout — site → areas → rooms (**Parent Zone**), muster points (type Muster Point), and the boundary zones (**Site boundary** switch: gate / helideck / jetty). Place each on the GPS map (*Place on map*). Name the helideck/jetty zones exactly as flights/journeys name them (e.g. "Helipad") so arrivals land there.
-- **Readers**: Marconi's door readers are wired to **ZKTeco C3/inBio controllers** — set them up per §14. (Stand-alone ADMS terminals such as the F18 are set under Devices → reader purpose, then Zones → assign.)
+- **Readers — two separate families:**
+  - **T&A terminals** (stand-alone ZKTeco clock-in readers on ADMS, like the F18): Devices → reader purpose **Attendance**. They are the ONLY source of clock-in/out → attendance → SeamlessHR. Point each at this server (ADMS), then **Access Control → Controllers → Sync T&A terminals** (also nightly) sends every active person and their card; leavers are deleted. Fingerprints/faces, if used, are enrolled at the terminal.
+  - **Door readers** wired to **ZKTeco C3/inBio controllers** — doors, zones, POB and musters (not attendance). Set up per §14.
 - **Shifts**: set per department (all currently fall back to "Day 07-19 Mon–Fri"). Attendance uses **first punch = in, last punch = out** in site time (`att_rules.punch_state_mode = first_last`; `SITE_TIME_ZONE`, default Africa/Lagos).
 - **Roles** (Settings → Roles): give **journey.approve** to supervisors and **transport.override** to the logistics/helideck lead. View/manage rights follow `pob.view` / `pob.change`.
 - **Reader memory**: the F18 still stores June–July test punches; clear its attendance log before go-live so a stamp reset cannot re-send them.
@@ -123,11 +125,11 @@ Every muster, emergency, panic/duress alarm, missing-person escalation, all-clea
 Readers (IN and OUT per door) are wired to C3 controllers; ApexPOB talks to each panel directly on **TCP 4370** (no Windows PC / ZKAccess needed) and polls it every few seconds.
 1. **Network**: fixed IP / DHCP reservation per panel; this server must reach each panel on port 4370.
 2. **Access Control → Controllers → Add controller**: name, IP, model, comm password (if set). Doors and reader ports are created automatically.
-3. Per **reader port**: assign its **zone** and its **purpose** — *Clock in / out* (main gate IN and OUT — counts for attendance and SeamlessHR), *Door access only* (internal doors), or *Muster point*.
+3. Per **reader port**: assign its **zone** and its **purpose** — **Door access** or **Muster point**. (Door readers never count for attendance — that is the T&A terminals' job, §11.) An IN tap marks the person on board; an OUT tap through a **site-boundary** zone takes them off board.
 4. Per **door** (*Doors (card / PIN), fire exits & sirens*): how it opens — **Card**, **Card + PIN** (control room, stores, server room) or **PIN only** — and its fire role: **Fire exit — unlock in a fire**, Lock in a fire, or No change.
 5. **Sirens / strobes** on AUX outputs → **Add** → **Test 3 s**. **Fire alarm panel** dry contact on an AUX input → edit controller → *Fire alarm wired to* + *opens/closes* → tripping it starts fire mode by itself.
 6. **People**: everyone needs an **Attendance ID** (panel user ID = SeamlessHR ID) and a **card** — *Cards & PINs* → tap a new card on any reader and issue it, or paste card numbers from Excel; **Door PINs** → *Create & send missing PINs* (sent privately by WhatsApp/email; stored encrypted, shown once). Report **Door access readiness** shows who is missing what.
-7. **Sync users** on each controller (also nightly at 02:30): loads active staff, removes leavers (expired on the panel; only users ApexPOB loaded are touched).
+7. **Sync users** on each controller and **Sync T&A terminals** (both also nightly at 02:30): loads active staff with their card, removes leavers (only users ApexPOB loaded are touched). The **Door access readiness** report shows, per person, door panels and T&A terminals loaded.
 8. **Hardware acceptance — on the first panel, before the rest:** Probe ✓ → Sync users with one test person → their card opens the door, card + PIN works on a keypad door → mark them a leaver, sync → card refused → siren test → a fire exit held open by fire mode and re-locked on *clear* → fire alarm input trips fire mode. *(The panel write used for loading users is verified here — it has only been tested against a simulated panel.)*
 9. A panel unreachable for 5 minutes alerts the response team (and again when it is back).
 - Known limit: C3 **lockdown** closes held-open doors but valid cards still open them.

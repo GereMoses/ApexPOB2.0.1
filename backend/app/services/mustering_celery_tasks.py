@@ -983,11 +983,13 @@ celery_app.conf.beat_schedule["email-muster-list-shift-change"] = {
 
 @celery_app.task(name="app.services.mustering_celery_tasks.sync_access_panels")
 def sync_access_panels():
-    """Nightly: load active staff onto every C3/inBio panel and remove leavers."""
+    """Nightly: load active staff onto every C3/inBio door panel AND every T&A
+    terminal, and remove leavers from both."""
     from app.services.panel_sync import sync_all
+    from app.services.ta_sync import sync_all_terminals
     db = SessionLocal()
     try:
-        return sync_all(db)
+        return {"panels": sync_all(db), "ta_terminals": sync_all_terminals(db)}
     finally:
         db.close()
 

@@ -551,3 +551,14 @@ ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS verify_mode SMALLINT NOT NULL DEFA
 -- Controller offline alerting (once after 5 min down, and again when back)
 ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS offline_since TIMESTAMPTZ;
 ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS offline_alerted BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Who ApexPOB has loaded onto each T&A terminal (ADMS) — so card changes and leavers reach them
+CREATE TABLE IF NOT EXISTS ta_terminal_user (
+    sn         VARCHAR(20) NOT NULL REFERENCES iclock_terminal(sn) ON DELETE CASCADE,
+    pin        VARCHAR(24) NOT NULL,
+    emp_code   VARCHAR(50) NOT NULL,
+    card_no    VARCHAR(32),
+    state      VARCHAR(10) NOT NULL DEFAULT 'queued',   -- queued | removed
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (sn, pin)
+);

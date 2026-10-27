@@ -439,8 +439,13 @@ def assign_card(body: CardAssignIn, db: Session = Depends(get_db)):
                 loaded.append({"controller": ctrl.name, "ok": bool(r.get("pushed")), "failed": r.get("failed")})
             except Exception as exc:  # noqa: BLE001
                 loaded.append({"controller": ctrl.name, "ok": False, "error": str(exc)[:200]})
+    ta = []
+    if users:
+        from ..services.ta_sync import sync_all_terminals
+        ta = sync_all_terminals(db, [body.emp_code])
     note = None if users else "Saved — but this person has no Attendance ID yet, so the card can't be loaded onto the panels."
-    return {"success": True, "card_no": body.card_no, "emp_code": body.emp_code, "controllers": loaded, "note": note}
+    return {"success": True, "card_no": body.card_no, "emp_code": body.emp_code, "controllers": loaded,
+            "ta_terminals": [t["terminal"] for t in ta if t["loaded"]], "note": note}
 
 
 @router.post("/{controller_id}/sync-users", summary="Load active staff onto this panel and remove leavers")
@@ -498,7 +503,7 @@ def import_cards(rows: List[CardImportRow], db: Session = Depends(get_db)):
         done += 1
     db.commit()
     return {"updated": done, "problems": problems,
-            "next": "Run Sync users on each controller (or wait for tonight's sync) to load the cards onto the panels."}
+            "next": "Cards reach the door panels and T&A terminals at tonight's sync — or press Sync users now."}
 
 
 
@@ -572,3 +577,10 @@ def generate_missing_pins(body: GeneratePinsIn, db: Session = Depends(get_db)):
     return {"generated": len(codes), "sent": sent if body.send else None,
             "pins": issued if not body.send else None,
             "note": None if body.send else "Shown once — hand each PIN to its owner privately."}
+
+
+
+@router.post("/ta-terminals/sync", summary="Load active staff + cards onto every T&A terminal and remove leavers")
+def sync_ta_terminals(db: Session = Depends(get_db)):
+    from ..services.ta_sync import sync_all_terminals
+    return sync_all_terminals(db)

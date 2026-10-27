@@ -5479,8 +5479,9 @@ class ReportService:
         }}
 
     def ac_door_access(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """Can each person get through the doors? Attendance ID (panel user ID),
-        card, keypad PIN, and how many ZKTeco panels have them loaded."""
+        """Is each person ready for the readers? Attendance ID (the user ID on every
+        reader), card, keypad PIN, and how many door panels (C3 access control) and
+        T&A terminals (ADMS clock-in readers) have them loaded."""
         params: Dict[str, Any] = {}
         where = "p.is_active = TRUE"
         if filters.get('department'):
@@ -5494,22 +5495,28 @@ class ReportService:
                    COALESCE(NULLIF(p.department, ''), d.name, '') AS dept,
                    COALESCE(p.attendance_id, '') AS att_id, p.card_number, p.door_pin_enc IS NOT NULL AS has_pin,
                    (SELECT count(*) FROM controller_user u WHERE u.emp_code = p.emp_code AND u.state = 'loaded') AS panels,
-                   (SELECT count(*) FROM controller_user u WHERE u.emp_code = p.emp_code AND u.state = 'failed') AS failed
+                   (SELECT count(*) FROM controller_user u WHERE u.emp_code = p.emp_code AND u.state = 'failed') AS failed,
+                   (SELECT count(*) FROM ta_terminal_user t WHERE t.emp_code = p.emp_code AND t.state = 'queued') AS ta
             FROM personnel p LEFT JOIN departments d ON d.id = p.department_id
             WHERE {where} ORDER BY name
         """), params).fetchall()
         n_panels = self.db.execute(text("SELECT count(*) FROM access_controllers")).scalar() or 0
+        from .ta_sync import ta_terminals
+        n_ta = len(ta_terminals(self.db))
         data = []
         for r in rows:
             gaps = [g for g, ok in (("Attendance ID", bool(r.att_id)), ("card", bool(r.card_number))) if not ok]
             if not gaps and n_panels and r.panels < n_panels:
-                gaps.append("not on every panel" if not r.failed else "panel load failed")
+                gaps.append("not on every door panel" if not r.failed else "door panel load failed")
+            if not gaps and n_ta and r.ta < n_ta:
+                gaps.append("not on every T&A terminal")
             status = "Ready" if not gaps else "Missing " + ", ".join(gaps)
             if filters.get('status') == 'missing' and not gaps:
                 continue
             data.append({'emp_code': r.emp_code, 'name': r.name, 'department': r.dept,
                          'attendance_id': r.att_id or '—', 'card': str(r.card_number) if r.card_number else '—',
-                         'pin': 'Yes' if r.has_pin else 'No', 'panels': f"{r.panels} / {n_panels}", 'status': status})
+                         'pin': 'Yes' if r.has_pin else 'No', 'panels': f"{r.panels} / {n_panels}",
+                         'ta': f"{r.ta} / {n_ta}", 'status': status})
         columns = [
             {'field': 'name', 'label': 'Name', 'type': 'text'},
             {'field': 'emp_code', 'label': 'Emp code', 'type': 'text'},
@@ -5517,7 +5524,8 @@ class ReportService:
             {'field': 'attendance_id', 'label': 'Attendance ID', 'type': 'text'},
             {'field': 'card', 'label': 'Card', 'type': 'text'},
             {'field': 'pin', 'label': 'Door PIN', 'type': 'text'},
-            {'field': 'panels', 'label': 'On panels', 'type': 'text'},
+            {'field': 'panels', 'label': 'Door panels', 'type': 'text'},
+            {'field': 'ta', 'label': 'T&A terminals', 'type': 'text'},
             {'field': 'status', 'label': 'Status', 'type': 'status'},
         ]
         total = len(rows)

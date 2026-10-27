@@ -338,3 +338,30 @@ def test_security_events_and_door_access_reports(superuser_headers, panel, db, m
     ready = ReportService(db).get_report_data("ac.door_access", {"status": "missing"}, 1, 500)
     row = [r for r in ready["data"] if r["emp_code"] == p["emp_code"]][0]
     assert row["status"].startswith("Missing") and "card" in row["status"]
+
+
+@needs_db
+def test_ta_terminals_get_cards_and_lose_leavers(superuser_headers, panel, db, make_person):
+    from app.services.ta_sync import sync_all_terminals
+    c = _client(superuser_headers)
+    sn = "TA" + uuid.uuid4().hex[:8].upper()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose, connection_mode) VALUES (:s, 'Gate T&A', 1, 'ATTENDANCE', 'adms')"), {"s": sn})
+    db.commit()
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    card = str(uuid.uuid4().int)[:9]
+    r = c.post("/api/v1/access-controllers/cards/assign", json={"card_no": card, "emp_code": p["emp_code"]}).json()
+    assert sn in r["ta_terminals"]
+    cmds = [x[0] for x in db.execute(text("SELECT cmd_content FROM iclock_devcmd WHERE sn = :s ORDER BY id"), {"s": sn}).fetchall()]
+    assert any(f"PIN={pin}\t" in x and f"Card={card}" in x and x.startswith("DATA UPDATE USERINFO") for x in cmds)
+    # unchanged → nothing re-queued
+    n = len(cmds)
+    sync_all_terminals(db)
+    assert len([x for x in db.execute(text("SELECT cmd_content FROM iclock_devcmd WHERE sn = :s AND cmd_content LIKE :p"),
+                                      {"s": sn, "p": f"%PIN={pin}\t%"}).fetchall()]) == 1
+    # leaver → deleted from the terminal
+    db.execute(text("UPDATE personnel SET is_active = FALSE WHERE emp_code = :c"), {"c": p["emp_code"]})
+    db.commit()
+    sync_all_terminals(db)
+    assert db.execute(text("SELECT count(*) FROM iclock_devcmd WHERE sn = :s AND cmd_content = :c"),
+                      {"s": sn, "c": f"DATA DELETE USERINFO PIN={pin}"}).scalar() == 1

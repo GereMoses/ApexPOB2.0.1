@@ -112,13 +112,13 @@ const ReaderRow = ({ reader, zones, onSave, onDelete, onOpen, saving }) => {
       >
         {zones.map(z => <Option key={z.id} value={z.id}>{z.name}</Option>)}
       </Select>
-      <Tooltip title="What a tap here means">
-        <Select size="small" style={{ width: 168 }} value={reader.purpose || 'ACCESS'} loading={saving}
+      <Tooltip title="Door readers open doors and track zones / POB. Clock-in is done on the separate T&A terminals.">
+        <Select size="small" style={{ width: 150 }} value={reader.purpose || 'ACCESS'} loading={saving}
           onChange={v => onSave(reader, { purpose: v })}
           options={[
-            { value: 'ATTENDANCE', label: '🕘 Clock in / out' },
-            { value: 'ACCESS', label: '🚪 Door access only' },
+            { value: 'ACCESS', label: '🚪 Door access' },
             { value: 'MUSTERING', label: '🟢 Muster point' },
+            ...(reader.purpose === 'ATTENDANCE' ? [{ value: 'ATTENDANCE', label: '🕘 Clock in / out' }] : []),
           ]} />
       </Tooltip>
       <Tooltip title="Pulse-open this door">
@@ -682,6 +682,15 @@ const Controllers = () => {
   const qc = useQueryClient();
   const [modal, setModal] = useState(null);   // {mode:'create'|'edit', ctrl?} | {mode:'reader', ctrl}
   const [cardsOpen, setCardsOpen] = useState(false);
+  const taSync = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/ta-terminals/sync`),
+    onSuccess: (r) => {
+      if (!r?.length) { message.info('No T&A terminals found (Devices → reader purpose "Attendance")'); return; }
+      message.success(r.map(t => `${t.terminal}: ${t.loaded} sent, ${t.removed} removed`).join(' · ')
+        + (r[0]?.skipped_no_attendance_id ? ` · ${r[0].skipped_no_attendance_id} staff without an Attendance ID skipped` : ''), 8);
+    },
+    onError: e => message.error(e.message),
+  });
   const [learnId, setLearnId] = useState(null);
   const [readerMode, setReaderMode] = useState('entry_only');  // C3-400: entry_only | entry_exit
   const [form] = Form.useForm();
@@ -760,12 +769,15 @@ const Controllers = () => {
             </Tag>
           </h2>
           <div style={{ color: '#8c8c8c', fontSize: 13 }}>
-            LAN panels (ZKTeco C3 / inBio) with Wiegand readers. One IP per controller; assign each
-            door's IN/OUT reader to a zone for entry/exit tracking.
+            Door access: ZKTeco C3 / inBio panels with IN/OUT readers on each door — they open doors and track zones,
+            POB and musters. Clock-in / out is done on the separate T&amp;A terminals (Devices).
           </div>
         </div>
         <Space>
           <Button icon={<CreditCardOutlined />} onClick={() => setCardsOpen(true)}>Cards &amp; PINs</Button>
+          <Tooltip title="Send every active person (name + card) to the T&A clock-in terminals and remove leavers. Also runs nightly.">
+            <Button icon={<SyncOutlined />} loading={taSync.isPending} onClick={() => taSync.mutate()}>Sync T&amp;A terminals</Button>
+          </Tooltip>
           <Button icon={<ReloadOutlined />} onClick={() => qc.invalidateQueries({ queryKey: ['ac-controllers'] })}>
             Refresh
           </Button>
