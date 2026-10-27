@@ -5,7 +5,7 @@
  *   date: 'none' | 'single' | 'range' | 'month' | 'monthNumber'
  *   dateDefault: for single dates — 'today' | 'yesterday'
  *   extra: any of 'department', 'zone', 'company', 'person', 'search',
- *          'flightStatus', 'direction', 'journeyStatus', 'musterEvent', 'changeType'
+ *          'flightStatus', 'direction', 'journeyStatus', 'musterEvent', 'changeType', 'musterStatus', 'readiness'
  * kpis: summary keys to show (in order) with labels; anything else is ignored.
  *
  * Reports for hidden modules (Payroll, MTD, Meetings) and BioTime door-controller
@@ -79,8 +79,9 @@ export const REPORT_GROUPS = [
         filters: { date: 'range', extra: ['person'], required: ['person'] } },
       { code: 'pob.zone_occupancy_history', title: 'Zone occupancy history', desc: 'Entries, exits and unique visitors per zone per day.',
         filters: { date: 'range', extra: ['zone'] } },
-      { code: 'zone.security_events', title: 'Security events', desc: 'Door alarms, forced entries and lock events.',
-        filters: { date: 'range', extra: ['zone'] } },
+      { code: 'zone.security_events', title: 'Security events', desc: 'Refused cards and PINs, forced or held doors, tamper and duress.',
+        filters: { date: 'range', extra: ['zone'] },
+        kpis: { total_events: 'Events', refused_taps: 'Refused taps', unregistered_cards: 'Unknown cards', door_alarms: 'Door alarms' } },
     ],
   },
   {
@@ -158,6 +159,9 @@ export const REPORT_GROUPS = [
         filters: { date: 'monthNumber', extra: [] } },
       { code: 'personnel.anniversary', title: 'Work anniversaries', desc: 'Service anniversaries by month.',
         filters: { date: 'monthNumber', extra: ['department'] } },
+      { code: 'ac.door_access', title: 'Door access readiness', desc: 'Who can get through the doors: Attendance ID, card, PIN and panels loaded.',
+        filters: { date: 'none', extra: ['department', 'search', 'readiness'] },
+        kpis: { ready: 'Ready', without_card: 'Without card', without_attendance_id: 'Without Attendance ID', with_pin: 'With PIN' } },
       { code: 'device.status', title: 'Reader status', desc: 'Every reader with last contact and enrolled users.',
         filters: { date: 'none', extra: [] } },
       { code: 'device.offline', title: 'Offline readers', desc: 'Readers not heard from recently.',

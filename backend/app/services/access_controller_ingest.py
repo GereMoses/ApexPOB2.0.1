@@ -390,6 +390,40 @@ def _recalc_later(emp_code: str, punch_time: datetime) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+OFFLINE_ALERT_AFTER = 300   # seconds a panel may be unreachable before people are told
+
+
+def _offline_alert(controller: AccessController, back: bool) -> None:
+    """A panel that can't be reached means its doors' taps aren't recorded (POB,
+    attendance, muster) and emergency door commands won't reach it."""
+    try:
+        from .notify_dispatch import dispatch_background
+        from ..api.notifications import notify_sync
+        where = f"{controller.name} ({controller.ip_address}{', ' + controller.location if controller.location else ''})"
+        if back:
+            title, msg = f"Access controller back online — {controller.name}", f"{where} is reachable again; taps are being recorded."
+        else:
+            title = f"Access controller OFFLINE — {controller.name}"
+            msg = (f"{where} has not answered for {OFFLINE_ALERT_AFTER // 60}+ minutes. Taps at its doors are not reaching "
+                   f"ApexPOB (POB, attendance, muster) and emergency door commands cannot reach it. Check power and network.")
+        from ..core.database import SessionLocal
+        ndb = SessionLocal()
+        try:
+            ndb.execute(text("""
+                INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, expires_at)
+                VALUES (:dk, 'controller_offline', :t, :m, :p, NOW() + INTERVAL '7 days')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {"dk": f"ctrl_{controller.id}_{'up' if back else 'down'}_{int(_time.time() // 60)}",
+                   "t": title, "m": msg, "p": "low" if back else "high"})
+            ndb.commit()
+        finally:
+            ndb.close()
+        notify_sync({"type": "controller_offline", "priority": "low" if back else "high", "title": title, "message": msg})
+        dispatch_background("controller_offline", controller.id, [], title, msg, include_responders=True)
+    except Exception as e:  # noqa: BLE001
+        logger.error("Controller offline alert failed: %s", e)
+
+
 def poll_controller_once(controller: AccessController, db: Session) -> Dict[str, object]:
     """Pull buffered realtime events from one controller and ingest them.
 
@@ -401,14 +435,25 @@ def poll_controller_once(controller: AccessController, db: Session) -> Dict[str,
         events: List[C3Event] = _fetch_rtlog(controller, db)
         for ev in events:
             all_updates.update(ingest_event(controller, ev, db))
+        if controller.offline_alerted:
+            _offline_alert(controller, back=True)
         controller.status = "online"
         controller.last_seen = datetime.utcnow()
         controller.last_error = None
+        controller.offline_since = None
+        controller.offline_alerted = False
         result["events"] = len(events)
         _sync_clock_daily(controller)
     except Exception as exc:  # noqa: BLE001 — isolate per-controller failures
+        from datetime import timezone as _tz
+        now = datetime.now(_tz.utc)
         controller.status = "error"
         controller.last_error = str(exc)[:255]
+        controller.offline_since = controller.offline_since or now
+        since = controller.offline_since if controller.offline_since.tzinfo else controller.offline_since.replace(tzinfo=_tz.utc)
+        if not controller.offline_alerted and (now - since).total_seconds() >= OFFLINE_ALERT_AFTER:
+            _offline_alert(controller, back=False)
+            controller.offline_alerted = True
         result["error"] = str(exc)
         logger.warning("Controller %s poll failed: %s", controller.id, exc)
     db.commit()

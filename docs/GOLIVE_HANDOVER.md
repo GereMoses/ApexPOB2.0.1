@@ -78,14 +78,14 @@ docker exec -i pob_postgres pg_restore -U pob_user -d pob_system --clean --if-ex
 ## 9. Outstanding go-live checklist
 - [ ] DDNS hostname + Let's Encrypt cert (replace self-signed)
 - [ ] Change `admin` password; set strong `GLOBAL_ADMIN_PASSWORD`; rotate DB password
-- [ ] Fill `.env.prod` notification channels (SMTP/SMS) — required for emergency alerts
+- [ ] **Alerts**: Settings → Email (address + app password) and Settings → WhatsApp & Alerts (provider + response team) — see §13. Until then every alert is logged as *skipped*.
 - [ ] Set `DEVICE_SCAN_SUBNETS` (for any same-LAN readers); verify `GET /api/device/network-diagnostics`
 - [ ] Validate Business Central + SeamlessHR against vendor sandboxes (`docs/INTEGRATIONS.md`)
 - [ ] Confirm backup destination + test restore
 - [ ] Configure Alertmanager recipients
-- [ ] Run the **full test suite** on the release build: `./scripts/run_tests.sh` (expected: 173 passed, 1 skipped). `./scripts/run_safety_tests.sh` runs just the 16 go-live safety tests. Both use a throwaway database and a throwaway container — never the live data — and the suite **refuses to run** against any database whose name lacks "test".
+- [ ] Run the **full test suite** on the release build: `./scripts/run_tests.sh` (expected: 207 passed, 1 skipped). `./scripts/run_safety_tests.sh` runs just the go-live safety tests (mustering, alerts, controllers, reports). Both use a throwaway database and a throwaway container — never the live data — and the suite **refuses to run** against any database whose name lacks "test".
 - [ ] **Renew the licence** (expired 2026-08-31 — unauthenticated requests get 402)
-- [ ] Complete §10 (SeamlessHR → Marconi switch-over) and §11 (site setup)
+- [ ] Complete §10 (SeamlessHR → Marconi switch-over), §11 (site setup) and §14 (ZKTeco controller commissioning)
 
 ## 10. SeamlessHR → Marconi switch-over
 Everything was proven on SeamlessHR's sandbox (Integration Company); Marconi uses the same API. On the day:
@@ -100,7 +100,7 @@ Open with SeamlessHR (sandbox): records rejected with "0 sent, 1 failed" and no 
 
 ## 11. Site setup (before go-live)
 - **Zones**: replace the 7 demo zones with the real layout — site → areas → rooms (**Parent Zone**), muster points (type Muster Point), and the boundary zones (**Site boundary** switch: gate / helideck / jetty). Place each on the GPS map (*Place on map*). Name the helideck/jetty zones exactly as flights/journeys name them (e.g. "Helipad") so arrivals land there.
-- **Readers** (Devices → reader purpose, then Zones → assign): Attendance, Entry, Exit, Mustering, or **Transport check-in** (helideck/gangway auto check-in). Every Entry/Exit/Mustering reader needs a zone (an alert is raised otherwise).
+- **Readers**: Marconi's door readers are wired to **ZKTeco C3/inBio controllers** — set them up per §14. (Stand-alone ADMS terminals such as the F18 are set under Devices → reader purpose, then Zones → assign.)
 - **Shifts**: set per department (all currently fall back to "Day 07-19 Mon–Fri"). Attendance uses **first punch = in, last punch = out** in site time (`att_rules.punch_state_mode = first_last`; `SITE_TIME_ZONE`, default Africa/Lagos).
 - **Roles** (Settings → Roles): give **journey.approve** to supervisors and **transport.override** to the logistics/helideck lead. View/manage rights follow `pob.view` / `pob.change`.
 - **Reader memory**: the F18 still stores June–July test punches; clear its attendance log before go-live so a stamp reset cannot re-send them.
@@ -110,3 +110,30 @@ Open with SeamlessHR (sandbox): records rejected with "0 sent, 1 failed" and no 
 - **Off board**: Exit through a **site-boundary** zone; departure of an outbound flight (*In transit*); start of a "leaving site" land journey; inactivity auto-checkout (Settings → Database, if enabled).
 - Moving between zones never changes POB; leaving a room puts the person in its parent zone. Readers that upload late cannot move anyone backwards.
 - Confirming a passenger means *boarded* only — POB moves with the flight. Cancelling a flight in transit, offloading or removing a passenger undoes it.
+
+## 13. Alerts — email, WhatsApp and the response team
+Every muster, emergency, panic/duress alarm, missing-person escalation, all-clear, controller-offline and scheduled report goes out on **every channel that is set up**, and is written to the delivery log (Settings → WhatsApp & Alerts → Alert log; also Emergency → Notifications) with *sent / failed / skipped* and the reason.
+1. **Email** — Settings → **Email**: the alert mailbox's address + an **app password** → **Connect** (ApexPOB finds the server and proves the login before saving) → **Send a test**.
+   - Marconi (`marconi.ng`) is on **Microsoft 365**: the mailbox needs multi-factor sign-in (to create an app password) and an M365 admin must allow **Authenticated SMTP** for it (admin centre → Users → user → Mail → Manage email apps).
+2. **WhatsApp** — Settings → **WhatsApp & Alerts**: provider **Meta Cloud API** (recommended) → Phone number ID, permanent access token, and an approved **Utility** template with one variable, e.g. `🚨 ApexPOB alert: {{1}}`. Termii / Twilio also supported. Switch **On** → **Save** → **Send a test**.
+3. **Emergency response team** (same tab) — OIM, HSE lead, control room, medic: name, role, WhatsApp number, email. They get every alert wherever they are; staff only get alerts while **on board**.
+4. Muster lists are emailed to the response team at **06:00 and 18:00** (printable paper fallback).
+
+## 14. ZKTeco controller commissioning (C3 / inBio)
+Readers (IN and OUT per door) are wired to C3 controllers; ApexPOB talks to each panel directly on **TCP 4370** (no Windows PC / ZKAccess needed) and polls it every few seconds.
+1. **Network**: fixed IP / DHCP reservation per panel; this server must reach each panel on port 4370.
+2. **Access Control → Controllers → Add controller**: name, IP, model, comm password (if set). Doors and reader ports are created automatically.
+3. Per **reader port**: assign its **zone** and its **purpose** — *Clock in / out* (main gate IN and OUT — counts for attendance and SeamlessHR), *Door access only* (internal doors), or *Muster point*.
+4. Per **door** (*Doors (card / PIN), fire exits & sirens*): how it opens — **Card**, **Card + PIN** (control room, stores, server room) or **PIN only** — and its fire role: **Fire exit — unlock in a fire**, Lock in a fire, or No change.
+5. **Sirens / strobes** on AUX outputs → **Add** → **Test 3 s**. **Fire alarm panel** dry contact on an AUX input → edit controller → *Fire alarm wired to* + *opens/closes* → tripping it starts fire mode by itself.
+6. **People**: everyone needs an **Attendance ID** (panel user ID = SeamlessHR ID) and a **card** — *Cards & PINs* → tap a new card on any reader and issue it, or paste card numbers from Excel; **Door PINs** → *Create & send missing PINs* (sent privately by WhatsApp/email; stored encrypted, shown once). Report **Door access readiness** shows who is missing what.
+7. **Sync users** on each controller (also nightly at 02:30): loads active staff, removes leavers (expired on the panel; only users ApexPOB loaded are touched).
+8. **Hardware acceptance — on the first panel, before the rest:** Probe ✓ → Sync users with one test person → their card opens the door, card + PIN works on a keypad door → mark them a leaver, sync → card refused → siren test → a fire exit held open by fire mode and re-locked on *clear* → fire alarm input trips fire mode. *(The panel write used for loading users is verified here — it has only been tested against a simulated panel.)*
+9. A panel unreachable for 5 minutes alerts the response team (and again when it is back).
+- Known limit: C3 **lockdown** closes held-open doors but valid cards still open them.
+
+## 15. Mustering & emergencies (for operators)
+- **Live muster board** (Emergency & Mustering → *Live muster board*, made for the control-room TV): one-tap **General alarm / Fire / Gas / Man down / Drill** — whole-site muster of everyone on board **plus checked-in visitors**; Fire/Gas also open fire exits and sound sirens. Shows % accounted, safe per assembly point, and the missing list by last-seen location with **Safe / Hurt** buttons for wardens. **End muster** sends the all-clear.
+- People are counted safe by tapping any reader at a muster point; someone who taps out at the site gate during a muster is **Left site** (accounted for).
+- Missing people escalate to the response team at 10 / 20 / 30 / 60 minutes (one message per level, not per person).
+- **Print muster list** on the board = paper fallback for power or network loss.

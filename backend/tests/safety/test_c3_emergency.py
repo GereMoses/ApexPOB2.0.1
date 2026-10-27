@@ -293,3 +293,48 @@ def test_door_verify_mode_is_written_to_the_panel(superuser_headers, panel, db, 
     r = c.put(f"/api/v1/access-controllers/doors/{door['id']}", json={"verify_mode": 11}).json()
     assert r["verify_label"] == "Card + PIN" and r["panel"]["ok"] and params == [(2, 11)]
     assert c.put(f"/api/v1/access-controllers/doors/{door['id']}", json={"verify_mode": 7}).status_code == 400
+
+
+@needs_db
+def test_offline_controller_alerts_once_then_back_online(superuser_headers, panel, db, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    import app.services.access_controller_ingest as ing
+    from app.models.access_controller import AccessController
+    alerts = []
+    monkeypatch.setattr(ing, "_offline_alert", lambda ctrl, back: alerts.append(back))
+    c = _client(superuser_headers)
+    ip = f"10.2.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "Remote", "ip_address": ip, "model": "C3-100", "door_count": 1}).json()["id"]
+    ctrl = db.query(AccessController).get(cid)
+
+    def down(*a, **k):
+        raise ConnectionError("no route to host")
+    monkeypatch.setattr(ing, "_fetch_rtlog", down)
+    ing.poll_controller_once(ctrl, db)                       # just went down → no alert yet
+    assert alerts == []
+    ctrl.offline_since = datetime.now(timezone.utc) - timedelta(minutes=6)
+    db.commit()
+    ing.poll_controller_once(ctrl, db)
+    ing.poll_controller_once(ctrl, db)
+    assert alerts == [False]                                 # told once
+    monkeypatch.setattr(ing, "_fetch_rtlog", lambda c, d: [])
+    monkeypatch.setattr(ing, "_sync_clock_daily", lambda c: None)
+    ing.poll_controller_once(ctrl, db)
+    assert alerts == [False, True] and ctrl.status == "online"
+
+
+@needs_db
+def test_security_events_and_door_access_reports(superuser_headers, panel, db, make_person, make_zone):
+    from app.services.report_service import ReportService
+    c = _client(superuser_headers)
+    gate = make_zone(boundary=True)
+    cid = _controller_with_reader(c, "ATTENDANCE", gate)
+    from datetime import datetime
+    _tap(db, cid, card="987654321", event_type=27, when=datetime.now())
+    ev = ReportService(db).get_report_data("zone.security_events", {}, 1, 100)
+    assert any(r["event_type"] == "Unregistered card" for r in ev["data"])
+    assert ev["summary"]["unregistered_cards"] >= 1
+    p = make_person(attendance_id=str(uuid.uuid4().int)[:8])
+    ready = ReportService(db).get_report_data("ac.door_access", {"status": "missing"}, 1, 500)
+    row = [r for r in ready["data"] if r["emp_code"] == p["emp_code"]][0]
+    assert row["status"].startswith("Missing") and "card" in row["status"]

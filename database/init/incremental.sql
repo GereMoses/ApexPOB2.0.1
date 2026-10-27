@@ -547,3 +547,7 @@ ALTER TABLE personnel ADD COLUMN IF NOT EXISTS door_pin_set_at TIMESTAMPTZ;
 ALTER TABLE controller_user ADD COLUMN IF NOT EXISTS secret_hash VARCHAR(64);
 -- How a door is opened: 4 = card only, 11 = card + PIN, 3 = PIN only (C3 DoorNVerifyType)
 ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS verify_mode SMALLINT NOT NULL DEFAULT 4;
+
+-- Controller offline alerting (once after 5 min down, and again when back)
+ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS offline_since TIMESTAMPTZ;
+ALTER TABLE access_controllers ADD COLUMN IF NOT EXISTS offline_alerted BOOLEAN NOT NULL DEFAULT FALSE;

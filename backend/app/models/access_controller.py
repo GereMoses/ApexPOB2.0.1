@@ -61,6 +61,8 @@ class AccessController(Base):
     # Fire alarm panel dry contact wired to this panel's AUX input → fire mode
     fire_alarm_input = Column(Integer, nullable=True)        # AUX IN number, None = not wired
     fire_alarm_on = Column(String(6), nullable=False, default="open", server_default="open")  # open | close
+    offline_since = Column(DateTime(timezone=True), nullable=True)
+    offline_alerted = Column(Boolean, nullable=False, default=False, server_default="false")
 
     notes = Column(Text, nullable=True)
 

@@ -341,7 +341,7 @@ function toApiFilters(report, s) {
   if (f.date === 'monthNumber' && s._monthNo) out.month = s._monthNo;
   const map = { department: 'department', zone: 'zone_id', company: 'company', person: 'emp_code', search: 'search',
     flightStatus: 'status', journeyStatus: 'status', direction: 'direction', musterEvent: 'event_id', changeType: 'change_type',
-    musterStatus: 'status' };
+    musterStatus: 'status', readiness: 'status' };
   Object.entries(map).forEach(([k, api]) => { if (s[k] !== undefined && s[k] !== null && s[k] !== '') out[api] = s[k]; });
   return out;
 }
@@ -911,6 +911,10 @@ function FilterBar({ report, filters, set, setFilters }) {
         <Select allowClear placeholder="Status" style={{ width: 170 }} value={filters.journeyStatus}
           onChange={(v) => set('journeyStatus', v)}
           options={['DRAFT', 'SUBMITTED', 'APPROVED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED', 'REJECTED'].map(s => ({ value: s, label: humanize(s.toLowerCase()) }))} />
+      )}
+      {extra.includes('readiness') && (
+        <Segmented value={filters.readiness || ''} onChange={(v) => set('readiness', v || undefined)}
+          options={[{ label: 'Everyone', value: '' }, { label: 'Missing something', value: 'missing' }]} />
       )}
       {extra.includes('musterStatus') && (
         <Segmented value={filters.musterStatus || ''} onChange={(v) => set('musterStatus', v || undefined)}

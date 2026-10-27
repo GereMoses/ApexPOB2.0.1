@@ -140,6 +140,7 @@ class ReportService:
         'pob.trend':                    {'date_from': str, 'date_to': str},
         'att.hr_sync':                  {'date_from': str, 'date_to': str, 'status': str},
         'personnel.no_pin':             {'department': str},
+        'ac.door_access':               {'department': str, 'search': str, 'status': str},
         'muster.roll_call':             {'event_id': int, 'status': str},
         'travel.passengers':            {'date_from': str, 'date_to': str, 'direction': str, 'search': str},
         'travel.journeys':              {'date_from': str, 'date_to': str, 'status': str},
@@ -326,6 +327,7 @@ class ReportService:
             'pob.trend':                    self.pob_trend,
             'att.hr_sync':                  self.attendance_hr_sync,
             'personnel.no_pin':             self.personnel_no_pin,
+            'ac.door_access':               self.ac_door_access,
             'muster.roll_call':             self.muster_roll_call,
             'travel.passengers':            self.travel_passengers,
             'travel.journeys':              self.travel_journeys,
@@ -5122,101 +5124,63 @@ class ReportService:
         }
 
     def zone_security_events(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Security events from BOTH reader families, newest first:
+          * ZKTeco controller (C3/inBio) taps that were REFUSED (unregistered or expired
+            card, wrong hours, anti-passback, wrong PIN…) and door alarms (forced, held
+            open) — access_logs written by the controller ingest;
+          * ADMS terminal alarms (tamper, duress, anti-passback…) — iclock_operlog.
         """
-        Device security event log — alarms, tamper, anti-passback, duress.
-        Sourced from iclock_operlog (raw ZKTeco OPERLOG records).
-        oper_event codes: 1=alarm, 2=tamper, 3=anti_passback, 4=duress,
-                          5=fire_unlock, 6=emergency_lock, 9=door_open_too_long
-        """
-        from ..models.zone import Zone
-        from ..models.device import Device
-
-        _SECURITY_EVENT_CODES = {
-            1: 'Alarm',
-            2: 'Tamper',
-            3: 'Anti-Passback',
-            4: 'Duress',
-            5: 'Fire Unlock',
-            6: 'Emergency Lock',
-            9: 'Door Open Too Long',
-        }
-        _SECURITY_OPER_CODES = list(_SECURITY_EVENT_CODES.keys())
-
-        query = (
-            self.db.query(IClockOperLog, Device.zone_id)
-            .outerjoin(Device, Device.serial_number == IClockOperLog.terminal_sn)
-            .filter(IClockOperLog.oper_event.in_(_SECURITY_OPER_CODES))
-        )
-
-        if filters.get('date_from'):
-            query = query.filter(IClockOperLog.event_time >= filters['date_from'])
-        if filters.get('date_to'):
-            query = query.filter(IClockOperLog.event_time < _day_after(filters['date_to']))
+        df, dt = self._range(filters, back_days=6)
+        params: Dict[str, Any] = {'df': df, 'dt': dt}
+        zone_sql = ""
         if filters.get('zone_id'):
-            query = query.filter(Device.zone_id == filters['zone_id'])
-        if filters.get('event_type'):
-            # Allow filtering by event label, e.g. "Alarm" or "Tamper"
-            code = next((k for k, v in _SECURITY_EVENT_CODES.items()
-                         if v.lower() == str(filters['event_type']).lower()), None)
-            if code is not None:
-                query = query.filter(IClockOperLog.oper_event == code)
-
-        query = query.order_by(desc(IClockOperLog.event_time))
-        rows, total = self._paginate(query)
-
-        # Build zone name lookup for any zone_ids encountered
-        zone_ids = {zone_id for _, zone_id in rows if zone_id is not None}
-        zone_names: Dict[int, str] = {}
-        if zone_ids:
-            zones = self.db.query(Zone.id, Zone.name).filter(Zone.id.in_(zone_ids)).all()
-            zone_names = {z.id: z.name for z in zones}
-
-        data = []
-        event_type_counts: Dict[str, int] = {}
-        for log, zone_id in rows:
-            event_label = _SECURITY_EVENT_CODES.get(log.oper_event, f"Code {log.oper_event}")
-            zone_name   = zone_names.get(zone_id, '') if zone_id else ''
+            zone_sql = " AND zone_id = :z"
+            params['z'] = int(filters['zone_id'])
+        oper_labels = {1: 'Alarm', 2: 'Tamper', 3: 'Anti-passback', 4: 'Duress', 5: 'Fire unlock',
+                       6: 'Emergency lock', 9: 'Door open too long'}
+        rows = self.db.execute(text(f"""
+            SELECT * FROM (
+                SELECT a.timestamp AS t, COALESCE(a.denial_reason, 'Refused') AS what,
+                       COALESCE(NULLIF(p.full_name, ''), p.emp_code, '') AS who,
+                       COALESCE(a.notes, '') AS device, a.zone_id, a.direction, 'Controller' AS source
+                FROM access_logs a LEFT JOIN personnel p ON p.id = a.personnel_id
+                WHERE a.access_granted = FALSE
+                UNION ALL
+                SELECT o.event_time, 'OPER' || o.oper_event::text, COALESCE(o.admin_id, ''),
+                       o.terminal_sn, t.zone_id, NULL, 'Terminal'
+                FROM iclock_operlog o LEFT JOIN iclock_terminal t ON t.sn = o.terminal_sn
+                WHERE o.oper_event IN (1, 2, 3, 4, 5, 6, 9)
+            ) x
+            WHERE t >= CAST(:df AS date) AND t < CAST(:dt AS date) + INTERVAL '1 day' {zone_sql}
+            ORDER BY t DESC LIMIT 5000
+        """), params).fetchall()
+        zones = {z.id: z.name for z in self.db.execute(text("SELECT id, name FROM zones")).fetchall()}
+        data, counts = [], {}
+        for r in rows:
+            what = oper_labels.get(int(r.what[4:]), r.what) if str(r.what).startswith('OPER') else r.what
+            if filters.get('event_type') and str(filters['event_type']).lower() not in what.lower():
+                continue
             data.append({
-                'event_time':   self._fmt_dt(log.event_time),
-                'event_type':   event_label,
-                'terminal_sn':  log.terminal_sn,
-                'zone_name':    zone_name,
-                'admin_id':     log.admin_id or '',
-                'object_name':  log.object_name or '',
-                'door_id':      log.door_id or '',
+                'event_time': self._fmt_dt(r.t), 'event_type': what, 'person': r.who or '—',
+                'reader': r.device or '—', 'zone_name': zones.get(r.zone_id, '') if r.zone_id else '',
+                'direction': (r.direction or '').title(), 'source': r.source,
             })
-            event_type_counts[event_label] = event_type_counts.get(event_label, 0) + 1
-
+            counts[what] = counts.get(what, 0) + 1
         columns = [
-            {'field': 'event_time',  'label': 'Time',        'type': 'datetime'},
-            {'field': 'event_type',  'label': 'Event Type',  'type': 'text'},
-            {'field': 'terminal_sn', 'label': 'Device SN',   'type': 'text'},
-            {'field': 'zone_name',   'label': 'Zone',        'type': 'text'},
-            {'field': 'admin_id',    'label': 'Employee',    'type': 'text'},
-            {'field': 'object_name', 'label': 'Object',      'type': 'text'},
-            {'field': 'door_id',     'label': 'Door',        'type': 'text'},
+            {'field': 'event_time', 'label': 'Time', 'type': 'datetime'},
+            {'field': 'event_type', 'label': 'Event', 'type': 'status'},
+            {'field': 'person', 'label': 'Person / card', 'type': 'text'},
+            {'field': 'reader', 'label': 'Reader', 'type': 'text'},
+            {'field': 'zone_name', 'label': 'Zone', 'type': 'text'},
+            {'field': 'direction', 'label': 'In / out', 'type': 'text'},
+            {'field': 'source', 'label': 'Source', 'type': 'text'},
         ]
-        chart_data = {
-            'labels': list(event_type_counts.keys()),
-            'datasets': [{'label': 'Security Events',
-                          'data': list(event_type_counts.values()),
-                          'backgroundColor': '#EF4444'}],
-        }
-        return {
-            'columns': columns, 'data': data, 'chart_data': chart_data,
-            'total': total,
-            'summary': {
-                'total_events':    total,
-                'by_type':         event_type_counts,
-                'alarm_count':     event_type_counts.get('Alarm', 0),
-                'tamper_count':    event_type_counts.get('Tamper', 0),
-                'antipassback_count': event_type_counts.get('Anti-Passback', 0),
-                'duress_count':    event_type_counts.get('Duress', 0),
-            },
-            'timezone': 'UTC',
-        }
-
-    # ==================== POB OPERATIONS REPORTS ====================
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:10]
+        return {'columns': columns, 'data': data,
+                'summary': {'total_events': len(data), 'refused_taps': sum(1 for d in data if d['source'] == 'Controller'),
+                            'unregistered_cards': counts.get('Unregistered card', 0),
+                            'door_alarms': sum(v for k, v in counts.items() if k in ('Door forced open', 'Door held open too long', 'Door alarm'))},
+                'chart_data': {'labels': [k for k, _ in top], 'datasets': [{'label': 'Events', 'data': [v for _, v in top]}]}}
 
     def pob_daily_manifest(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Current onboard personnel manifest — who is on the platform right now."""
@@ -5513,6 +5477,56 @@ class ReportService:
             'records_sent': sum(d['sent'] for d in data if d['kind'] == 'Attendance push'),
             'records_failed': sum(d['failed'] for d in data if d['kind'] == 'Attendance push'),
         }}
+
+    def ac_door_access(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Can each person get through the doors? Attendance ID (panel user ID),
+        card, keypad PIN, and how many ZKTeco panels have them loaded."""
+        params: Dict[str, Any] = {}
+        where = "p.is_active = TRUE"
+        if filters.get('department'):
+            where += " AND (p.department = :dept OR d.name = :dept)"
+            params['dept'] = filters['department']
+        if filters.get('search'):
+            where += " AND (p.full_name ILIKE :q OR p.emp_code ILIKE :q)"
+            params['q'] = f"%{filters['search']}%"
+        rows = self.db.execute(text(f"""
+            SELECT p.emp_code, COALESCE(NULLIF(p.full_name, ''), TRIM(CONCAT(p.first_name, ' ', p.last_name))) AS name,
+                   COALESCE(NULLIF(p.department, ''), d.name, '') AS dept,
+                   COALESCE(p.attendance_id, '') AS att_id, p.card_number, p.door_pin_enc IS NOT NULL AS has_pin,
+                   (SELECT count(*) FROM controller_user u WHERE u.emp_code = p.emp_code AND u.state = 'loaded') AS panels,
+                   (SELECT count(*) FROM controller_user u WHERE u.emp_code = p.emp_code AND u.state = 'failed') AS failed
+            FROM personnel p LEFT JOIN departments d ON d.id = p.department_id
+            WHERE {where} ORDER BY name
+        """), params).fetchall()
+        n_panels = self.db.execute(text("SELECT count(*) FROM access_controllers")).scalar() or 0
+        data = []
+        for r in rows:
+            gaps = [g for g, ok in (("Attendance ID", bool(r.att_id)), ("card", bool(r.card_number))) if not ok]
+            if not gaps and n_panels and r.panels < n_panels:
+                gaps.append("not on every panel" if not r.failed else "panel load failed")
+            status = "Ready" if not gaps else "Missing " + ", ".join(gaps)
+            if filters.get('status') == 'missing' and not gaps:
+                continue
+            data.append({'emp_code': r.emp_code, 'name': r.name, 'department': r.dept,
+                         'attendance_id': r.att_id or '—', 'card': str(r.card_number) if r.card_number else '—',
+                         'pin': 'Yes' if r.has_pin else 'No', 'panels': f"{r.panels} / {n_panels}", 'status': status})
+        columns = [
+            {'field': 'name', 'label': 'Name', 'type': 'text'},
+            {'field': 'emp_code', 'label': 'Emp code', 'type': 'text'},
+            {'field': 'department', 'label': 'Department', 'type': 'text'},
+            {'field': 'attendance_id', 'label': 'Attendance ID', 'type': 'text'},
+            {'field': 'card', 'label': 'Card', 'type': 'text'},
+            {'field': 'pin', 'label': 'Door PIN', 'type': 'text'},
+            {'field': 'panels', 'label': 'On panels', 'type': 'text'},
+            {'field': 'status', 'label': 'Status', 'type': 'status'},
+        ]
+        total = len(rows)
+        ready = sum(1 for d in data if d['status'] == 'Ready')
+        return {'columns': columns, 'data': data, 'summary': {
+            'active_staff': total, 'ready': ready,
+            'without_card': sum(1 for r in rows if not r.card_number),
+            'without_attendance_id': sum(1 for r in rows if not r.att_id),
+            'with_pin': sum(1 for r in rows if r.has_pin)}}
 
     def personnel_no_pin(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Active staff without an Attendance ID: they cannot be enrolled on a reader,
