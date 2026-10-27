@@ -108,7 +108,7 @@ class ExportService:
             if export_log:
                 export_log.status = 'completed'
                 export_log.file_path = file_path
-                export_log.row_count = len(result.get('rows', []))
+                export_log.row_count = len(result.get('data', []))
                 export_log.file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
                 self.db.commit()
             
@@ -136,8 +136,10 @@ class ExportService:
         file_path = self.export_dir / filename
         
         # Create PDF document
-        doc = SimpleDocTemplate(str(file_path), pagesize=A4, rightMargin=72, leftMargin=72,
-                              topMargin=72, bottomMargin=18)
+        # Landscape with modest margins: most reports have 8-14 columns.
+        from reportlab.lib.pagesizes import landscape
+        doc = SimpleDocTemplate(str(file_path), pagesize=landscape(A4), rightMargin=28, leftMargin=28,
+                              topMargin=36, bottomMargin=36)
         
         # Get company info for header
         company = self.db.query(BaseCompany).first()
@@ -252,21 +254,24 @@ class ExportService:
                 ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
             ]))
             
-            # Column widths
-            col_widths = []
-            for col in columns:
-                col_widths.append(1.5 * inch)  # Default width
-            
-            table._argW = col_widths
+            # Share the printable width across the columns (a fixed 1.5" per column ran
+            # off the page for anything over ~7 columns).
+            n = max(len(columns), 1)
+            table._argW = [doc.width / n] * n
             
             story.append(table)
         
-        # Footer
-        story.append(Spacer(1, 20))
-        story.append(Paragraph(f"Page {doc.page}", styles['Normal']))
-        
-        # Build PDF
-        doc.build(story)
+        # Page number + generated-at footer on every page. (Reading doc.page while the
+        # story is still being assembled raised AttributeError: every PDF export failed.)
+        def _footer(canvas, d):
+            canvas.saveState()
+            canvas.setFont('Helvetica', 8)
+            canvas.setFillColor(colors.grey)
+            canvas.drawString(d.leftMargin, 18, f"{company_name} · generated {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            canvas.drawRightString(d.pagesize[0] - d.rightMargin, 18, f"Page {d.page}")
+            canvas.restoreState()
+
+        doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
         
         return str(file_path)
     
@@ -289,7 +294,7 @@ class ExportService:
             'bg_color': '#4F81BD',
             'font_color': 'white',
             'border': 1,
-            'alignment': 'center',
+            'align': 'center',
             'valign': 'vcenter'
         })
         
@@ -297,29 +302,29 @@ class ExportService:
             'bold': True,
             'font_size': 16,
             'font_color': '#2F5496',
-            'alignment': 'center'
+            'align': 'center'
         })
         
         title_format = workbook.add_format({
             'bold': True,
             'font_size': 14,
             'font_color': '#2F5496',
-            'alignment': 'center'
+            'align': 'center'
         })
         
         date_format = workbook.add_format({
             'num_format': 'yyyy-mm-dd hh:mm:ss',
-            'alignment': 'center'
+            'align': 'center'
         })
         
         currency_format = workbook.add_format({
             'num_format': '$#,##0.00',
-            'alignment': 'center'
+            'align': 'center'
         })
         
         percentage_format = workbook.add_format({
             'num_format': '0.0%',
-            'alignment': 'center'
+            'align': 'center'
         })
         
         # Get company info

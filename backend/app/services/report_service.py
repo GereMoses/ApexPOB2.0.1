@@ -136,6 +136,9 @@ class ReportService:
         'pob.crew_change':              {'date': str, 'change_type': str},
         'pob.rotation_overdue':         {'threshold_days': int, 'department': str, 'company': str},
         'pob.zone_occupancy_history':   {'zone_id': int, 'date_from': str, 'date_to': str},
+        'travel.flights':               {'date_from': str, 'date_to': str, 'status': str},
+        'travel.passengers':            {'date_from': str, 'date_to': str, 'direction': str, 'search': str},
+        'travel.journeys':              {'date_from': str, 'date_to': str, 'status': str},
         'pob.headcount_by_company':     {'company': str},
     }
     
@@ -315,6 +318,9 @@ class ReportService:
             'pob.crew_change':              self.pob_crew_change,
             'pob.rotation_overdue':         self.pob_rotation_overdue,
             'pob.zone_occupancy_history':   self.pob_zone_occupancy_history,
+            'travel.flights':               self.travel_flights,
+            'travel.passengers':            self.travel_passengers,
+            'travel.journeys':              self.travel_journeys,
             'pob.headcount_by_company':     self.pob_headcount_by_company,
         })
     
@@ -5416,6 +5422,170 @@ class ReportService:
                 'net_change':        mobilize_count - demobilize_count,
             },
         }
+
+    # ==================== TRAVEL (flights / voyages / land journeys) ====================
+
+    def _range(self, filters: Dict[str, Any], back_days: int = 6):
+        df = filters.get('date_from') or str(_site_today() - timedelta(days=back_days))
+        dt = filters.get('date_to') or str(_site_today())
+        return df, dt
+
+    def travel_flights(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Flights / voyages in a date range with passengers, weight and punctuality."""
+        df, dt = self._range(filters)
+        params: Dict[str, Any] = {'df': df, 'dt': dt}
+        where = "ts.departure_time >= CAST(:df AS date) AND ts.departure_time < CAST(:dt AS date) + INTERVAL '1 day'"
+        if filters.get('status'):
+            where += " AND ts.status = :st"
+            params['st'] = filters['status'].upper()
+        rows = self.db.execute(text(f"""
+            SELECT ts.id, tr.identifier, tr.type, ts.departure_location, ts.arrival_location,
+                   ts.departure_time, ts.actual_departure_time, ts.actual_arrival_time, ts.status,
+                   tr.capacity,
+                   COUNT(me.id) FILTER (WHERE me.direction = 'INBOUND')  AS inbound,
+                   COUNT(me.id) FILTER (WHERE me.direction = 'OUTBOUND') AS outbound,
+                   COUNT(me.id) FILTER (WHERE me.status = 'CONFIRMED')   AS boarded,
+                   COUNT(me.id) FILTER (WHERE me.status = 'NO_SHOW')     AS no_show
+            FROM transport_schedule ts
+            LEFT JOIN transport tr ON tr.id = ts.transport_id
+            LEFT JOIN manifest_entry me ON me.schedule_id = ts.id
+            WHERE {where}
+            GROUP BY ts.id, tr.identifier, tr.type, tr.capacity
+            ORDER BY ts.departure_time
+        """), params).fetchall()
+        kinds = {1: 'Fixed wing', 2: 'Vehicle', 3: 'Helicopter', 4: 'Vessel'}
+        data = []
+        for r in rows:
+            delay = None
+            if r.actual_departure_time and r.departure_time:
+                delay = round((r.actual_departure_time - r.departure_time).total_seconds() / 60)
+            data.append({
+                'departure_time': self._fmt_dt(r.departure_time, '%Y-%m-%d %H:%M'),
+                'transport': r.identifier or f"#{r.id}",
+                'type': kinds.get(r.type, '—'),
+                'route': f"{r.departure_location} → {r.arrival_location}",
+                'status': (r.status or '').replace('_', ' ').title(),
+                'inbound': int(r.inbound), 'outbound': int(r.outbound),
+                'boarded': int(r.boarded), 'no_show': int(r.no_show),
+                'seats': r.capacity or 0,
+                'delay_min': delay,
+            })
+        columns = [
+            {'field': 'departure_time', 'label': 'Departs',  'type': 'datetime'},
+            {'field': 'transport',      'label': 'Transport', 'type': 'text'},
+            {'field': 'type',           'label': 'Type',      'type': 'text'},
+            {'field': 'route',          'label': 'Route',     'type': 'text'},
+            {'field': 'status',         'label': 'Status',    'type': 'status'},
+            {'field': 'inbound',        'label': 'Inbound',   'type': 'number'},
+            {'field': 'outbound',       'label': 'Outbound',  'type': 'number'},
+            {'field': 'boarded',        'label': 'Boarded',   'type': 'number'},
+            {'field': 'no_show',        'label': 'No-show',   'type': 'number'},
+            {'field': 'delay_min',      'label': 'Delay (min)', 'type': 'number'},
+        ]
+        departed = [d for d in data if d['delay_min'] is not None]
+        on_time = sum(1 for d in departed if d['delay_min'] <= 15)
+        return {'columns': columns, 'data': data, 'summary': {
+            'flights': len(data),
+            'passengers_boarded': sum(d['boarded'] for d in data),
+            'no_shows': sum(d['no_show'] for d in data),
+            'on_time_pct': round(on_time / len(departed) * 100) if departed else None,
+        }}
+
+    def travel_passengers(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Everyone manifested on a flight / voyage in the range — who travelled, when, and
+        whether their POB moved (i.e. the flight actually departed / arrived)."""
+        df, dt = self._range(filters)
+        params: Dict[str, Any] = {'df': df, 'dt': dt}
+        where = "ts.departure_time >= CAST(:df AS date) AND ts.departure_time < CAST(:dt AS date) + INTERVAL '1 day'"
+        if filters.get('direction'):
+            where += " AND me.direction = :dir"
+            params['dir'] = filters['direction'].upper()
+        if filters.get('search'):
+            where += " AND (me.passenger_name ILIKE :q OR me.emp_code ILIKE :q OR COALESCE(me.company,'') ILIKE :q)"
+            params['q'] = f"%{filters['search']}%"
+        rows = self.db.execute(text(f"""
+            SELECT me.passenger_name, me.emp_code, COALESCE(NULLIF(me.company,''), p.company) AS company,
+                   p.department, me.direction, me.status, me.pob_applied_at, me.remarks,
+                   ts.departure_time, ts.departure_location, ts.arrival_location, tr.identifier
+            FROM manifest_entry me
+            JOIN transport_schedule ts ON ts.id = me.schedule_id
+            LEFT JOIN transport tr ON tr.id = ts.transport_id
+            LEFT JOIN personnel p ON p.id = me.personnel_id
+            WHERE {where}
+            ORDER BY ts.departure_time, me.passenger_name
+        """), params).fetchall()
+        data = [{
+            'departure_time': self._fmt_dt(r.departure_time, '%Y-%m-%d %H:%M'),
+            'passenger': r.passenger_name, 'emp_code': r.emp_code or '—',
+            'company': r.company or '—', 'department': r.department or '—',
+            'direction': 'Arriving' if r.direction == 'INBOUND' else 'Leaving',
+            'flight': f"{r.identifier or ''} {r.departure_location} → {r.arrival_location}".strip(),
+            'status': {'CONFIRMED': 'Boarded', 'NO_SHOW': 'No-show', 'OFFLOADED': 'Offloaded'}.get(r.status, 'Manifested'),
+            'pob_moved': self._fmt_dt(r.pob_applied_at, '%Y-%m-%d %H:%M') if r.pob_applied_at else '—',
+            'remarks': r.remarks or '',
+        } for r in rows]
+        columns = [
+            {'field': 'departure_time', 'label': 'Departs',    'type': 'datetime'},
+            {'field': 'passenger',      'label': 'Passenger',  'type': 'text'},
+            {'field': 'emp_code',       'label': 'Staff code', 'type': 'text'},
+            {'field': 'company',        'label': 'Company',    'type': 'text'},
+            {'field': 'direction',      'label': 'Direction',  'type': 'text'},
+            {'field': 'flight',         'label': 'Flight / voyage', 'type': 'text'},
+            {'field': 'status',         'label': 'Status',     'type': 'status'},
+            {'field': 'pob_moved',      'label': 'POB updated', 'type': 'datetime'},
+            {'field': 'remarks',        'label': 'Remarks',    'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data, 'summary': {
+            'passengers': len(data),
+            'arriving': sum(1 for d in data if d['direction'] == 'Arriving'),
+            'leaving': sum(1 for d in data if d['direction'] == 'Leaving'),
+            'no_shows': sum(1 for d in data if d['status'] == 'No-show'),
+        }}
+
+    def travel_journeys(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Land journey plans in a range: route, driver, risk, approvals, status, check-ins."""
+        df, dt = self._range(filters)
+        params: Dict[str, Any] = {'df': df, 'dt': dt}
+        where = "j.planned_departure >= CAST(:df AS date) AND j.planned_departure < CAST(:dt AS date) + INTERVAL '1 day'"
+        if filters.get('status'):
+            where += " AND j.status = :st"
+            params['st'] = filters['status'].upper()
+        rows = self.db.execute(text(f"""
+            SELECT j.*, (SELECT COUNT(*) FROM journey_checkin c WHERE c.journey_id = j.id) AS checkins,
+                   (SELECT COUNT(*) FROM journey_checkin c WHERE c.journey_id = j.id AND c.status = 'CONCERN') AS concerns
+            FROM journey_plan j WHERE {where} ORDER BY j.planned_departure
+        """), params).fetchall()
+        data = [{
+            'planned_departure': self._fmt_dt(r.planned_departure, '%Y-%m-%d %H:%M'),
+            'reference': r.reference,
+            'route': f"{r.origin} → {r.destination}",
+            'driver': r.driver_name or '—',
+            'vehicle': r.vehicle_reg or '—',
+            'passengers': r.passenger_count or 0,
+            'risk': (r.risk_level or '').title(),
+            'status': (r.status or '').replace('_', ' ').title(),
+            'checkins': int(r.checkins), 'concerns': int(r.concerns),
+            'pob_effect': {'OUTBOUND': 'Leaving site', 'INBOUND': 'Arriving'}.get(r.pob_movement or '', '—'),
+        } for r in rows]
+        columns = [
+            {'field': 'planned_departure', 'label': 'Departs',   'type': 'datetime'},
+            {'field': 'reference',  'label': 'Ref',        'type': 'text'},
+            {'field': 'route',      'label': 'Route',      'type': 'text'},
+            {'field': 'driver',     'label': 'Driver',     'type': 'text'},
+            {'field': 'vehicle',    'label': 'Vehicle',    'type': 'text'},
+            {'field': 'passengers', 'label': 'Pax',        'type': 'number'},
+            {'field': 'risk',       'label': 'Risk',       'type': 'status'},
+            {'field': 'status',     'label': 'Status',     'type': 'status'},
+            {'field': 'checkins',   'label': 'Check-ins',  'type': 'number'},
+            {'field': 'concerns',   'label': 'Concerns',   'type': 'number'},
+            {'field': 'pob_effect', 'label': 'POB effect', 'type': 'text'},
+        ]
+        return {'columns': columns, 'data': data, 'summary': {
+            'journeys': len(data),
+            'high_risk': sum(1 for d in data if d['risk'] == 'High'),
+            'completed': sum(1 for d in data if d['status'] == 'Completed'),
+            'concerns_reported': sum(d['concerns'] for d in data),
+        }}
 
     def pob_rotation_overdue(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Personnel who have been onboard longer than the rotation threshold."""

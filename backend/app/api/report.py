@@ -355,6 +355,22 @@ async def clone_report_template(
 
 # ==================== DATA ENDPOINTS ====================
 
+# Report codes use short prefixes (att., pob., zone., muster., travel. …) but the
+# permissions are named report.<module>.<action> with the long module names. Checking
+# report.att.view etc. — permissions that do not exist — refused every non-superuser.
+_REPORT_PERMISSION_MODULE = {
+    'att': 'attendance', 'personnel': 'personnel', 'pob': 'personnel', 'travel': 'personnel',
+    'muster': 'mustering', 'emergency': 'emergency', 'visitor': 'visitor',
+    'ac': 'access_control', 'zone': 'access_control', 'device': 'access_control',
+    'pay': 'payroll', 'mtd': 'mtd', 'meeting': 'personnel', 'system': 'access_control',
+}
+
+
+def report_permission_module(report_code: str) -> str:
+    prefix = (report_code or '').split('.')[0]
+    return _REPORT_PERMISSION_MODULE.get(prefix, prefix)
+
+
 @router.post("/data", response_model=Dict[str, Any])
 async def get_report_data(
     request: ReportDataRequest,
@@ -363,7 +379,7 @@ async def get_report_data(
 ):
     """Get report data - generic endpoint"""
     # Extract module from report code
-    module = request.report_code.split('.')[0]
+    module = report_permission_module(request.report_code)
     
     # Check permission
     if not check_report_permission(current_user, module, "view", db):
@@ -426,7 +442,7 @@ async def export_report(
 ):
     """Export report - async processing"""
     # Extract module from report code
-    module = request.report_code.split('.')[0]
+    module = report_permission_module(request.report_code)
     
     # Check export permission
     if not check_report_permission(current_user, module, "export", db):
@@ -464,6 +480,39 @@ async def export_report(
         "export_id": export_log.id,
         "message": "Export queued successfully"
     }
+
+
+@router.post("/export/file")
+async def export_report_file(
+    request: ReportExportRequest,
+    db: Session = Depends(get_db),
+    current_user: AuthUser = Depends(get_current_active_user)
+):
+    """Build the export in this request and return the file.
+
+    The queued /export path relies on a Celery app ("report_exports") that has no
+    broker and no worker, so a queued export never completed (rpt_export_log was
+    empty). Reports here are small enough to build inline."""
+    from fastapi.responses import FileResponse
+    import os as _os
+    module = report_permission_module(request.report_code)
+    if not check_report_permission(current_user, module, "export", db):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    log = ReportExportLog(template_id=None, user_id=current_user.id, format=request.format,
+                          filters=request.filters, status="pending")
+    db.add(log); db.commit(); db.refresh(log)
+    try:
+        path = ExportService(db).generate_export(log.id, request.report_code, request.filters, request.format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("export_file user=%s code=%s error=%s", current_user.id, request.report_code, e)
+        raise HTTPException(status_code=500, detail="Could not build the export")
+    media = {"pdf": "application/pdf", "csv": "text/csv",
+             "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}[request.format]
+    name = f"{request.report_code.replace('.', '_')}_{log.id}.{request.format}"
+    logger.info("export_file user=%s code=%s format=%s", current_user.id, request.report_code, request.format)
+    return FileResponse(path, media_type=media, filename=_os.path.basename(name))
 
 
 @router.get("/export/{task_id}/status/", response_model=Dict[str, Any])
