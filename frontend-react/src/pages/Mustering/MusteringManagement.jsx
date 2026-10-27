@@ -1054,6 +1054,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
                 { label: 'Safe',      val: safeCount,     color: '#86efac', accent: 'rgba(134,239,172,0.08)' },
                 { label: 'Missing',   val: missingCount,  color: missingCount > 0 ? '#f87171' : '#86efac', accent: missingCount > 0 ? 'rgba(248,113,113,0.12)' : 'rgba(134,239,172,0.08)' },
                 { label: 'Injured',   val: injuredCount,  color: injuredCount > 0 ? '#fb923c' : 'rgba(255,255,255,0.2)', accent: injuredCount > 0 ? 'rgba(251,146,60,0.1)' : 'transparent' },
+                { label: 'Left site', val: allLogs.filter(l => l.status === 3).length, color: '#7dd3fc', accent: 'rgba(125,211,252,0.08)' },
               ].map(s => (
                 <div key={s.label} style={{ textAlign: 'center', padding: '10px 6px', background: s.accent, borderRadius: 10, border: '1px solid rgba(255,255,255,0.05)' }}>
                   <div style={{ fontSize: 52, fontWeight: 900, color: s.color, lineHeight: 1, letterSpacing: '-2px', fontFamily: '"SF Pro Display",system-ui,sans-serif' }}>
@@ -1280,6 +1281,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
                     0: { border: '#f87171', bg: '#fff1f0', label: 'MISSING', lc: '#dc2626' },
                     1: { border: '#4ade80', bg: 'white',   label: 'SAFE',    lc: '#16a34a' },
                     2: { border: '#fb923c', bg: '#fff7ed', label: 'INJURED', lc: '#ea580c' },
+                    3: { border: '#38bdf8', bg: '#f0f9ff', label: 'LEFT SITE', lc: '#0284c7' },
                   }[p.status] ?? { border: '#f87171', bg: '#fff1f0', label: 'MISSING', lc: '#dc2626' };
                   const deptColor = DEPT_COLORS[(p.dept_name || '').length % DEPT_COLORS.length];
                   const initials = (p.emp_name || p.emp_code || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();

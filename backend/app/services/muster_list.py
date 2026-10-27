@@ -104,7 +104,7 @@ def build_pdf(db, site_name: str = "ApexPOB") -> bytes:
         for p in groups[loc]:
             n += 1
             org = " / ".join(x for x in (p["dept"], p["company"]) if x)
-            rows.append([str(n), Paragraph(p["name"] or "", cell), p["emp_code"], Paragraph(org, cell), p["phone"], "☐", "☐"])
+            rows.append([str(n), Paragraph(p["name"] or "", cell), p["emp_code"], Paragraph(org, cell), p["phone"], "", ""])
         story.append(KeepTogether([Paragraph(f"{loc} — {len(rows)}", grp), table(rows[:25])]))
         if len(rows) > 25:
             story.append(table(rows[25:]))
@@ -113,7 +113,7 @@ def build_pdf(db, site_name: str = "ApexPOB") -> bytes:
         for v in visitors:
             n += 1
             org = " / ".join(x for x in (v["company"], f"host {v['host']}" if v["host"] else "") if x)
-            rows.append([str(n), Paragraph(v["name"] or "", cell), v["emp_code"], Paragraph(org, cell), v["phone"], "☐", "☐"])
+            rows.append([str(n), Paragraph(v["name"] or "", cell), v["emp_code"], Paragraph(org, cell), v["phone"], "", ""])
         story += [Paragraph(f"Visitors — {len(rows)}", grp), table(rows)]
     if not staff and not visitors:
         story.append(Paragraph("Nobody is recorded on board.", ss["Normal"]))

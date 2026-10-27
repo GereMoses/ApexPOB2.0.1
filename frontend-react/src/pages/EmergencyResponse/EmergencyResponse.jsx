@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Space, Button, Tooltip, Card, Badge, Tabs } from 'antd';
-import {
+import { DesktopOutlined,
   AlertOutlined, TeamOutlined, ReloadOutlined, WarningOutlined,
 } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import apiService from '../../services/api';
 import EmergencyManagement from '../Emergency/EmergencyManagement';
 import MusteringManagement from '../Mustering/MusteringManagement';
 
 /* ─── Root component ─────────────────────────────────────────── */
 const EmergencyResponse = () => {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [section, setSection] = useState('emergency');
   const [wsStatus, setWsStatus] = useState('disconnected');
@@ -83,6 +85,10 @@ const EmergencyResponse = () => {
                   </span>
                 </Tooltip>
               </Space>
+<Button type="primary" danger={activeEvents.length > 0} size="small" icon={<DesktopOutlined />}
+                onClick={() => navigate('/mustering/board')}>
+                Live muster board
+              </Button>
               <Button icon={<ReloadOutlined />} size="small" onClick={handleRefresh} loading={isLoading}>
                 Refresh
               </Button>

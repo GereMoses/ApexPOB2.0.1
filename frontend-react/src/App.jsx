@@ -12,22 +12,11 @@ import Personnel from './pages/Personnel';
 import AttendanceManagement from './pages/Attendance/AttendanceManagement';
 import DeviceManagement from './pages/Devices/Device';
 import AccessControl from './pages/AccessControl/AccessControl';
-import MusteringManagement from './pages/Mustering/MusteringManagement';
 import MusteringLiveMap from './pages/Mustering/MusteringLiveMap';
 import MusteringMobile from './pages/Mustering/MusteringMobile';
-import Mustering from './pages/Mustering/Mustering';
-import EmergencyManagement from './pages/Emergency/EmergencyManagement';
-import EmergencyMain from './pages/Emergency/EmergencyMain';
-import EmergencyDashboard from './pages/Emergency/EmergencyDashboard';
-import EmergencyLockdown from './pages/Emergency/EmergencyLockdown';
-import EmergencyFireMode from './pages/Emergency/EmergencyFireMode';
-import EmergencyDevices from './pages/Emergency/EmergencyDevices';
-import EmergencyPlans from './pages/Emergency/EmergencyPlans';
-import EmergencyNotifications from './pages/Emergency/EmergencyNotifications';
-import EmergencyTriggers from './pages/Emergency/EmergencyTriggers';
-import EmergencyAudit from './pages/Emergency/EmergencyAudit';
 import EmergencyResponse from './pages/EmergencyResponse/EmergencyResponse';
 import Reports from './pages/Reports/Reports';
+import MusterBoard from './pages/Mustering/MusterBoard';
 import Settings from './pages/Settings/Settings';
 import Login from './pages/Auth/Login';
 import Visitor from './pages/Visitor/Visitor';
@@ -231,28 +220,29 @@ function App() {
               <Route path="/access-control/events" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
 
               {/* Emergency */}
-              <Route path="/emergency" element={<ProtectedRoute permission="emergency.view"><EmergencyMain /></ProtectedRoute>} />
-              <Route path="/emergency/dashboard" element={<ProtectedRoute permission="emergency.view"><EmergencyDashboard /></ProtectedRoute>} />
-              <Route path="/emergency/management" element={<ProtectedRoute permission="emergency.view"><EmergencyManagement /></ProtectedRoute>} />
-              <Route path="/emergency/lockdown" element={<ProtectedRoute permission="emergency.view"><EmergencyLockdown /></ProtectedRoute>} />
-              <Route path="/emergency/fire-mode" element={<ProtectedRoute permission="emergency.view"><EmergencyFireMode /></ProtectedRoute>} />
-              <Route path="/emergency/devices" element={<ProtectedRoute permission="emergency.view"><EmergencyDevices /></ProtectedRoute>} />
-              <Route path="/emergency/plans" element={<ProtectedRoute permission="emergency.view"><EmergencyPlans /></ProtectedRoute>} />
-              <Route path="/emergency/notifications" element={<ProtectedRoute permission="emergency.view"><EmergencyNotifications /></ProtectedRoute>} />
-              <Route path="/emergency/triggers" element={<ProtectedRoute permission="emergency.view"><EmergencyTriggers /></ProtectedRoute>} />
-              <Route path="/emergency/audit" element={<ProtectedRoute permission="emergency.view"><EmergencyAudit /></ProtectedRoute>} />
-              <Route path="/emergency/status" element={<ProtectedRoute permission="emergency.view"><EmergencyDashboard /></ProtectedRoute>} />
+              <Route path="/emergency" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/dashboard" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/management" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/lockdown" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/fire-mode" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/devices" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/plans" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/notifications" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/triggers" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/audit" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/emergency/status" element={<Navigate to="/emergency-response" replace />} />
               {/* Emergency Response (combined response centre) */}
               <Route path="/emergency-response" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
               <Route path="/emergency-response/emergency" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
               <Route path="/emergency-response/mustering" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
               {/* Mustering */}
-              <Route path="/mustering" element={<ProtectedRoute permission="mustering.view"><Mustering /></ProtectedRoute>} />
-              <Route path="/mustering/management" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
-              <Route path="/mustering/events" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
+              <Route path="/mustering" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/mustering/management" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/mustering/events" element={<Navigate to="/emergency-response" replace />} />
+              <Route path="/mustering/board" element={<ProtectedRoute permission="mustering.view"><MusterBoard /></ProtectedRoute>} />
               <Route path="/mustering/live-map" element={<ProtectedRoute permission="mustering.view"><MusteringLiveMap /></ProtectedRoute>} />
               <Route path="/mustering/zones" element={<ProtectedRoute permission="mustering.view"><MusteringLiveMap /></ProtectedRoute>} />
-              <Route path="/mustering/logs" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
+              <Route path="/mustering/logs" element={<Navigate to="/emergency-response" replace />} />
               <Route path="/mustering/mobile" element={<ProtectedRoute permission="mustering.view"><MusteringMobile /></ProtectedRoute>} />
 
               {/* Visitor Management */}
