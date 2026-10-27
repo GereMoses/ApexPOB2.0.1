@@ -13,9 +13,11 @@ import {
 import {
   SearchOutlined, StarOutlined, StarFilled, ArrowLeftOutlined, DownloadOutlined,
   ReloadOutlined, BarChartOutlined, FilePdfOutlined, FileExcelOutlined, FileTextOutlined,
-  ToolOutlined, RightOutlined, ClockCircleOutlined, ScheduleOutlined, PlayCircleOutlined,
+  ToolOutlined, RightOutlined, ScheduleOutlined, PlayCircleOutlined,
   DeleteOutlined, LockOutlined, AppstoreOutlined, UnorderedListOutlined, MenuFoldOutlined, MenuUnfoldOutlined,
-  FullscreenOutlined, FullscreenExitOutlined, FilterOutlined, LinkOutlined, SaveOutlined, SettingOutlined, SyncOutlined, LineChartOutlined,
+  FullscreenOutlined, FullscreenExitOutlined, FilterOutlined, FileSearchOutlined, HistoryOutlined, ArrowRightOutlined,
+  TeamOutlined, FieldTimeOutlined, AimOutlined, SafetyCertificateOutlined, SendOutlined, IdcardOutlined, UserSwitchOutlined,
+  AuditOutlined, CalendarOutlined, CheckCircleOutlined, CloseCircleOutlined, NumberOutlined, RiseOutlined, WarningOutlined, LinkOutlined, SaveOutlined, SettingOutlined, SyncOutlined, LineChartOutlined,
 } from '@ant-design/icons';
 import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import dayjs from 'dayjs';
@@ -137,6 +139,7 @@ function Library({ pins, onPin, onOpen, onBuilder, onScheduled, canView }) {
   const [q, setQ] = useState('');
   const [layout, setLayout] = useState(() => store.get(LAYOUT, 'grid'));
   const [active, setActive] = useState(null);
+  const [scheduled, setScheduled] = useState(null);
   const searchRef = useRef(null);
   const recent = store.get(RECENT, []).map(findReport).filter(r => r && canView(r.code));
   const pinned = pins.map(findReport).filter(r => r && canView(r.code));
@@ -148,6 +151,9 @@ function Library({ pins, onPin, onOpen, onBuilder, onScheduled, canView }) {
     reports: g.reports.filter(r => !term || `${r.title} ${r.desc} ${g.title}`.toLowerCase().includes(term)),
   })).filter(g => g.reports.length && (!active || term || g.key === active));
 
+  useEffect(() => {
+    apiService.get('/api/v1/report/scheduled').then(r => setScheduled((r || []).filter(s => s.is_active).length)).catch(() => {});
+  }, []);
   // "/" jumps to search, like most dashboards.
   useEffect(() => {
     const onKey = (e) => {
@@ -160,85 +166,130 @@ function Library({ pins, onPin, onOpen, onBuilder, onScheduled, canView }) {
 
   return (
     <div className="apx-lib">
-      <aside className="apx-rail">
-        <div className="apx-rail-title">Browse</div>
-        <button className={`apx-rail-item ${!active ? 'on' : ''}`} onClick={() => setActive(null)}>
-          <span className="apx-dot" style={{ background: T.ink }} /> All reports <span className="apx-count">{visible}</span>
-        </button>
-        {allGroups.map(g => (
-          <button key={g.key} className={`apx-rail-item ${active === g.key ? 'on' : ''}`} onClick={() => setActive(g.key)}>
-            <span className="apx-dot" style={{ background: g.color }} /> {g.title} <span className="apx-count">{g.reports.length}</span>
-          </button>
-        ))}
-        <div className="apx-rail-title" style={{ marginTop: 22 }}>Tools</div>
-        <button className="apx-rail-item" onClick={onScheduled}><ScheduleOutlined /> Scheduled reports</button>
-        <button className="apx-rail-item" onClick={onBuilder}><ToolOutlined /> Custom report</button>
-      </aside>
-
-      <div style={{ minWidth: 0 }}>
-        <div className="apx-lib-head">
-          <div>
-            <h1 className="apx-h1">Reports</h1>
-            <div className="apx-sub">{visible} reports · times shown in site time (Lagos) · press <kbd>/</kbd> to search</div>
+      <header className="apx-hero">
+        <div className="apx-hero-main">
+          <div className="apx-eyebrow"><FileSearchOutlined /> Insights</div>
+          <h1 className="apx-hero-title">Reports</h1>
+          <div className="apx-hero-sub">Answers about your people, site and safety — all times in site time (Lagos).</div>
+          <Input ref={searchRef} allowClear size="large" className="apx-hero-search"
+            prefix={<SearchOutlined style={{ color: T.faint, fontSize: 17 }} />}
+            suffix={!q && <kbd>/</kbd>}
+            placeholder={`Search ${visible} reports — e.g. late, muster, flights…`} value={q} onChange={e => setQ(e.target.value)} />
+        </div>
+        <div className="apx-hero-side">
+          <div className="apx-hero-stats">
+            <div><b>{visible}</b><span>Reports</span></div>
+            <div><b>{allGroups.length}</b><span>Categories</span></div>
+            <div><b>{pinned.length}</b><span>Pinned</span></div>
+            <div><b>{scheduled ?? '—'}</b><span>Scheduled</span></div>
           </div>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <Input ref={searchRef} allowClear size="large" prefix={<SearchOutlined style={{ color: T.faint }} />}
-              placeholder="Search reports…" value={q} onChange={e => setQ(e.target.value)} style={{ width: 340 }} />
-            <Segmented size="large" value={layout} onChange={setLayoutKeep}
-              options={[{ value: 'grid', icon: <AppstoreOutlined /> }, { value: 'list', icon: <UnorderedListOutlined /> }]} />
-            <Button size="large" className="apx-narrow-only" icon={<ScheduleOutlined />} onClick={onScheduled}>Scheduled</Button>
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+            <Button className="apx-glass" icon={<ScheduleOutlined />} onClick={onScheduled}>Scheduled reports</Button>
+            <Button className="apx-light" icon={<ToolOutlined />} onClick={onBuilder}>Custom report</Button>
           </div>
         </div>
+      </header>
 
-        {!term && !active && (pinned.length > 0 || recent.length > 0) && (
-          <div className="apx-quick">
-            {pinned.length > 0 && <QuickRow label="Pinned" items={pinned} onOpen={onOpen} icon={<StarFilled style={{ color: '#f59e0b' }} />} />}
-            {recent.length > 0 && <QuickRow label="Recent" items={recent} onOpen={onOpen} icon={<ClockCircleOutlined style={{ color: T.faint }} />} />}
-          </div>
-        )}
-
-        {groups.length === 0 && <Empty style={{ marginTop: 80 }} description={`No report matches “${q}”`} />}
-
-        {groups.map(g => (
-          <section key={g.key} className="apx-group">
-            <div className="apx-group-head">
-              <span className="apx-dot" style={{ background: g.color }} />
-              <h2>{g.title}</h2>
-              <span className="apx-blurb">{g.blurb}</span>
-            </div>
-            {layout === 'grid' ? (
-              <div className="apx-grid">
-                {g.reports.map(r => (
-                  <div key={r.code} className="apx-card" role="button" tabIndex={0}
-                    onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}
-                    style={{ '--accent': g.color }}>
-                    <div className="apx-card-top">
-                      <span className="apx-card-title">{r.title}</span>
-                      <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
-                    </div>
-                    <div className="apx-card-desc">{r.desc}</div>
-                    <div className="apx-card-go">Open <RightOutlined style={{ fontSize: 10 }} /></div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="apx-panel">
-                {g.reports.map(r => (
-                  <div key={r.code} className="apx-list-row" role="button" tabIndex={0}
-                    onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}>
-                    <span className="apx-card-title" style={{ width: 260, flexShrink: 0 }}>{r.title}</span>
-                    <span className="apx-card-desc">{r.desc}</span>
-                    <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
-                    <RightOutlined style={{ fontSize: 11, color: T.faint }} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+      <div className="apx-cats">
+        <button className={`apx-cat ${!active ? 'on' : ''}`} style={{ '--c': T.accent, '--t': hexA(T.accent, 0.1) }} onClick={() => setActive(null)}>
+          <span className="apx-gicon" style={{ '--c': T.accent, '--t': hexA(T.accent, 0.12) }}><AppstoreOutlined /></span>
+          <span className="apx-cat-t">All reports</span><span className="apx-cat-n">{visible}</span>
+        </button>
+        {allGroups.map(g => (
+          <button key={g.key} className={`apx-cat ${active === g.key ? 'on' : ''}`} style={{ '--c': g.color, '--t': hexA(g.color, 0.1) }}
+            onClick={() => setActive(active === g.key ? null : g.key)}>
+            <GIcon g={g} />
+            <span className="apx-cat-t">{g.title}</span><span className="apx-cat-n">{g.reports.length}</span>
+          </button>
         ))}
       </div>
+
+      <div className="apx-toolbar">
+        <div className="apx-quick">
+          {!term && pinned.length > 0 && <QuickRow label="Pinned" items={pinned} onOpen={onOpen} icon={<StarFilled style={{ color: '#f59e0b' }} />} />}
+          {!term && recent.length > 0 && <QuickRow label="Recent" items={recent} onOpen={onOpen} icon={<HistoryOutlined style={{ color: T.muted }} />} />}
+          {(term || (!pinned.length && !recent.length)) && (
+            <span className="apx-sub" style={{ margin: 0 }}>
+              {term ? `${groups.reduce((n, g) => n + g.reports.length, 0)} reports match “${q}”` : 'Tip: star a report to pin it here.'}
+            </span>
+          )}
+        </div>
+        <Segmented value={layout} onChange={setLayoutKeep}
+          options={[{ value: 'grid', icon: <AppstoreOutlined /> }, { value: 'list', icon: <UnorderedListOutlined /> }]} />
+      </div>
+
+      {groups.length === 0 && <Empty style={{ marginTop: 80 }} description={`No report matches “${q}”`} />}
+
+      {groups.map(g => (
+        <section key={g.key} className="apx-group">
+          <div className="apx-group-head">
+            <GIcon g={g} size={30} />
+            <h2>{g.title}</h2>
+            <span className="apx-group-n">{g.reports.length}</span>
+            <span className="apx-blurb">{g.blurb}</span>
+          </div>
+          {layout === 'grid' ? (
+            <div className="apx-grid">
+              {g.reports.map(r => (
+                <div key={r.code} className="apx-card" role="button" tabIndex={0}
+                  onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}
+                  style={{ '--accent': g.color, '--t': hexA(g.color, 0.08) }}>
+                  <div className="apx-card-top">
+                    <GIcon g={g} size={38} />
+                    <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
+                  </div>
+                  <div className="apx-card-title">{r.title}</div>
+                  <div className="apx-card-desc">{r.desc}</div>
+                  <div className="apx-card-foot">
+                    <span className="apx-meta"><MetaIcon r={r} /> {metaLabel(r)}</span>
+                    <span className="apx-card-go">Open <ArrowRightOutlined /></span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="apx-panel">
+              {g.reports.map(r => (
+                <div key={r.code} className="apx-list-row" role="button" tabIndex={0} style={{ '--accent': g.color }}
+                  onClick={() => onOpen(r.code)} onKeyDown={e => e.key === 'Enter' && onOpen(r.code)}>
+                  <GIcon g={g} size={30} />
+                  <span className="apx-card-title" style={{ width: 250, flexShrink: 0 }}>{r.title}</span>
+                  <span className="apx-card-desc">{r.desc}</span>
+                  <span className="apx-meta" style={{ width: 120 }}><MetaIcon r={r} /> {metaLabel(r)}</span>
+                  <PinStar on={pins.includes(r.code)} onClick={() => onPin(r.code)} />
+                  <ArrowRightOutlined style={{ fontSize: 12, color: T.faint }} />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      ))}
     </div>
   );
+}
+
+const GROUP_ICON = {
+  onsite: TeamOutlined, attendance: FieldTimeOutlined, movement: AimOutlined, safety: SafetyCertificateOutlined,
+  travel: SendOutlined, visitors: IdcardOutlined, people: UserSwitchOutlined, audit: AuditOutlined,
+};
+function hexA(hex, a) {
+  const h = hex.replace('#', '');
+  const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
+}
+function GIcon({ g, size = 34 }) {
+  const I = GROUP_ICON[g.key] || FileTextOutlined;
+  return (
+    <span className="apx-gicon" style={{ '--c': g.color, '--t': hexA(g.color, 0.12), width: size, height: size, fontSize: size * 0.46 }}>
+      <I />
+    </span>
+  );
+}
+const metaLabel = (r) => ({ none: 'Live now', single: 'One day', range: 'Date range', month: 'Monthly', monthNumber: 'By month' }[r.filters?.date || 'none']);
+function MetaIcon({ r }) {
+  const d = r.filters?.date || 'none';
+  if (d === 'none') return <span className="apx-live-dot" />;
+  return <CalendarOutlined />;
 }
 
 function PinStar({ on, onClick }) {
@@ -320,6 +371,7 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
   const [autoRefresh, setAutoRefresh] = useState(0);
   const [loadedAt, setLoadedAt] = useState(null);
   const [views, setViews] = useState(() => store.get(`${VIEWS}.${code}`, []));
+  const [openGroups, setOpenGroups] = useState([report.group.key]);
   const tableBox = useRef(null);
   const [tableH, setTableH] = useState(480);
 
@@ -421,7 +473,7 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
   const applyView = (v) => { const f = deserializeFilters(v.f, report); if (f) { setPage(1); setFilters(f); } };
   const deleteView = (name) => { const next = views.filter(v => v.name !== name); setViews(next); store.set(`${VIEWS}.${code}`, next); };
 
-  const allCols = data?.columns || [];
+  const allCols = useMemo(() => data?.columns || [], [data]);
   const columns = useMemo(() => allCols.filter(c => !hidden.includes(c.field)).map(c => ({
     title: c.label, dataIndex: c.field, key: c.field, ellipsis: true,
     align: [...NUMERIC, 'percentage'].includes(c.type) ? 'right' : 'left',
@@ -450,7 +502,8 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
     const entries = spec
       ? Object.entries(spec).filter(([k]) => s[k] !== undefined && s[k] !== null).map(([k, label]) => [label, s[k]])
       : Object.entries(s).filter(([, v]) => typeof v === 'number').slice(0, 5).map(([k, v]) => [humanize(k), v]);
-    return [['Rows', data?.total ?? 0], ...entries].slice(0, 6);
+    const hasTotal = entries.some(([l]) => /total|records|^rows$/i.test(l));
+    return [...(hasTotal ? [] : [['Rows', data?.total ?? 0]]), ...entries].slice(0, 6);
   }, [data, report.kpis]);
 
   const chart = data?.chart_data?.labels?.length && data?.chart_data?.datasets?.[0]
@@ -499,16 +552,22 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
   return (
     <div className={`apx-report ${focus ? 'apx-focus' : ''} ${railOpen ? '' : 'apx-rail-closed'}`}>
       {railOpen && !focus && (
-        <aside className="apx-rail apx-report-rail">
-          <button className="apx-back" onClick={onBack}><ArrowLeftOutlined /> All reports</button>
+        <aside className="apx-rail">
+          <button className="apx-rail-back" onClick={onBack}><ArrowLeftOutlined /> All reports</button>
           {REPORT_GROUPS.map(g => {
             const list = g.reports.filter(r => canView(r.code));
             if (!list.length) return null;
+            const isOpen = openGroups.includes(g.key);
             return (
-              <div key={g.key} style={{ marginBottom: 14 }}>
-                <div className="apx-rail-title"><span className="apx-dot" style={{ background: g.color }} /> {g.title}</div>
-                {list.map(r => (
-                  <button key={r.code} className={`apx-rail-item sm ${r.code === code ? 'on' : ''}`} onClick={() => onOpen(r.code)}>{r.title}</button>
+              <div key={g.key} className="apx-rail-group">
+                <button className="apx-rail-head" onClick={() => setOpenGroups(isOpen ? openGroups.filter(k => k !== g.key) : [...openGroups, g.key])}>
+                  <GIcon g={g} size={24} />
+                  <span>{g.title}</span>
+                  <RightOutlined className="apx-caret" style={{ transform: isOpen ? 'rotate(90deg)' : 'none' }} />
+                </button>
+                {isOpen && list.map(r => (
+                  <button key={r.code} className={`apx-rail-item ${r.code === code ? 'on' : ''}`} style={{ '--c': g.color, '--t': hexA(g.color, 0.1) }}
+                    onClick={() => onOpen(r.code)}>{r.title}</button>
                 ))}
               </div>
             );
@@ -517,78 +576,103 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
       )}
 
       <div className="apx-report-main">
-        <div className="apx-report-head">
-          <div style={{ minWidth: 0, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-            {!focus && (
-              <Tooltip title={railOpen ? 'Hide report list' : 'Show report list'}>
-                <Button type="text" icon={railOpen ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
-                  onClick={() => { setRailOpen(!railOpen); store.set(RAIL, !railOpen); }} />
-              </Tooltip>
-            )}
-            <div style={{ minWidth: 0 }}>
-              <div className="apx-crumb">
-                <a onClick={onBack}>Reports</a> <span style={{ color: T.faint }}>/</span> {report.group.title}
+        <header className="apx-rhero" style={{ '--c': report.group.color, '--glow': hexA(report.group.color, 0.55) }}>
+          <div className="apx-rhero-top">
+            <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', minWidth: 0, flex: '1 1 380px' }}>
+              {!focus && (
+                <Tooltip title={railOpen ? 'Hide report list' : 'Show report list'}>
+                  <Button className="apx-glass apx-icon-btn" icon={railOpen ? <MenuFoldOutlined /> : <MenuUnfoldOutlined />}
+                    onClick={() => { setRailOpen(!railOpen); store.set(RAIL, !railOpen); }} />
+                </Tooltip>
+              )}
+              <span className="apx-rhero-icon">{React.createElement(GROUP_ICON[report.group.key] || FileTextOutlined)}</span>
+              <div style={{ minWidth: 0 }}>
+                <div className="apx-crumb">
+                  <a onClick={onBack}>Reports</a> <RightOutlined style={{ fontSize: 9, opacity: .6 }} /> {report.group.title}
+                </div>
+                <h1 className="apx-rhero-title">{report.title}</h1>
+                <div className="apx-rhero-sub">{report.desc}</div>
               </div>
-              <h1 className="apx-h1" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span className="apx-bar" style={{ background: report.group.color }} />
-                {report.title}
-              </h1>
-              <div className="apx-sub">{report.desc}</div>
+            </div>
+            <div className="apx-rhero-actions">
+              {loadedAt && (
+                <span className="apx-updated">
+                  <span className={`apx-live-dot ${autoRefresh ? 'pulse' : ''}`} /> {autoRefresh ? 'Live · ' : ''}Updated {loadedAt.format('HH:mm:ss')}
+                </span>
+              )}
+              <Dropdown menu={{
+                selectable: true, selectedKeys: [String(autoRefresh)],
+                items: [{ key: '0', label: 'Auto-refresh off' }, { key: '30', label: 'Every 30 seconds' },
+                  { key: '60', label: 'Every minute' }, { key: '300', label: 'Every 5 minutes' }],
+                onClick: ({ key }) => setAutoRefresh(Number(key)),
+              }}>
+                <Tooltip title="Auto-refresh">
+                  <Button className={`apx-glass ${autoRefresh ? '' : 'apx-icon-btn'}`} icon={<SyncOutlined spin={!!autoRefresh && loading} />}>
+                    {autoRefresh ? (autoRefresh < 60 ? `${autoRefresh}s` : `${autoRefresh / 60}m`) : null}
+                  </Button>
+                </Tooltip>
+              </Dropdown>
+              <Tooltip title="Refresh now"><Button className="apx-glass apx-icon-btn" icon={<ReloadOutlined />} onClick={load} loading={loading} /></Tooltip>
+              <Tooltip title={pinned ? 'Unpin' : 'Pin to the library'}>
+                <Button className="apx-glass apx-icon-btn" icon={pinned ? <StarFilled style={{ color: '#fbbf24' }} /> : <StarOutlined />} onClick={onPin} />
+              </Tooltip>
+              <Tooltip title="Copy a link to this report with these filters"><Button className="apx-glass apx-icon-btn" icon={<LinkOutlined />} onClick={copyLink} /></Tooltip>
+              <Tooltip title={focus ? 'Exit full screen (Esc)' : 'Full screen'}>
+                <Button className="apx-glass apx-icon-btn" icon={focus ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => setFocus(!focus)} />
+              </Tooltip>
+              {canExport && (
+                <Dropdown menu={{
+                  items: [
+                    { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
+                    { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
+                    { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
+                    { type: 'divider' },
+                    { key: 'schedule', icon: <ScheduleOutlined style={{ color: T.accent }} />, label: 'Schedule…' },
+                  ],
+                  onClick: ({ key }) => (key === 'schedule' ? setScheduleOpen(true) : exportAs(key)),
+                }}>
+                  <Button className="apx-light" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
+                </Dropdown>
+              )}
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 8, flexShrink: 0, flexWrap: 'wrap', alignItems: 'center' }}>
-            <span className="apx-updated">
-              {loadedAt ? <>Updated {loadedAt.format('HH:mm:ss')}</> : null}
-            </span>
-            <Dropdown menu={{
-              selectable: true, selectedKeys: [String(autoRefresh)],
-              items: [{ key: '0', label: 'Auto-refresh off' }, { key: '30', label: 'Every 30 seconds' },
-                { key: '60', label: 'Every minute' }, { key: '300', label: 'Every 5 minutes' }],
-              onClick: ({ key }) => setAutoRefresh(Number(key)),
-            }}>
-              <Button icon={<SyncOutlined spin={!!autoRefresh && loading} style={autoRefresh ? { color: T.accent } : undefined} />}>
-                {autoRefresh ? (autoRefresh < 60 ? `${autoRefresh}s` : `${autoRefresh / 60}m`) : ''}
-              </Button>
-            </Dropdown>
-            <Tooltip title="Refresh now"><Button icon={<ReloadOutlined />} onClick={load} loading={loading} /></Tooltip>
-            <Tooltip title={pinned ? 'Unpin' : 'Pin to the library'}>
-              <Button icon={pinned ? <StarFilled style={{ color: '#f59e0b' }} /> : <StarOutlined />} onClick={onPin} />
-            </Tooltip>
-            <Tooltip title="Copy a link to this report with these filters"><Button icon={<LinkOutlined />} onClick={copyLink} /></Tooltip>
-            <Tooltip title={focus ? 'Exit full screen (Esc)' : 'Full screen'}>
-              <Button icon={focus ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => setFocus(!focus)} />
-            </Tooltip>
-            {chart && <Button icon={<BarChartOutlined />} type={showChart ? 'primary' : 'default'} ghost={showChart}
-              onClick={() => setShowChart(v => !v)}>Chart</Button>}
-            {canExport && (
-              <Dropdown menu={{
-                items: [
-                  { key: 'xlsx', icon: <FileExcelOutlined style={{ color: '#16a34a' }} />, label: 'Excel (.xlsx)' },
-                  { key: 'pdf', icon: <FilePdfOutlined style={{ color: '#dc2626' }} />, label: 'PDF' },
-                  { key: 'csv', icon: <FileTextOutlined style={{ color: T.muted }} />, label: 'CSV' },
-                  { type: 'divider' },
-                  { key: 'schedule', icon: <ScheduleOutlined style={{ color: T.accent }} />, label: 'Schedule…' },
-                ],
-                onClick: ({ key }) => (key === 'schedule' ? setScheduleOpen(true) : exportAs(key)),
-              }}>
-                <Button type="primary" icon={<DownloadOutlined />} loading={!!exporting}>Export</Button>
-              </Dropdown>
-            )}
-          </div>
-        </div>
+
+          {missing.length === 0 && (
+            <div className="apx-kpis">
+              {kpis.map(([label, v], i) => {
+                const k = kpiLook(label, i);
+                return (
+                  <div key={label} className="apx-kpi">
+                    <span className="apx-kpi-i" style={{ color: k.color, background: hexA(k.color, 0.18) }}>{k.icon}</span>
+                    <div>
+                      <div className="apx-kpi-v">{loading && !data ? <Skeleton.Input size="small" active /> : (fmtNum(v) ?? '—')}</div>
+                      <div className="apx-kpi-l">{label}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </header>
 
         <div className="apx-filter-row">
           <FilterBar report={report} filters={filters} set={set} setFilters={(f) => { setPage(1); setFilters(f); }} />
-          <Dropdown trigger={['click']} menu={{
-            items: viewItems,
-            onClick: ({ key }) => {
-              if (key === 'save') saveView();
-              else if (key === 'reset') { setPage(1); setFilters(initialFilters(report)); }
-              else applyView(views.find(v => `v:${v.name}` === key));
-            },
-          }}>
-            <Button icon={<SaveOutlined />}>Views{views.length ? ` (${views.length})` : ''}</Button>
-          </Dropdown>
+          <div className="apx-filter-actions">
+            {chart && (
+              <Button icon={<BarChartOutlined />} type={showChart ? 'primary' : 'default'} ghost={showChart}
+                onClick={() => setShowChart(v => !v)}>Chart</Button>
+            )}
+            <Dropdown trigger={['click']} menu={{
+              items: viewItems,
+              onClick: ({ key }) => {
+                if (key === 'save') saveView();
+                else if (key === 'reset') { setPage(1); setFilters(initialFilters(report)); }
+                else applyView(views.find(v => `v:${v.name}` === key));
+              },
+            }}>
+              <Button icon={<SaveOutlined />}>Views{views.length ? ` (${views.length})` : ''}</Button>
+            </Dropdown>
+          </div>
         </div>
         <ScheduleModal open={scheduleOpen} onClose={() => setScheduleOpen(false)} report={report} filters={filters} />
 
@@ -598,15 +682,6 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
           </div>
         ) : (
           <>
-            <div className="apx-kpis">
-              {kpis.map(([label, v]) => (
-                <div key={label} className="apx-kpi" style={{ '--accent': report.group.color }}>
-                  <div className="apx-kpi-v">{loading && !data ? <Skeleton.Input size="small" active /> : (fmtNum(v) ?? '—')}</div>
-                  <div className="apx-kpi-l">{label}</div>
-                </div>
-              ))}
-            </div>
-
             {showChart && chart && (
               <div className="apx-panel" style={{ padding: '12px 18px 6px', marginBottom: 14 }}>
                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
@@ -703,6 +778,16 @@ function ReportView({ report, initial, pinned, onPin, onBack, onOpen, canView, c
       </Drawer>
     </div>
   );
+}
+
+// Icon + colour for a key figure, from its label.
+function kpiLook(label, i) {
+  const l = label.toLowerCase();
+  if (i === 0 || /rows|records|total/.test(l)) return { icon: <NumberOutlined />, color: '#60a5fa' };
+  if (/present|safe|arriv|boarded|completed|coverage|runs$|sent|on time/.test(l)) return { icon: <CheckCircleOutlined />, color: '#34d399' };
+  if (/absent|missing|fail|no-show|without|high risk|concern|offline/.test(l)) return { icon: <CloseCircleOutlined />, color: '#f87171' };
+  if (/\blate\b|early|overtime|leave|\bleft\b|pending/.test(l)) return { icon: <WarningOutlined />, color: '#fbbf24' };
+  return { icon: <RiseOutlined />, color: '#a78bfa' };
 }
 
 function Highlight({ text, q }) {
@@ -999,101 +1084,169 @@ function ScheduledDrawer({ open, onClose, onOpenReport }) {
 /* ── Styles ───────────────────────────────────────────────────────────────── */
 
 const CSS = `
-.apx-reports { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: ${T.ink}; }
-.apx-h1 { font-size: 26px; font-weight: 750; letter-spacing: -0.4px; margin: 0; color: ${T.ink}; }
+.apx-reports { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: ${T.ink};
+  min-height: calc(100vh - 56px); padding: 20px 24px 32px;
+  background: radial-gradient(1200px 400px at 100% 0%, rgba(37,99,235,.07), transparent 60%), linear-gradient(180deg, #eef2f8 0%, #f5f7fb 320px); }
+.apx-reports kbd { font-family: inherit; font-size: 11px; background: #f1f5f9; color: ${T.muted}; border: 1px solid ${T.line}; border-bottom-width: 2px; border-radius: 5px; padding: 0 6px; }
 .apx-sub { color: ${T.muted}; font-size: 14px; margin-top: 4px; }
-.apx-lib-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 22px; }
-
-.apx-quick { display: flex; flex-direction: column; gap: 10px; margin-bottom: 30px; }
-.apx-quick-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.apx-quick-label { font-size: 12px; font-weight: 600; color: ${T.muted}; text-transform: uppercase; letter-spacing: .06em; width: 92px; display: inline-flex; gap: 6px; align-items: center; }
-.apx-chip { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px;
-  background: ${T.card}; border: 1px solid ${T.line}; border-radius: 999px; font-size: 13px; color: ${T.ink}; transition: all .15s; }
-.apx-chip:hover { border-color: ${T.accent}; color: ${T.accent}; }
 .apx-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.apx-gicon { display: inline-grid; place-items: center; flex-shrink: 0; border-radius: 10px; color: var(--c); background: var(--t); }
 
-.apx-group { margin-bottom: 34px; }
-.apx-group-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.apx-group-head h2 { font-size: 16px; font-weight: 700; margin: 0; color: ${T.ink}; }
-.apx-group-head .apx-dot { transform: translateY(-1px); }
+/* hero (library) */
+.apx-hero { position: relative; overflow: hidden; display: flex; justify-content: space-between; gap: 28px; flex-wrap: wrap;
+  padding: 30px 34px; border-radius: 20px; color: #fff; margin-bottom: 18px;
+  background: radial-gradient(600px 260px at 88% -30%, rgba(56,189,248,.45), transparent 60%),
+              radial-gradient(500px 240px at 10% 130%, rgba(99,102,241,.35), transparent 60%),
+              linear-gradient(135deg, #0b1b36 0%, #12305e 55%, #174a8b 100%);
+  box-shadow: 0 18px 40px -18px rgba(15,35,80,.55); }
+.apx-hero::after { content: ''; position: absolute; inset: 0; pointer-events: none;
+  background-image: linear-gradient(rgba(255,255,255,.04) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.04) 1px, transparent 1px);
+  background-size: 28px 28px; mask-image: linear-gradient(90deg, transparent, #000 60%); -webkit-mask-image: linear-gradient(90deg, transparent, #000 60%); }
+.apx-hero-main { flex: 1 1 460px; position: relative; z-index: 1; }
+.apx-hero-side { position: relative; z-index: 1; display: flex; flex-direction: column; justify-content: space-between; gap: 18px; }
+.apx-eyebrow { display: inline-flex; gap: 8px; align-items: center; font-size: 12px; font-weight: 600; letter-spacing: .12em; text-transform: uppercase;
+  color: #7dd3fc; background: rgba(125,211,252,.12); border: 1px solid rgba(125,211,252,.25); padding: 4px 10px; border-radius: 999px; }
+.apx-hero-title { font-size: 34px; font-weight: 800; letter-spacing: -0.8px; margin: 12px 0 4px; color: #fff; }
+.apx-hero-sub { color: rgba(226,232,240,.8); font-size: 14.5px; margin-bottom: 20px; }
+.apx-hero-search.ant-input-affix-wrapper { max-width: 560px; height: 50px; border-radius: 14px; border: 0; padding: 0 16px;
+  box-shadow: 0 10px 30px -10px rgba(0,0,0,.45); font-size: 15px; }
+.apx-hero-stats { display: grid; grid-template-columns: repeat(4, minmax(84px, 1fr)); gap: 10px; }
+.apx-hero-stats > div { background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12); border-radius: 14px; padding: 12px 14px; backdrop-filter: blur(6px); }
+.apx-hero-stats b { display: block; font-size: 24px; font-weight: 800; letter-spacing: -0.5px; color: #fff; line-height: 1.1; }
+.apx-hero-stats span { font-size: 12px; color: rgba(226,232,240,.7); }
+.apx-glass.ant-btn { background: rgba(255,255,255,.1) !important; border: 1px solid rgba(255,255,255,.2) !important; color: #fff !important; border-radius: 10px; }
+.apx-glass.ant-btn:hover { background: rgba(255,255,255,.2) !important; }
+.apx-icon-btn.ant-btn { width: 36px; padding: 0; }
+.apx-light.ant-btn { background: #fff !important; border: 0 !important; color: #0b1b36 !important; font-weight: 600; border-radius: 10px;
+  box-shadow: 0 6px 18px -6px rgba(0,0,0,.4); }
+.apx-light.ant-btn:hover { background: #e8f1ff !important; }
+
+/* categories */
+.apx-cats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.apx-cat { all: unset; box-sizing: border-box; cursor: pointer; display: inline-flex; align-items: center; gap: 9px; padding: 6px 10px 6px 6px; white-space: nowrap;
+  background: #fff; border: 1px solid ${T.line}; border-radius: 999px; transition: all .15s; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+.apx-cat .apx-gicon { width: 30px !important; height: 30px !important; font-size: 14px !important; border-radius: 50%; }
+.apx-cat:hover { border-color: var(--c); transform: translateY(-1px); box-shadow: 0 8px 20px -10px rgba(15,23,42,.25); }
+.apx-cat.on { border-color: var(--c); background: var(--t); box-shadow: 0 0 0 3px var(--t); }
+.apx-cat-t { font-size: 13.5px; font-weight: 600; color: ${T.ink}; }
+.apx-cat-n { font-size: 12px; font-weight: 700; color: var(--c); background: var(--t); border-radius: 999px; padding: 1px 8px; }
+
+.apx-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+.apx-quick { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.apx-quick-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.apx-quick-label { font-size: 11.5px; font-weight: 650; color: ${T.muted}; text-transform: uppercase; letter-spacing: .08em; width: 84px; display: inline-flex; gap: 6px; align-items: center; }
+.apx-chip { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px;
+  background: #fff; border: 1px solid ${T.line}; border-radius: 999px; font-size: 13px; color: ${T.ink}; transition: all .15s; }
+.apx-chip:hover { border-color: ${T.accent}; color: ${T.accent}; box-shadow: 0 4px 12px -6px rgba(37,99,235,.5); }
+
+/* groups + cards */
+.apx-group { margin-bottom: 30px; }
+.apx-group-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.apx-group-head h2 { font-size: 17px; font-weight: 750; margin: 0; color: ${T.ink}; letter-spacing: -0.2px; }
+.apx-group-n { font-size: 12px; font-weight: 700; color: ${T.muted}; background: #e9edf3; border-radius: 999px; padding: 1px 8px; }
 .apx-blurb { color: ${T.muted}; font-size: 13px; }
-.apx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.apx-card { position: relative; background: ${T.card}; border: 1px solid ${T.line}; border-radius: 12px; padding: 16px 16px 14px;
-  cursor: pointer; transition: transform .15s, box-shadow .15s, border-color .15s; display: flex; flex-direction: column; gap: 6px; min-height: 118px; outline: none; }
-.apx-card::before { content: ''; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; background: var(--accent); opacity: .0; transition: opacity .15s; }
-.apx-card:hover, .apx-card:focus-visible { transform: translateY(-2px); box-shadow: 0 10px 24px rgba(15,23,42,.07); border-color: #d6dbe5; }
-.apx-card:hover::before, .apx-card:focus-visible::before { opacity: 1; }
-.apx-card-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
-.apx-card-title { font-weight: 650; font-size: 15px; color: ${T.ink}; }
-.apx-card-desc { color: ${T.muted}; font-size: 13px; line-height: 1.45; flex: 1; }
-.apx-card-go { color: var(--accent); font-size: 12.5px; font-weight: 600; opacity: 0; transition: opacity .15s; display: inline-flex; gap: 6px; align-items: center; }
-.apx-card:hover .apx-card-go, .apx-card:focus-visible .apx-card-go { opacity: 1; }
-.apx-pin { color: ${T.faint}; padding: 2px; border-radius: 6px; line-height: 1; }
+.apx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 14px; }
+.apx-card { position: relative; overflow: hidden; background: #fff; border: 1px solid ${T.line}; border-radius: 16px; padding: 16px 16px 14px;
+  cursor: pointer; transition: transform .18s, box-shadow .18s, border-color .18s; display: flex; flex-direction: column; gap: 6px; outline: none;
+  box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+.apx-card::before { content: ''; position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--accent); transform: scaleX(0); transform-origin: left; transition: transform .25s; }
+.apx-card::after { content: ''; position: absolute; right: -36px; bottom: -36px; width: 96px; height: 96px; border-radius: 50%; background: var(--t); opacity: 0; transition: opacity .25s, transform .3s; }
+.apx-card:hover, .apx-card:focus-visible { transform: translateY(-3px); box-shadow: 0 16px 32px -14px rgba(15,23,42,.22); border-color: transparent; }
+.apx-card:hover::before, .apx-card:focus-visible::before { transform: scaleX(1); }
+.apx-card:hover::after { opacity: 1; transform: scale(1.4); }
+.apx-card > * { position: relative; z-index: 1; }
+.apx-card-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 4px; }
+.apx-card-title { font-weight: 700; font-size: 15px; color: ${T.ink}; letter-spacing: -0.1px; }
+.apx-card-desc { color: ${T.muted}; font-size: 13px; line-height: 1.5; flex: 1; }
+.apx-card-foot { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; padding-top: 10px; border-top: 1px dashed ${T.line}; }
+.apx-meta { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: ${T.muted}; }
+.apx-card-go { color: var(--accent); font-size: 12.5px; font-weight: 650; display: inline-flex; gap: 6px; align-items: center; opacity: 0; transform: translateX(-4px); transition: all .18s; }
+.apx-card:hover .apx-card-go, .apx-card:focus-visible .apx-card-go { opacity: 1; transform: none; }
+.apx-pin { color: ${T.faint}; padding: 4px; border-radius: 8px; line-height: 1; }
 .apx-pin:hover { color: #f59e0b; background: #fff7e6; }
-
-.apx-back { all: unset; cursor: pointer; color: ${T.muted}; font-size: 13px; display: inline-flex; gap: 8px; align-items: center; margin-bottom: 14px; }
-.apx-back:hover { color: ${T.accent}; }
-.apx-report-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
-.apx-bar { width: 4px; height: 24px; border-radius: 3px; display: inline-block; }
-
-.apx-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; background: ${T.card}; border: 1px solid ${T.line};
-  border-radius: 12px; padding: 12px; margin-bottom: 16px; }
-.apx-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
-.apx-kpi { background: ${T.card}; border: 1px solid ${T.line}; border-radius: 12px; padding: 14px 16px; }
-.apx-kpi-v { font-size: 26px; font-weight: 750; letter-spacing: -0.5px; color: ${T.ink}; line-height: 1.15; }
-.apx-kpi-l { color: ${T.muted}; font-size: 12.5px; margin-top: 4px; }
-.apx-panel { background: ${T.card}; border: 1px solid ${T.line}; border-radius: 12px; overflow: hidden; }
-.apx-panel .ant-table-thead > tr > th { background: #f8fafc; color: ${T.muted}; font-weight: 600; font-size: 12.5px; text-transform: uppercase; letter-spacing: .03em; }
-.apx-panel .ant-table-tbody > tr > td { font-size: 13.5px; }
-.apx-panel .ant-pagination { padding: 0 16px; }
-/* full-bleed: cancel the app layout's padding so the page uses the whole screen */
-.apx-reports { background: ${T.bg}; margin: -24px; padding: 20px 24px 28px; min-height: calc(100vh - 64px); border-radius: 8px; }
-.apx-lib { display: grid; grid-template-columns: 236px minmax(0, 1fr); gap: 28px; }
-.apx-rail { position: sticky; top: 12px; align-self: start; max-height: calc(100vh - 100px); overflow: auto; padding-right: 4px; }
-.apx-rail-title { font-size: 11.5px; font-weight: 650; color: ${T.faint}; text-transform: uppercase; letter-spacing: .07em; margin: 4px 8px 6px; display: flex; gap: 6px; align-items: center; }
-.apx-rail-item { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: flex; align-items: center; gap: 9px; padding: 8px 10px;
-  border-radius: 8px; font-size: 13.5px; color: ${T.ink}; transition: background .12s; }
-.apx-rail-item.sm { padding: 5px 10px 5px 24px; font-size: 13px; color: #334155; }
-.apx-rail-item:hover { background: #eef1f6; }
-.apx-rail-item.on { background: #e8efff; color: ${T.accent}; font-weight: 600; }
-.apx-count { margin-left: auto; font-size: 12px; color: ${T.faint}; }
-.apx-narrow-only { display: none !important; }
-kbd { font-family: inherit; font-size: 11px; background: #fff; border: 1px solid ${T.line}; border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; }
-.apx-list-row { display: flex; align-items: center; gap: 16px; padding: 12px 16px; border-bottom: 1px solid ${T.line}; cursor: pointer; outline: none; }
+.apx-live-dot { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; box-shadow: 0 0 0 3px rgba(34,197,94,.18); }
+.apx-live-dot.pulse { animation: apxPulse 1.6s infinite; }
+@keyframes apxPulse { 0% { box-shadow: 0 0 0 0 rgba(34,197,94,.6); } 70% { box-shadow: 0 0 0 8px rgba(34,197,94,0); } 100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); } }
+.apx-list-row { display: flex; align-items: center; gap: 14px; padding: 11px 16px; border-bottom: 1px solid ${T.line}; cursor: pointer; outline: none; transition: background .12s; }
 .apx-list-row:last-child { border-bottom: 0; }
-.apx-list-row:hover, .apx-list-row:focus-visible { background: #f8fafc; }
+.apx-list-row:hover, .apx-list-row:focus-visible { background: #f6f9ff; }
 .apx-list-row .apx-card-desc { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-.apx-report { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 22px; }
+/* report page */
+.apx-report { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 18px; align-items: start; }
 .apx-report.apx-rail-closed, .apx-report.apx-focus { grid-template-columns: minmax(0, 1fr); }
-.apx-report-rail .apx-back { margin: 2px 8px 14px; }
-.apx-focus { position: fixed; inset: 0; z-index: 1000; background: ${T.bg}; padding: 16px 22px; overflow: auto; }
-.apx-crumb { font-size: 12.5px; color: ${T.muted}; margin-bottom: 2px; }
-.apx-crumb a { color: ${T.muted}; }
-.apx-crumb a:hover { color: ${T.accent}; }
-.apx-updated { font-size: 12px; color: ${T.faint}; margin-right: 4px; }
-.apx-filter-row { display: flex; gap: 10px; align-items: stretch; margin-bottom: 14px; }
-.apx-filter-row .apx-filters { flex: 1; margin-bottom: 0; }
-.apx-filter-row > .ant-btn, .apx-filter-row > .ant-dropdown-trigger { height: auto; border-radius: 12px; }
-.apx-filters-empty { color: ${T.faint}; font-size: 13px; }
-.apx-kpi { position: relative; overflow: hidden; }
-.apx-kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); opacity: .8; }
-.apx-table-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid ${T.line}; flex-wrap: wrap; }
-.apx-panel .ant-table-tbody > tr:hover > td { background: #f5f8ff !important; }
-.apx-total td { background: #f8fafc !important; font-weight: 650; }
+.apx-focus { position: fixed; inset: 0; z-index: 1000; padding: 16px 20px; overflow: auto;
+  background: linear-gradient(180deg, #eef2f8 0%, #f5f7fb 320px); }
+.apx-rail { position: sticky; top: 12px; max-height: calc(100vh - 92px); overflow: auto; background: #fff; border: 1px solid ${T.line};
+  border-radius: 16px; padding: 10px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+.apx-rail-back { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: flex; gap: 8px; align-items: center; padding: 8px 10px; margin-bottom: 6px;
+  border-radius: 10px; font-size: 13px; font-weight: 600; color: ${T.muted}; background: #f4f6fa; }
+.apx-rail-back:hover { color: ${T.accent}; background: #eaf1ff; }
+.apx-rail-group { margin-bottom: 2px; }
+.apx-rail-head { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: flex; gap: 10px; align-items: center; padding: 7px 8px;
+  border-radius: 10px; font-size: 13px; font-weight: 650; color: ${T.ink}; }
+.apx-rail-head:hover { background: #f4f6fa; }
+.apx-rail-head > span:nth-child(2) { flex: 1; }
+.apx-caret { font-size: 10px; color: ${T.faint}; transition: transform .15s; }
+.apx-rail-item { all: unset; box-sizing: border-box; cursor: pointer; width: 100%; display: block; padding: 6px 10px 6px 42px; border-radius: 8px;
+  font-size: 13px; color: #475569; position: relative; transition: background .12s; }
+.apx-rail-item:hover { background: #f4f6fa; color: ${T.ink}; }
+.apx-rail-item.on { background: var(--t); color: var(--c); font-weight: 650; }
+.apx-rail-item.on::before { content: ''; position: absolute; left: 30px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--c); }
+
+.apx-rhero { position: relative; overflow: hidden; border-radius: 20px; padding: 20px 22px 18px; color: #fff; margin-bottom: 14px;
+  background: radial-gradient(520px 240px at 92% -40%, var(--glow), transparent 65%), linear-gradient(135deg, #0b1b36 0%, #12305e 60%, #163f78 100%);
+  box-shadow: 0 18px 40px -20px rgba(15,35,80,.6); }
+.apx-rhero-top { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.apx-rhero-icon { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; font-size: 21px; color: #fff; flex-shrink: 0;
+  background: var(--c); box-shadow: 0 8px 20px -6px var(--glow); }
+.apx-crumb { font-size: 12.5px; color: rgba(226,232,240,.7); display: flex; gap: 7px; align-items: center; }
+.apx-crumb a { color: rgba(226,232,240,.85); }
+.apx-crumb a:hover { color: #fff; text-decoration: underline; }
+.apx-rhero-title { font-size: 25px; font-weight: 800; letter-spacing: -0.5px; margin: 2px 0 2px; color: #fff; }
+.apx-rhero-sub { color: rgba(226,232,240,.78); font-size: 13.5px; }
+.apx-rhero-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.apx-updated { font-size: 12px; color: rgba(226,232,240,.75); display: inline-flex; gap: 8px; align-items: center; margin-right: 4px; }
+.apx-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin-top: 18px; }
+.apx-kpi { display: flex; align-items: center; gap: 12px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.12);
+  border-radius: 14px; padding: 12px 14px; backdrop-filter: blur(6px); }
+.apx-kpi-i { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; font-size: 18px; flex-shrink: 0; }
+.apx-kpi-v { font-size: 24px; font-weight: 800; letter-spacing: -0.5px; color: #fff; line-height: 1.1; }
+.apx-kpi-l { color: rgba(226,232,240,.72); font-size: 12px; margin-top: 2px; }
+.apx-kpi .ant-skeleton-input { background: rgba(255,255,255,.15) !important; }
+
+.apx-filter-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; background: #fff; border: 1px solid ${T.line};
+  border-radius: 16px; padding: 10px 12px; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+.apx-filters { flex: 1; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; min-width: 0; }
+.apx-filter-actions { display: flex; gap: 8px; margin-left: auto; flex-shrink: 0; }
+.apx-filters-empty { color: ${T.faint}; font-size: 13px; padding-left: 4px; }
+.apx-filters .ant-segmented { background: #eef1f6; }
+
+.apx-panel { background: #fff; border: 1px solid ${T.line}; border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(15,23,42,.04); }
+.apx-table-bar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid ${T.line}; flex-wrap: wrap; background: #fcfdfe; }
+.apx-panel .ant-table-thead > tr > th { background: #f6f8fb !important; color: #64748b; font-weight: 650; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
+.apx-panel .ant-table-thead > tr > th::before { display: none; }
+.apx-panel .ant-table-tbody > tr > td { font-size: 13.5px; border-bottom-color: #f0f2f6; }
+.apx-panel .ant-table-tbody > tr:nth-child(even) > td { background: #fbfcfe; }
+.apx-panel .ant-table-tbody > tr:hover > td { background: #eef4ff !important; }
+.apx-panel .ant-pagination { padding: 0 16px; }
+.apx-total td { background: #f1f5fb !important; font-weight: 700; border-top: 1px solid ${T.line}; }
 .apx-mark { background: #fde68a; padding: 0 1px; border-radius: 2px; }
 .apx-detail { display: flex; flex-direction: column; }
-.apx-detail-row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 9px 0; border-bottom: 1px solid ${T.line}; font-size: 13.5px; }
+.apx-detail-row { display: grid; grid-template-columns: 150px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid ${T.line}; font-size: 13.5px; }
 .apx-detail-row > span { color: ${T.muted}; }
-.apx-detail-row > div { word-break: break-word; }
+.apx-detail-row > div { word-break: break-word; font-weight: 500; }
+
 @media (max-width: 1100px) {
-  .apx-lib, .apx-report { grid-template-columns: minmax(0, 1fr); }
+  .apx-report { grid-template-columns: minmax(0, 1fr); }
   .apx-rail { display: none; }
-  .apx-narrow-only { display: inline-flex !important; }
+  .apx-hero-stats { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 640px) {
-  .apx-reports { margin: -24px -16px; padding: 16px 16px 32px; }
-  .apx-lib-head .ant-input-affix-wrapper { width: 100% !important; }
+  .apx-reports { padding: 12px 12px 28px; }
+  .apx-hero { padding: 22px 18px; }
+  .apx-hero-title { font-size: 28px; }
+  .apx-rhero-actions { width: 100%; }
   .apx-filter-row { flex-direction: column; }
 }
 `;
