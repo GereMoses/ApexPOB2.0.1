@@ -940,30 +940,15 @@ async def notify_passengers(flight_id: int, payload: NotifyBody, db: Session = D
 
 async def _notify_passengers(db: Session, s: TransportSchedule, subject: str, body: str,
                              email: bool = True, sms: bool = False) -> Dict[str, Any]:
+    """Tell the passengers (their own email / WhatsApp / SMS — never a next-of-kin
+    number) through the shared alert dispatcher, logged per recipient."""
+    from ..services.notify_dispatch import dispatch, people_from_personnel
     entries = [e for e in (s.manifest_entries or []) if e.status not in ("NO_SHOW", "OFFLOADED")]
     pids = [e.personnel_id for e in entries if e.personnel_id]
-    people = {p.id: p for p in db.query(Personnel).filter(Personnel.id.in_(pids)).all()} if pids else {}
-    result: Dict[str, Any] = {"email": None, "sms": None}
-
-    if email:
-        from ..services.notify_email import send_email, smtp_configured
-        emails = sorted({people[e.personnel_id].email for e in entries
-                         if e.personnel_id and people.get(e.personnel_id) and people[e.personnel_id].email})
-        if not smtp_configured():
-            result["email"] = {"sent": 0, "error": "Email not configured (Settings → Email)"}
-        else:
-            result["email"] = await asyncio.to_thread(send_email, list(emails), subject, f"<p>{body}</p>", body)
-
-    if sms:
-        from ..services.notify_sms import send_sms, sms_configured
-        phones = sorted({(people[e.personnel_id].phone or people[e.personnel_id].emergency_contact_phone)
-                         for e in entries if e.personnel_id and people.get(e.personnel_id)
-                         and (people[e.personnel_id].phone or people[e.personnel_id].emergency_contact_phone)})
-        if not sms_configured():
-            result["sms"] = {"sent": 0, "error": "SMS gateway not configured"}
-        else:
-            result["sms"] = await asyncio.to_thread(send_sms, list(phones), body)
-    return result
+    people = people_from_personnel(db, ids=pids) if pids else []
+    channels = ["whatsapp"] + (["email"] if email else []) + (["sms"] if sms else [])
+    summary = await asyncio.to_thread(dispatch, "transport", s.id, people, subject, body, channels, False)
+    return {ch: (summary.get(ch) or {"sent": 0}) for ch in channels}
 
 
 class FlightUpdate(BaseModel):

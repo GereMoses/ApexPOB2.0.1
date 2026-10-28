@@ -826,7 +826,7 @@ const Notifications = () => {
     FAILED:    { color: '#cf1322', bg: '#fff1f0', border: '#ffa39e' },
     SKIPPED:   { color: '#8c8c8c', bg: '#fafafa', border: '#d9d9d9' },
   };
-  const SOURCE = { emergency: 'Emergency', muster: 'Muster', muster_all_clear: 'All clear',
+  const SOURCE = { emergency: 'Emergency', transport: 'Flight change', door_pin: 'Door PIN', controller_offline: 'Controller offline', muster: 'Muster', muster_all_clear: 'All clear',
     muster_escalation: 'Escalation', panic: 'Panic', test: 'Test' };
 
   const cols = [
