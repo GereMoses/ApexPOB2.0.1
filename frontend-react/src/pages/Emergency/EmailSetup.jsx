@@ -130,7 +130,7 @@ const EmailSetup = () => {
     const e = quick.email.trim();
     if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { setDetected(null); return undefined; }
     const t = setTimeout(async () => {
-      try { setDetected((await api.get(`/api/v1/settings/email/detect?email=${encodeURIComponent(e)}`)).data.data); }
+      try { setDetected((await api.get(`/api/v1/settings/email/detect?email=${encodeURIComponent(e)}`)).data); }
       catch { setDetected(null); }
     }, 450);
     return () => clearTimeout(t);
@@ -140,15 +140,15 @@ const EmailSetup = () => {
     setConnecting(true); setConnectErr(null);
     try {
       const res = await api.post('/api/v1/settings/email/quick-setup', quick);
-      if (res.data.success) {
-        message.success(res.data.message, 6);
+      if (res.success) {
+        message.success(res.message, 6);
         await load();
         setEditing(false);
         setQuick(q => ({ ...q, app_password: '' }));
       } else {
-        setConnectErr({ text: res.data.message, help: res.data.data?.help_url });
+        setConnectErr({ text: res.message, help: res.data?.help_url });
       }
-    } catch (e) { setConnectErr({ text: e?.response?.data?.detail || e.message }); }
+    } catch (e) { setConnectErr({ text: e.message }); }
     finally { setConnecting(false); }
   };
 
@@ -157,7 +157,7 @@ const EmailSetup = () => {
   const load = async () => {
     try {
       const res = await api.get('/api/v1/settings/email');
-      const d = res.data.data || {};
+      const d = res.data || {};
       form.setFieldsValue({
         smtp_host: d.smtp_host || '', smtp_port: d.smtp_port || '587',
         smtp_user: d.smtp_user || '', smtp_password: '',
@@ -189,10 +189,10 @@ const EmailSetup = () => {
       const payload = { ...values };
       if (!payload.smtp_password) delete payload.smtp_password;
       const res = await api.put('/api/v1/settings/email', payload);
-      applyResult(res.data.data || {});
+      applyResult(res.data || {});
       form.setFieldsValue({ smtp_password: '' });
       message.success('Email settings saved');
-    } catch (e) { message.error('Save failed: ' + (e?.response?.data?.detail || e.message)); }
+    } catch (e) { message.error('Save failed: ' + (e.message)); }
     finally { setSaving(false); }
   };
 
@@ -201,9 +201,9 @@ const EmailSetup = () => {
     setGenning(true);
     try {
       const res = await api.post('/api/v1/settings/email/dkim/generate', {});
-      applyResult(res.data.data || {});
+      applyResult(res.data || {});
       message.success('DKIM key generated — publish the DKIM record below');
-    } catch (e) { message.error('DKIM generation failed: ' + (e?.response?.data?.detail || e.message)); }
+    } catch (e) { message.error('DKIM generation failed: ' + (e.message)); }
     finally { setGenning(false); }
   };
 
@@ -212,8 +212,8 @@ const EmailSetup = () => {
     setTesting(true); setTestResult(null);
     try {
       const res = await api.post('/api/v1/settings/email/test', { address: testAddr.trim() });
-      setTestResult(res.data.data || {});
-    } catch (e) { setTestResult({ sent: 0, error: e?.response?.data?.detail || e.message }); }
+      setTestResult(res.data || {});
+    } catch (e) { setTestResult({ sent: 0, error: e.message }); }
     finally { setTesting(false); }
   };
 

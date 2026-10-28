@@ -769,8 +769,8 @@ const PersonnelList = () => {
     mutationFn: ({ emp_id, hire_date }) =>
       apiService.post('/api/mtd/compliance/setup-new-hire/', { emp_id, hire_date }),
     onSuccess: (res) => {
-      const count = res?.data?.data?.created?.length ?? 0;
-      if (count > 0) message.info(`MTD: ${res.data.data.message}`);
+      const count = res?.data?.created?.length ?? 0;
+      if (count > 0) message.info(`MTD: ${res.data.message}`);
       queryClient.invalidateQueries(['mtd-non-compliant']);
     },
   });
