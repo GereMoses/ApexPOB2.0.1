@@ -113,8 +113,14 @@ rate_limiter = RateLimiter()
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Rate limiting middleware for FastAPI"""
 
-    # Auth endpoints get a much stricter limit than the general API.
+    # Endpoints that take a password / token / code get a much stricter limit than
+    # the general API (brute-force protection). Routine authenticated calls under
+    # /auth — /auth/me on every page load, /auth/sse-ticket, /auth/logout — use the
+    # general limit: lumping them in let one office behind a single NAT IP lock
+    # everyone out after 10 page loads in 5 minutes.
     _AUTH_PREFIXES = ("/api/auth/", "/api/v1/auth/")
+    _AUTH_CREDENTIAL_WORDS = ("login", "token", "refresh", "mfa", "2fa", "otp", "password",
+                              "register", "forgot", "reset", "verify", "signup")
 
     def __init__(self, app, calls: int = 100, period: int = 60,
                  auth_calls: int = None, auth_period: int = None):
@@ -133,7 +139,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         # Apply the stricter auth limit to login/refresh/MFA endpoints.
         path = request.url.path
-        if any(path.startswith(p) for p in self._AUTH_PREFIXES):
+        if any(path.startswith(p) for p in self._AUTH_PREFIXES) and \
+                any(w in path.lower() for w in self._AUTH_CREDENTIAL_WORDS):
             limit, window = self.auth_calls, self.auth_period
             scope = "auth"
         else:
