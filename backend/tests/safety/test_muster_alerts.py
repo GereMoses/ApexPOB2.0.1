@@ -274,3 +274,31 @@ def test_one_tap_site_muster_alerts_on_configured_channels(db, make_person, make
         assert any(c["source_type"] == "muster" for c in sent)
     finally:
         _end(db, res["event_id"])
+
+
+def test_meta_hello_world_and_slot_mismatch_retry(monkeypatch):
+    import requests
+    import app.services.notify_whatsapp as nw
+    base = {"enabled": True, "provider": "meta", "country_code": "234", "meta_phone_number_id": "111",
+            "meta_access_token": "tok", "meta_template_lang": "", "meta_api_version": "v21.0"}
+    posted = []
+
+    class R:
+        def __init__(self, ok, data): self.ok, self._d, self.content, self.status_code = ok, data, b"x", 200 if ok else 400
+        def json(self): return self._d
+
+    # Meta's test template has no text slot → sent without components, language en_US
+    monkeypatch.setattr(nw, "_db_settings", lambda: {**base, "meta_template": "hello_world"})
+    monkeypatch.setattr(requests, "post", lambda url, json=None, headers=None, timeout=None:
+                        posted.append(json) or R(True, {"messages": [{"id": "w"}]}))
+    assert nw.send_whatsapp("08031112222", "FIRE MUSTER")["sent"] == 1
+    assert "components" not in posted[-1]["template"] and posted[-1]["template"]["language"]["code"] == "en_US"
+
+    # A template whose slots don't match (132000) is retried without the text
+    posted.clear()
+    replies = iter([R(False, {"error": {"message": "Number of parameters does not match", "code": 132000}}),
+                    R(True, {"messages": [{"id": "w"}]})])
+    monkeypatch.setattr(nw, "_db_settings", lambda: {**base, "meta_template": "pob_alert"})
+    monkeypatch.setattr(requests, "post", lambda url, json=None, headers=None, timeout=None: posted.append(json) or next(replies))
+    assert nw.send_whatsapp("08031112222", "FIRE MUSTER")["sent"] == 1
+    assert "components" in posted[0]["template"] and "components" not in posted[1]["template"]

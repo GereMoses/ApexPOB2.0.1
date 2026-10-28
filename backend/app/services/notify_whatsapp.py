@@ -312,22 +312,38 @@ def _send_db(cfg: Dict[str, object], recipients: List[str], message: str) -> Dic
         headers = {"Authorization": f"Bearer {cfg['meta_access_token']}"}
         template = str(cfg.get("meta_template") or "").strip()
 
+        lang = cfg.get("meta_template_lang") or ("en_US" if template == "hello_world" else "en")
+
+        def template_body(to: str, with_text: bool) -> dict:
+            t = {"name": template, "language": {"code": lang}}
+            if with_text:
+                t["components"] = [{"type": "body", "parameters": [{"type": "text", "text": _flat(message)}]}]
+            return {"messaging_product": "whatsapp", "to": to, "type": "template", "template": t}
+
+        def post(body: dict):
+            r = requests.post(url, json=body, headers=headers, timeout=15)
+            data = r.json() if r.content else {}
+            if r.ok and data.get("messages"):
+                return None, None
+            err = (data.get("error") or {})
+            return (f"{err.get('message') or r.status_code}" + (f" ({err.get('code')})" if err.get("code") else ""),
+                    err.get("code"))
+
         def one(number: str):
             to = normalize_msisdn(number, cc)
-            if template:
-                body = {"messaging_product": "whatsapp", "to": to, "type": "template",
-                        "template": {"name": template, "language": {"code": cfg.get("meta_template_lang") or "en"},
-                                     "components": [{"type": "body", "parameters": [{"type": "text", "text": _flat(message)}]}]}}
-            else:
-                body = {"messaging_product": "whatsapp", "to": to, "type": "text",
-                        "text": {"preview_url": False, "body": message[:4096]}}
             try:
-                r = requests.post(url, json=body, headers=headers, timeout=15)
-                data = r.json() if r.content else {}
-                if r.ok and data.get("messages"):
-                    return None
-                err = (data.get("error") or {})
-                return f"{err.get('message') or r.status_code}" + (f" ({err.get('code')})" if err.get("code") else "")
+                if not template:
+                    # Free-form text: only delivered inside 24 h of the person messaging you.
+                    return post({"messaging_product": "whatsapp", "to": to, "type": "text",
+                                 "text": {"preview_url": False, "body": message[:4096]}})[0]
+                # Meta's ready-made test template "hello_world" has no text slot.
+                with_text = template != "hello_world"
+                err, code = post(template_body(to, with_text))
+                if err and with_text and code == 132000:
+                    # The approved template has a different number of slots — still
+                    # get *a* message through rather than nothing.
+                    err, code = post(template_body(to, False))
+                return err
             except Exception as exc:  # noqa: BLE001
                 return str(exc)
         return _parallel(recipients, one, "meta")

@@ -130,6 +130,7 @@ export default function AlertsTab() {
                   <code>{TEMPLATE_TEXT}</code>
                   <Tooltip title="Copy"><CopyOutlined onClick={() => { navigator.clipboard?.writeText(TEMPLATE_TEXT); message.success('Copied'); }} /></Tooltip>
                   — ApexPOB puts the alert text in <code>{'{{1}}'}</code>.
+                  <br />Just testing? Use Meta's free test number with template <code>hello_world</code> (it can't carry the alert text, but proves delivery).
                 </div>
               </>
             )}
