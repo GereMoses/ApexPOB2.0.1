@@ -221,7 +221,28 @@ async def delete_user(user_id: int, db: Session = Depends(get_db), current_user=
         raise HTTPException(404, "User not found")
     if row.is_superuser:
         raise HTTPException(400, "Cannot delete a superuser account")
+    if row.id == getattr(current_user, "id", None):
+        raise HTTPException(400, "You can't delete your own account")
+    who = db.execute(text("SELECT username FROM auth_user WHERE id = :id"), {"id": user_id}).scalar()
+    # Everything the user did stays (audit log, musters started, visitors logged…) —
+    # those links are cleared; only their personal report favourites / presets go.
+    # Before this, any user who had ever signed in could not be deleted at all.
+    refs = db.execute(text("""
+        SELECT c.conrelid::regclass::text AS tbl, a.attname AS col, a.attnotnull AS notnull, c.confdeltype AS deltype
+        FROM pg_constraint c JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+        WHERE c.contype = 'f' AND c.confrelid = 'auth_user'::regclass
+    """)).fetchall()
+    for r in refs:
+        if r.deltype in ("c", "n") or r.tbl == "auth_user":
+            continue
+        if r.notnull:
+            db.execute(text(f'DELETE FROM "{r.tbl}" WHERE "{r.col}" = :id'), {"id": user_id})
+        else:
+            db.execute(text(f'UPDATE "{r.tbl}" SET "{r.col}" = NULL WHERE "{r.col}" = :id'), {"id": user_id})
     db.execute(text("DELETE FROM auth_user WHERE id = :id"), {"id": user_id})
+    db.execute(text("""INSERT INTO base_operationlog (user_id, action, table_name, record_id, new_values, created_at)
+                       VALUES (:by, 'USER_DELETED', 'auth_user', :id, :v, NOW())"""),
+               {"by": getattr(current_user, "id", None), "id": user_id, "v": f'{{"username": "{who}"}}'})
     db.commit()
 
 

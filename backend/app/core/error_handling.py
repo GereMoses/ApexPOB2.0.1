@@ -86,12 +86,18 @@ class ErrorHandler:
                     "severity": "warning"
                 }
             elif "foreign key" in error_message.lower():
+                # Two different situations share this error: deleting something other
+                # records still point at ("still referenced"), or saving a link to a
+                # record that doesn't exist. Say which.
+                in_use = "still referenced" in error_message.lower() or "update or delete" in error_message.lower()
                 return {
-                    "error": "FOREIGN_KEY_VIOLATION",
-                    "message": "Referenced record does not exist",
+                    "error": "IN_USE" if in_use else "FOREIGN_KEY_VIOLATION",
+                    "message": ("This record is still used by other records, so it can't be deleted"
+                                if in_use else "Referenced record does not exist"),
                     "details": {
                         "operation": operation,
-                        "suggestion": "Ensure referenced records exist before creating this record"
+                        "suggestion": ("Remove or reassign the records that use it first, or deactivate it instead"
+                                       if in_use else "Ensure referenced records exist before creating this record")
                     },
                     "recovery_action": "verify_references",
                     "severity": "error"
@@ -324,6 +330,8 @@ def database_exception_handler(request: Request, exc: SQLAlchemyError) -> JSONRe
     # Determine appropriate status code
     if error_info["error"] in ["DUPLICATE_RECORD", "NULL_VIOLATION"]:
         status_code = status.HTTP_400_BAD_REQUEST
+    elif error_info["error"] == "IN_USE":
+        status_code = status.HTTP_409_CONFLICT
     elif error_info["error"] == "FOREIGN_KEY_VIOLATION":
         status_code = status.HTTP_404_NOT_FOUND
     else:

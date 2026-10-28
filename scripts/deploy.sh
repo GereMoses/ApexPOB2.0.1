@@ -12,6 +12,12 @@ COMPOSE=(docker compose -f docker-compose.prod.yml --env-file .env.prod)
 SERVICES=("$@")
 [ ${#SERVICES[@]} -eq 0 ] && SERVICES=(backend celery-worker celery-beat frontend)
 
+# Never ship a backend that doesn't even compile (a syntax error crash-loops it
+# and takes sign-in down with it).
+if printf '%s\n' "${SERVICES[@]}" | grep -qE '^(backend|celery-worker|celery-beat)$'; then
+  echo "▶ compiling backend"
+  python3 -m compileall -q backend/app >/dev/null || { echo "✗ backend has a syntax error — not deploying"; exit 1; }
+fi
 echo "▶ building: ${SERVICES[*]}"
 "${COMPOSE[@]}" build "${SERVICES[@]}" | grep -E "naming to|ERROR|Failed to compile" || true
 echo "▶ starting"
