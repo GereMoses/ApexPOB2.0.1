@@ -48,6 +48,7 @@ const VERIFY_COLORS = {
 const PUNCH_CONFIG = {
   CHECK_IN:   { color: '#22C55E', label: 'Check In',   icon: <ArrowDownOutlined /> },
   CHECK_OUT:  { color: '#EF4444', label: 'Check Out',  icon: <ArrowUpOutlined /> },
+  REPEAT_TAP: { color: '#94A3B8', label: 'Repeat tap', icon: <ArrowDownOutlined /> },
   BREAK_OUT:  { color: '#F59E0B', label: 'Break Out',  icon: <ArrowUpOutlined /> },
   BREAK_IN:   { color: '#0078D4', label: 'Break In',   icon: <ArrowDownOutlined /> },
   UNKNOWN:    { color: '#9CA3AF', label: 'Unknown',    icon: <MinusOutlined /> },

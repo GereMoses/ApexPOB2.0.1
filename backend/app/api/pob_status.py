@@ -64,18 +64,21 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
     # whose only tap was their arrival.)
     from ..services.attendance_calculation_service import SITE_TZ
     tz = str(SITE_TZ)
+    from ..services.attendance_calculation_service import min_work_minutes
+    minw = min_work_minutes(db)   # a tap closer than this to the first is a repeat, not an out
 
     def flow(day_offset: int):
         row = db.execute(text(f"""
             WITH taps AS (
-                SELECT t.emp_code, COUNT(*) AS n
+                SELECT t.emp_code, COUNT(*) AS n,
+                       EXTRACT(EPOCH FROM MAX(t.punch_time) - MIN(t.punch_time)) / 60 AS span_min
                 FROM iclock_transaction t
                 LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
                 WHERE (t.punch_time AT TIME ZONE '{tz}')::date = (NOW() AT TIME ZONE '{tz}')::date - :off
                   AND COALESCE(NULLIF(term.reader_purpose, ''), 'ATTENDANCE') = 'ATTENDANCE'
                 GROUP BY t.emp_code)
-            SELECT COUNT(*) AS ins, COUNT(*) FILTER (WHERE n > 1) AS outs FROM taps
-        """), {"off": day_offset}).fetchone()
+            SELECT COUNT(*) AS ins, COUNT(*) FILTER (WHERE n > 1 AND span_min >= :minw) AS outs FROM taps
+        """), {"off": day_offset, "minw": minw}).fetchone()
         return int(row.ins or 0), int(row.outs or 0)
 
     try:
@@ -127,7 +130,9 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
               COALESCE(NULLIF(TRIM(p.current_location), ''), 'Unknown') AS loc,
               COALESCE(p.department, '—')                             AS dept,
               ROW_NUMBER() OVER (PARTITION BY t.emp_code, (t.punch_time AT TIME ZONE :tz)::date
-                                 ORDER BY t.punch_time)                AS nth_today
+                                 ORDER BY t.punch_time)                AS nth_today,
+              EXTRACT(EPOCH FROM t.punch_time - MIN(t.punch_time) OVER (
+                  PARTITION BY t.emp_code, (t.punch_time AT TIME ZONE :tz)::date)) / 60 AS since_first
             FROM iclock_transaction t
             LEFT JOIN personnel p ON p.emp_code = t.emp_code
             WHERE t.punch_time >= NOW() - INTERVAL '24 hours'
@@ -148,7 +153,8 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
                 "timestamp":     r[1].isoformat() if r[1] else None,
                 # first_last attendance: the first tap of the person's site day is the
                 # clock-in, later taps clock-out — whatever key the reader stamped.
-                "type":          ("CHECK_IN" if r[7] == 1 else "CHECK_OUT") if by_position else PUNCH.get(r[2], "UNKNOWN"),
+                "type":          (("CHECK_IN" if r[7] == 1 else "REPEAT_TAP" if (r[8] or 0) < minw else "CHECK_OUT")
+                                  if by_position else PUNCH.get(r[2], "UNKNOWN")),
                 "verify_method": VERIFY.get(r[3], "Unknown"),
                 "personnel":     r[4],
                 "location":      r[5],

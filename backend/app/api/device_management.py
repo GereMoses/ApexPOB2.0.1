@@ -2077,9 +2077,10 @@ async def get_live_transactions(
                 t.terminal_sn, t.area_alias,
                 COALESCE(e.first_name || ' ' || e.last_name, t.emp_code) AS emp_name,
                 d.alias AS device_alias,
-                NOT EXISTS (SELECT 1 FROM iclock_transaction x
-                            WHERE x.emp_code = t.emp_code AND x.punch_time < t.punch_time
-                              AND (x.punch_time AT TIME ZONE :tz)::date = (t.punch_time AT TIME ZONE :tz)::date) AS first_today
+                EXTRACT(EPOCH FROM t.punch_time - (SELECT MIN(x.punch_time) FROM iclock_transaction x
+                            WHERE x.emp_code = t.emp_code
+                              AND (x.punch_time AT TIME ZONE :tz)::date = (t.punch_time AT TIME ZONE :tz)::date)) / 60
+                    AS since_first
             FROM iclock_transaction t
             LEFT JOIN personnel_employee e ON e.emp_code = t.emp_code
             LEFT JOIN iclock_terminal d ON d.sn = t.terminal_sn
@@ -2097,8 +2098,17 @@ async def get_live_transactions(
         except Exception:
             by_position = True
 
+        from ..services.attendance_calculation_service import min_work_minutes
+        minw = min_work_minutes(db)
+        PUNCH_STATE[-1] = "Repeat tap"
+
         def eff(r):
-            return (0 if r[9] else 1) if by_position else r[3]
+            # first tap of the site day = in; a tap within min_work_minutes of it = a
+            # repeat (ignored by attendance); a later tap = out.
+            if not by_position:
+                return r[3]
+            since = float(r[9] or 0)
+            return 0 if since == 0 else (-1 if since < minw else 1)
         VERIFY_TYPE = {0: "Password", 1: "Fingerprint", 2: "Face", 3: "Card", 15: "Multi"}
 
         return {"success": True, "data": [

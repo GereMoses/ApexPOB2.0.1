@@ -196,6 +196,17 @@ def _classify_punches(
     return result
 
 
+def min_work_minutes(db) -> int:
+    """att_rules.min_work_minutes_for_checkout — a tap closer than this to the day's
+    first tap is a repeat tap, not a clock-out. Shared by every screen that labels taps."""
+    try:
+        v = db.execute(text("SELECT rule_value FROM att_rules WHERE rule_key = 'min_work_minutes_for_checkout'")).scalar()
+        return int(v) if v not in (None, "") else 30
+    except Exception:
+        db.rollback()
+        return 30
+
+
 def _first_in_last_out(punches, min_work_minutes: int = 30) -> List[Tuple]:
     """The site standard: the day's FIRST punch is the clock-in and its LAST punch the
     clock-out, whatever In/Out key the reader recorded. A last punch closer than
