@@ -713,8 +713,8 @@ class MTDService:
         if db is None:
             db = next(get_db())
         
-        # Get all personnel
-        query = db.query(Personnel)
+        # Active staff only — leavers have no compliance to track
+        query = db.query(Personnel).filter(Personnel.is_active == True)  # noqa: E712
         if dept_id:
             query = query.filter(Personnel.dept_id == dept_id)
         

@@ -58,18 +58,33 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "SELECT COUNT(*) FROM personnel WHERE is_onboard = TRUE AND is_active = TRUE"
     )).scalar() or 0
 
-    today_d     = date.today()
-    yesterday_d = today_d - timedelta(days=1)
+    # Clock-ins / clock-outs the way attendance counts them: SITE-time day, taps on
+    # attendance (T&A) readers only, first tap = in, a later tap = out. (The F18 stamps
+    # every tap "check-out", so counting punch_state said "0 in, 1 out" for a person
+    # whose only tap was their arrival.)
+    from ..services.attendance_calculation_service import SITE_TZ
+    tz = str(SITE_TZ)
+
+    def flow(day_offset: int):
+        row = db.execute(text(f"""
+            WITH taps AS (
+                SELECT t.emp_code, COUNT(*) AS n
+                FROM iclock_transaction t
+                LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
+                WHERE (t.punch_time AT TIME ZONE '{tz}')::date = (NOW() AT TIME ZONE '{tz}')::date - :off
+                  AND COALESCE(NULLIF(term.reader_purpose, ''), 'ATTENDANCE') = 'ATTENDANCE'
+                GROUP BY t.emp_code)
+            SELECT COUNT(*) AS ins, COUNT(*) FILTER (WHERE n > 1) AS outs FROM taps
+        """), {"off": day_offset}).fetchone()
+        return int(row.ins or 0), int(row.outs or 0)
 
     try:
-        ci_today = db.execute(text(
-            "SELECT COUNT(*) FROM iclock_transaction WHERE punch_state = 0 AND punch_time::date = :d"
-        ), {"d": today_d}).scalar() or 0
-        ci_yest  = db.execute(text(
-            "SELECT COUNT(*) FROM iclock_transaction WHERE punch_state = 0 AND punch_time::date = :d"
-        ), {"d": yesterday_d}).scalar() or 0
+        ci_today, co_today = flow(0)
+        ci_yest, co_yest = flow(1)
     except Exception:
-        ci_today = ci_yest = 0
+        db.rollback()
+        ci_today = co_today = ci_yest = co_yest = 0
+    active_personnel = db.execute(text("SELECT COUNT(*) FROM personnel WHERE is_active = TRUE")).scalar() or 0
 
     # ── location breakdown ─────────────────────────────────────────────
     try:
@@ -110,13 +125,20 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
                        TRIM(p.first_name || ' ' || p.last_name),
                        t.emp_code)                                   AS pname,
               COALESCE(NULLIF(TRIM(p.current_location), ''), 'Unknown') AS loc,
-              COALESCE(p.department, '—')                             AS dept
+              COALESCE(p.department, '—')                             AS dept,
+              ROW_NUMBER() OVER (PARTITION BY t.emp_code, (t.punch_time AT TIME ZONE :tz)::date
+                                 ORDER BY t.punch_time)                AS nth_today
             FROM iclock_transaction t
             LEFT JOIN personnel p ON p.emp_code = t.emp_code
             WHERE t.punch_time >= NOW() - INTERVAL '24 hours'
             ORDER BY t.punch_time DESC
             LIMIT 25
-        """)).fetchall()
+        """), {"tz": tz}).fetchall()
+        try:
+            from .adms_protocol import _punch_state_mode
+            by_position = _punch_state_mode(db) != "device"
+        except Exception:
+            by_position = True
 
         PUNCH  = {0: "CHECK_IN", 1: "CHECK_OUT", 2: "BREAK_OUT", 3: "BREAK_IN"}
         VERIFY = {0: "Password", 1: "Fingerprint", 2: "Face", 3: "Card"}
@@ -124,7 +146,9 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
             recent_events.append({
                 "id":            r[0],
                 "timestamp":     r[1].isoformat() if r[1] else None,
-                "type":          PUNCH.get(r[2], "UNKNOWN"),
+                # first_last attendance: the first tap of the person's site day is the
+                # clock-in, later taps clock-out — whatever key the reader stamped.
+                "type":          ("CHECK_IN" if r[7] == 1 else "CHECK_OUT") if by_position else PUNCH.get(r[2], "UNKNOWN"),
                 "verify_method": VERIFY.get(r[3], "Unknown"),
                 "personnel":     r[4],
                 "location":      r[5],
@@ -169,6 +193,9 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "by_location":            by_location,
         "checkins_today":         ci_today,
         "checkins_yesterday":     ci_yest,
+        "checkouts_today":        co_today,
+        "checkouts_yesterday":    co_yest,
+        "active_personnel":       active_personnel,
         "rotation_overdue_count": overdue,
         "rotation_max_days":      _ROTATION_MAX_DAYS,
         "recent_events":          recent_events,

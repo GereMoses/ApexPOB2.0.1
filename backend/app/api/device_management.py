@@ -2047,6 +2047,11 @@ async def device_network_diagnostics(
 # LIVE TRANSACTION FEED
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _site_tz_name() -> str:
+    from ..services.attendance_calculation_service import SITE_TZ
+    return str(SITE_TZ)
+
+
 @router.get("/api/device/transactions/live/")
 async def get_live_transactions(
     limit: int = Query(50, ge=1, le=200),
@@ -2071,16 +2076,29 @@ async def get_live_transactions(
                 t.id, t.emp_code, t.punch_time, t.punch_state, t.verify_type,
                 t.terminal_sn, t.area_alias,
                 COALESCE(e.first_name || ' ' || e.last_name, t.emp_code) AS emp_name,
-                d.alias AS device_alias
+                d.alias AS device_alias,
+                NOT EXISTS (SELECT 1 FROM iclock_transaction x
+                            WHERE x.emp_code = t.emp_code AND x.punch_time < t.punch_time
+                              AND (x.punch_time AT TIME ZONE :tz)::date = (t.punch_time AT TIME ZONE :tz)::date) AS first_today
             FROM iclock_transaction t
             LEFT JOIN personnel_employee e ON e.emp_code = t.emp_code
             LEFT JOIN iclock_terminal d ON d.sn = t.terminal_sn
             {where}
             ORDER BY t.punch_time DESC
             LIMIT :limit
-        """), params).fetchall()
+        """), {**params, "tz": _site_tz_name()}).fetchall()
 
         PUNCH_STATE = {0: "Check-In", 1: "Check-Out", 2: "Break-Out", 3: "Break-In", 4: "OT-In", 5: "OT-Out"}
+        # Attendance is first tap in / last tap out (the F18 stamps every tap Check-Out),
+        # so show each tap as the engine treats it; punch_state_mode=device keeps the key.
+        try:
+            from .adms_protocol import _punch_state_mode
+            by_position = _punch_state_mode(db) != "device"
+        except Exception:
+            by_position = True
+
+        def eff(r):
+            return (0 if r[9] else 1) if by_position else r[3]
         VERIFY_TYPE = {0: "Password", 1: "Fingerprint", 2: "Face", 3: "Card", 15: "Multi"}
 
         return {"success": True, "data": [
@@ -2088,8 +2106,9 @@ async def get_live_transactions(
                 "id": r[0],
                 "emp_code": r[1],
                 "punch_time": r[2].isoformat() if r[2] else None,
-                "punch_state": r[3],
-                "punch_state_label": PUNCH_STATE.get(r[3], "Unknown"),
+                "punch_state": eff(r),
+                "punch_state_label": PUNCH_STATE.get(eff(r), "Unknown"),
+                "reader_punch_state": r[3],
                 "verify_type": r[4],
                 "verify_type_label": VERIFY_TYPE.get(r[4], "Unknown"),
                 "terminal_sn": r[5],

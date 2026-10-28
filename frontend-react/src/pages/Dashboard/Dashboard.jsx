@@ -212,18 +212,18 @@ export default function Dashboard() {
   const devices = Array.isArray(devRaw) ? devRaw : (devRaw?.data ?? []);
   const tx = txRaw?.data ?? [];
   const lastSeen = lastActRaw?.data ?? [];
-  const totalPersonnel = persRaw?.count ?? pob.total_personnel ?? 0;
+  const totalPersonnel = pob.active_personnel ?? persRaw?.count ?? 0;   // active staff (leavers excluded)
   const online = devices.filter(d => d.state === 1 || d.status === 'online');
   const offline = devices.filter(d => d.state !== 1 && d.status !== 'online');
 
   const todayStr = new Date().toDateString();
-  const yestStr = new Date(Date.now() - 86_400_000).toDateString();
   const todayTx = tx.filter(t => new Date(t.punch_time).toDateString() === todayStr);
-  const yestTx = tx.filter(t => new Date(t.punch_time).toDateString() === yestStr);
-  const todayIns = todayTx.filter(t => t.punch_state !== 1).length;
-  const todayOuts = todayTx.filter(t => t.punch_state === 1).length;
-  const inTrend = todayIns - yestTx.filter(t => t.punch_state !== 1).length;
-  const outTrend = todayOuts - yestTx.filter(t => t.punch_state === 1).length;
+  // People clocked in / out today, counted on the server the way attendance does
+  // (site day, T&A readers, first tap = in, later tap = out).
+  const todayIns = pob.checkins_today ?? 0;
+  const todayOuts = pob.checkouts_today ?? 0;
+  const inTrend = todayIns - (pob.checkins_yesterday ?? 0);
+  const outTrend = todayOuts - (pob.checkouts_yesterday ?? 0);
 
   const offCount = pob.offshore_count ?? 0;
   const onCount = pob.onshore_count ?? 0;
@@ -410,7 +410,7 @@ export default function Dashboard() {
             {[
               { l: 'Today In', v: todayIns, c: '#34d399' },
               { l: 'Today Out', v: todayOuts, c: '#60a5fa' },
-              { l: 'On Site Now', v: Math.max(todayIns - todayOuts, 0), c: '#fbbf24' },
+              { l: 'On Board Now', v: pob.total ?? 0, c: '#fbbf24' },
             ].map(s => (
               <div key={s.l} style={{ flex: 1, background: 'rgba(255,255,255,0.08)', borderRadius: 12, padding: '9px 6px', textAlign: 'center' }}>
                 <div style={{ fontSize: 19, fontWeight: 900, color: s.c }}>{s.v}</div>
