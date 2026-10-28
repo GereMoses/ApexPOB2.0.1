@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, text
+from sqlalchemy import func, text, or_
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import io
@@ -68,7 +68,9 @@ def _person_to_dict(p: Personnel) -> Dict[str, Any]:
         "position": p.position,
         "employment_type": getattr(p, "employment_type", "EMPLOYEE"),
         "personnel_type": p.personnel_type,
-        "status": p.status.value if hasattr(p.status, "value") else (p.status or "ACTIVE"),
+        # A leaver (is_active False) may still carry SeamlessHR's "ACTIVE" text.
+        "status": "INACTIVE" if p.is_active is False else (p.status.value if hasattr(p.status, "value") else (p.status or "ACTIVE")),
+        "is_active": p.is_active is not False,
         "is_onboard": p.is_onboard or False,
         "is_pob": getattr(p, "is_pob", False) or False,
         "safety_critical": p.safety_critical or False,
@@ -124,7 +126,10 @@ async def get_personnel(
         
         # Status filtering — accept both ACTIVE and active (DB stores uppercase)
         if status:
-            query = query.filter(Personnel.status.ilike(status))
+            if status.upper() == "INACTIVE":
+                query = query.filter(or_(Personnel.is_active == False, Personnel.status.ilike(status)))  # noqa: E712
+            else:
+                query = query.filter(Personnel.status.ilike(status), Personnel.is_active != False)  # noqa: E712
         
         # Zone filtering (zones-only architecture)
         if location:
@@ -302,30 +307,31 @@ async def get_personnel_dashboard(db: Session = Depends(get_db)) -> dict:
     """Get comprehensive personnel dashboard data"""
     try:
         # Basic statistics
-        total = db.query(Personnel).count()
-        active = db.query(Personnel).filter(Personnel.status == PersonnelStatus.ACTIVE).count()
-        offshore = db.query(Personnel).filter(Personnel.status == PersonnelStatus.OFFSHORE).count()
-        onshore = db.query(Personnel).filter(Personnel.status == PersonnelStatus.ONSHORE).count()
-        onboard = db.query(Personnel).filter(Personnel.is_onboard == True).count()
+        total = db.query(Personnel).filter(Personnel.is_active == True).count()
+        active = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.status == PersonnelStatus.ACTIVE).count()
+        offshore = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.status == PersonnelStatus.OFFSHORE).count()
+        onshore = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.status == PersonnelStatus.ONSHORE).count()
+        onboard = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.is_onboard == True).count()
+        inactive_total = db.query(Personnel).filter(Personnel.is_active == False).count()  # noqa: E712
         
         # Oil & Gas specific metrics
-        safety_critical = db.query(Personnel).filter(Personnel.safety_critical == True).count()
-        biometric_enrolled = db.query(Personnel).filter(Personnel.biometric_enrolled == True).count()
+        safety_critical = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.safety_critical == True).count()
+        biometric_enrolled = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.biometric_enrolled == True).count()
         
         # Personnel type breakdown
-        staff_count = db.query(Personnel).filter(Personnel.personnel_type == "STAFF").count()
-        contractor_count = db.query(Personnel).filter(Personnel.personnel_type == "CONTRACTOR").count()
-        visitor_count = db.query(Personnel).filter(Personnel.personnel_type == "VISITOR").count()
+        staff_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.personnel_type == "STAFF").count()
+        contractor_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.personnel_type == "CONTRACTOR").count()
+        visitor_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.personnel_type == "VISITOR").count()
         
         # Compliance metrics
-        compliant_count = db.query(Personnel).filter(Personnel.compliance_score >= 90).count()
-        expiring_count = db.query(Personnel).filter(Personnel.compliance_score.between(70, 89)).count()
-        expired_count = db.query(Personnel).filter(Personnel.compliance_score < 70).count()
+        compliant_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.compliance_score >= 90).count()
+        expiring_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.compliance_score.between(70, 89)).count()
+        expired_count = db.query(Personnel).filter(Personnel.is_active == True).filter(Personnel.compliance_score < 70).count()
         
         # Calculate compliance score
         avg_compliance = 0
         if total > 0:
-            avg_compliance_score = db.query(func.avg(Personnel.compliance_score)).scalar() or 0
+            avg_compliance_score = db.query(func.avg(Personnel.compliance_score)).filter(Personnel.is_active == True).scalar() or 0
             avg_compliance = round(float(avg_compliance_score), 1)
         
         # Zone distribution (zones-only architecture)
@@ -337,7 +343,11 @@ async def get_personnel_dashboard(db: Session = Depends(get_db)) -> dict:
         zone_distribution = {f"Zone {zone_id}": count for zone_id, count in zone_data}
         
         return {
-            "total_personnel": total,
+            "total_personnel": total,                 # active staff (leavers excluded)
+            "inactive_personnel": inactive_total,
+            "onboard_count": onboard,                 # the screen's "On Board (POB)" card
+            "contractor_count": contractor_count,
+            "safety_critical_count": safety_critical,
             "offshore_count": offshore,
             "onshore_count": onshore,
             "compliance_score": avg_compliance,
