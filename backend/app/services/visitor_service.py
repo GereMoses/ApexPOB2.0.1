@@ -56,7 +56,7 @@ class VisitorService:
         """Update visitor type"""
         visitor_type = self.db.query(VisitorType).filter(VisitorType.id == type_id).first()
         if not visitor_type:
-            raise NotFoundError(f"Visitor type {type_id} not found")
+            raise NotFoundError(f"Visitor type {type_id}")
         
         for field, value in type_data.items():
             setattr(visitor_type, field, value)
@@ -112,7 +112,7 @@ class VisitorService:
         """Update visitor information"""
         visitor = self.db.query(Visitor).filter(Visitor.id == visitor_id).first()
         if not visitor:
-            raise NotFoundError(f"Visitor {visitor_id} not found")
+            raise NotFoundError(f"Visitor {visitor_id}")
         
         for field, value in visitor_data.dict(exclude_unset=True).items():
             setattr(visitor, field, value)
@@ -125,7 +125,7 @@ class VisitorService:
         """Blacklist a visitor"""
         visitor = self.db.query(Visitor).filter(Visitor.id == visitor_id).first()
         if not visitor:
-            raise NotFoundError(f"Visitor {visitor_id} not found")
+            raise NotFoundError(f"Visitor {visitor_id}")
         
         visitor.is_blacklist = True
         visitor.blacklist_reason = reason
@@ -193,7 +193,7 @@ class VisitorService:
         ).first()
 
         if not pre_reg:
-            raise NotFoundError(f"Pre-registration {pre_reg_id} not found")
+            raise NotFoundError(f"Pre-registration {pre_reg_id}")
 
         # Safety screening: never let a blacklisted visitor be approved
         if approval_data.status == 1 and pre_reg.visitor and self._is_blacklisted(pre_reg.visitor):
@@ -241,7 +241,7 @@ class VisitorService:
             VisitorPreRegistration.id == pre_reg_id
         ).first()
         if not pre_reg:
-            raise NotFoundError(f"Pre-registration {pre_reg_id} not found")
+            raise NotFoundError(f"Pre-registration {pre_reg_id}")
 
         # Pending -> re-send host approval request + visitor confirmation.
         # Decided -> re-send the approval/rejection outcome to the visitor.
@@ -361,17 +361,17 @@ class VisitorService:
                 VisitorPreRegistration.id == check_in_data.pre_reg_id
             ).first()
             if not pre_reg:
-                raise NotFoundError("Pre-registration not found")
+                raise NotFoundError("Pre-registration")
             visitor = pre_reg.visitor
             if not visitor:
-                raise NotFoundError("Visitor not found")
+                raise NotFoundError("Visitor")
             pre_reg.status = 3  # checked_in
 
         elif check_in_data.visitor_id:
             # Returning visitor walk-in — look up existing profile
             visitor = self.db.query(Visitor).filter(Visitor.id == check_in_data.visitor_id).first()
             if not visitor:
-                raise NotFoundError("Visitor not found")
+                raise NotFoundError("Visitor")
 
         elif check_in_data.visitor_data:
             visitor = self.create_visitor(check_in_data.visitor_data)
@@ -460,7 +460,7 @@ class VisitorService:
             ).first()
         
         if not visit_log:
-            raise NotFoundError("Active visitor visit not found")
+            raise NotFoundError("Active visitor visit")
         
         # Update visit log
         visit_log.check_out_time = datetime.utcnow()
@@ -592,7 +592,7 @@ class VisitorService:
         """Update a blacklist entry"""
         entry = self.db.query(VisitorBlacklist).filter(VisitorBlacklist.id == blacklist_id).first()
         if not entry:
-            raise NotFoundError(f"Blacklist entry {blacklist_id} not found")
+            raise NotFoundError(f"Blacklist entry {blacklist_id}")
         for field, value in data.items():
             setattr(entry, field, value)
         self.db.commit()
@@ -603,7 +603,7 @@ class VisitorService:
         """Deactivate a blacklist entry"""
         entry = self.db.query(VisitorBlacklist).filter(VisitorBlacklist.id == blacklist_id).first()
         if not entry:
-            raise NotFoundError(f"Blacklist entry {blacklist_id} not found")
+            raise NotFoundError(f"Blacklist entry {blacklist_id}")
         entry.is_active = False
         # Un-blacklist the visitor record if they exist
         if entry.id_no:
@@ -699,7 +699,7 @@ class VisitorService:
             VisitorVisitLog.status == 0
         ).first()
         if not visit_log:
-            raise NotFoundError(f"Active visit log {log_id} not found")
+            raise NotFoundError(f"Active visit log {log_id}")
 
         visit_log.check_out_time = datetime.utcnow()
         visit_log.status = 1

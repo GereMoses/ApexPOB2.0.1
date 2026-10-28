@@ -1422,10 +1422,10 @@ class ReportService:
         params: Dict[str, Any] = {}
         date_from_clause = date_to_clause = ""
         if filters.get('date_from'):
-            date_from_clause = "AND DATE(vl.check_in_time) >= :date_from"
+            date_from_clause = "AND DATE(base.check_in_time) >= :date_from"
             params['date_from'] = filters['date_from']
         if filters.get('date_to'):
-            date_to_clause = "AND DATE(vl.check_in_time) <= :date_to"
+            date_to_clause = "AND DATE(base.check_in_time) <= :date_to"
             params['date_to'] = filters['date_to']
 
         rows = self.db.execute(text(f"""
