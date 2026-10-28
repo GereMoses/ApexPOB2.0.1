@@ -584,6 +584,7 @@ async def push_attendance(
     try:
         client = await _get_shr_client()
         sent_codes = []
+        reasons: List[str] = []      # SeamlessHR's own words, kept in the sync history
         for batch_no, batch in enumerate(batches, 1):
             payload_list = [pl for _, payloads in batch for pl in payloads]
             body = payload_list if not wrapper else {wrapper: payload_list}
@@ -602,12 +603,14 @@ async def push_attendance(
                         batch_no, len(payload_list), detail,
                     )
                     failed += len(batch)
+                    reasons.append(f"accepted but not applied: {str(detail)[:200]}")
                 else:
                     logger.warning(
                         "SeamlessHR batch %d (%d events) returned %s: %s",
                         batch_no, len(payload_list), resp.status_code, resp.text[:200],
                     )
                     failed += len(batch)
+                    reasons.append(f"HTTP {resp.status_code}: {resp.text[:200]}")
             except httpx.RequestError as e:
                 logger.error("SeamlessHR request error (batch %d): %s", batch_no, e)
                 failed += len(batch)
@@ -624,6 +627,7 @@ async def push_attendance(
             f"Sent {sent}/{len(records)} records to SeamlessHR for {sync_date}"
             + (f" ({failed} failed)" if failed else "")
             + (f" ({len(set(no_attendance_id))} held back: no Attendance ID)" if no_attendance_id else "")
+            + (f" — SeamlessHR said: {reasons[0]}" if reasons else "")
         )
         if no_attendance_id and result["status"] == "success":
             result["status"] = "partial"
