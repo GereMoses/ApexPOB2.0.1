@@ -481,7 +481,7 @@ async def get_audit_log(
         where.append("l.created_at >= :start_date")
         params["start_date"] = start_date
     if end_date:
-        where.append("l.created_at < :end_date::date + interval '1 day'")
+        where.append("l.created_at < CAST(:end_date AS date) + interval '1 day'")
         params["end_date"] = end_date
 
     cond = " AND ".join(where)

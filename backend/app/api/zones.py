@@ -675,8 +675,8 @@ def _delete_single_zone(db: Session, zone_id: int) -> None:
     db.execute(text(
         "UPDATE mustering_event SET muster_zone_ids = ("
         "  SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(muster_zone_ids) e"
-        "  WHERE e <> to_jsonb(:z::int)"
-        ") WHERE muster_zone_ids IS NOT NULL AND muster_zone_ids @> to_jsonb(:z::int)"
+        "  WHERE e <> to_jsonb(CAST(:z AS int))"
+        ") WHERE muster_zone_ids IS NOT NULL AND muster_zone_ids @> to_jsonb(CAST(:z AS int))"
     ), {"z": zone_id})
     db.execute(text("UPDATE access_readers SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE emergency_template SET auto_mustering_zone_id = NULL WHERE auto_mustering_zone_id = :z"), {"z": zone_id})

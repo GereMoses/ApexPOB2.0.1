@@ -137,7 +137,7 @@ async def create_shift(
             :work_days, :days_str,
             :shift_type, :start_time, :end_time, :break_duration, :working_hours,
             :is_night_shift, :is_weekend_shift, :is_flexible,
-            :rotation_pattern::jsonb, :rotation_cycle_days,
+            CAST(:rotation_pattern AS jsonb), :rotation_cycle_days,
             :grace_period_minutes, :max_late_minutes,
             :max_early_departure_minutes, :overtime_threshold_minutes,
             :description, :is_active, :created_by
@@ -266,7 +266,7 @@ async def update_shift(
             params["shift_name"] = val
         elif src_field == "rotation_pattern":
             import json as _json
-            sets.append("rotation_pattern = :rotation_pattern::jsonb")
+            sets.append("rotation_pattern = CAST(:rotation_pattern AS jsonb)")
             params["rotation_pattern"] = _json.dumps(val) if val else None
         else:
             sets.append(f"{col_tuple[0]} = :{src_field}")
