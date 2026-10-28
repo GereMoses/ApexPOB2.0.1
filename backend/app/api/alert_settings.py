@@ -60,10 +60,11 @@ class Responder(BaseModel):
     role: str = ""
     email: str = ""
     phone: str = ""
+    telegram_chat_id: Optional[str] = None
 
 
 class TestIn(BaseModel):
-    channel: str = Field(..., pattern="^(email|whatsapp|sms)$")
+    channel: str = Field(..., pattern="^(email|whatsapp|sms|telegram)$")
     address: str = Field(..., min_length=3)
 
 
@@ -73,6 +74,7 @@ async def get_alert_settings(current_user=Depends(get_current_user), db: Session
     return {"success": True, "data": {
         "whatsapp": _public(get_whatsapp_settings(db)),
         "responders": get_responders(db),
+        "telegram": _telegram_public(db),
         "channels": await asyncio.to_thread(configured_channels),
     }}
 
@@ -98,7 +100,8 @@ async def test_send(body: TestIn, request: Request, current_user=Depends(get_cur
     _require_change(request, current_user)
     from ..services.notify_dispatch import dispatch
     person = {"name": "Test recipient", "email": body.address if body.channel == "email" else "",
-              "phone": body.address if body.channel != "email" else ""}
+              "phone": body.address if body.channel in ("whatsapp", "sms") else "",
+              "telegram": body.address if body.channel == "telegram" else ""}
     summary = await asyncio.to_thread(
         dispatch, "test", None, [person], "ApexPOB test alert",
         "ApexPOB test alert — if you received this, alerts on this channel are working.",
@@ -126,3 +129,110 @@ async def deliveries(source_type: Optional[str] = None, source_id: Optional[int]
         FROM notify_delivery WHERE {' AND '.join(where)} ORDER BY id DESC LIMIT :limit
     """), params).mappings().all()
     return {"success": True, "data": [dict(r, created_at=r["created_at"].isoformat(sep=" ", timespec="seconds")) for r in rows]}
+
+
+
+# ── Telegram ──────────────────────────────────────────────────────────────────
+
+def _telegram_public(db: Session) -> Dict[str, Any]:
+    from ..services.notify_telegram import get_settings
+    t = get_settings(db)
+    linked = db.execute(text("SELECT count(*) FROM personnel WHERE is_active AND telegram_chat_id IS NOT NULL")).scalar() or 0
+    return {"enabled": t["enabled"], "has_token": bool(t["bot_token"]), "bot_username": t["bot_username"],
+            "ready": bool(t["enabled"] and t["bot_token"]), "groups": t["groups"], "linked_people": linked}
+
+
+class TelegramIn(BaseModel):
+    enabled: Optional[bool] = None
+    bot_token: Optional[str] = None
+
+
+class TelegramGroupIn(BaseModel):
+    chat_id: str
+    title: str = ""
+    team: bool = False
+
+
+class TelegramLinkIn(BaseModel):
+    emp_code: Optional[str] = None
+    responder_index: Optional[int] = None
+
+
+@router.put("/telegram")
+async def put_telegram(body: TelegramIn, request: Request, current_user=Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    _require_change(request, current_user)
+    from ..services.notify_telegram import save_settings
+    try:
+        await asyncio.to_thread(save_settings, db, body.enabled, (body.bot_token or "").strip() or None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "data": _telegram_public(db)}
+
+
+@router.put("/telegram/groups")
+async def put_telegram_groups(body: List[TelegramGroupIn], request: Request, current_user=Depends(get_current_user),
+                              db: Session = Depends(get_db)):
+    _require_change(request, current_user)
+    from ..services.notify_telegram import save_groups
+    save_groups(db, [g.dict() for g in body])
+    return {"success": True, "data": _telegram_public(db)}
+
+
+@router.post("/telegram/check")
+async def telegram_check_now(request: Request, current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    """Read the bot's updates now (Start presses, groups) instead of waiting for the next poll."""
+    _require_change(request, current_user)
+    from ..services.notify_telegram import poll_once
+    res = await asyncio.to_thread(poll_once, db)
+    return {"success": True, "data": {**res, **_telegram_public(db)}}
+
+
+@router.post("/telegram/link")
+async def telegram_link(body: TelegramLinkIn, request: Request, current_user=Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    """A personal Start link for one person (or response-team member)."""
+    _require_change(request, current_user)
+    from ..services.notify_telegram import link_url, responder_key
+    try:
+        if body.responder_index is not None:
+            team = get_responders(db)
+            if not 0 <= body.responder_index < len(team):
+                raise HTTPException(status_code=404, detail="No such team member")
+            return {"success": True, "url": link_url(db, responder_key=responder_key(team[body.responder_index]))}
+        if not body.emp_code:
+            raise HTTPException(status_code=400, detail="emp_code or responder_index is required")
+        return {"success": True, "url": link_url(db, emp_code=body.emp_code)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class TelegramInviteIn(BaseModel):
+    scope: str = Field("onboard", pattern="^(onboard|all)$")
+
+
+@router.post("/telegram/email-links")
+async def telegram_email_links(body: TelegramInviteIn, request: Request, current_user=Depends(get_current_user),
+                               db: Session = Depends(get_db)):
+    """Email each person (on board, or all active staff) without Telegram their own Start link."""
+    _require_change(request, current_user)
+    from ..services.notify_telegram import link_url
+    from ..services.notify_email import send_email, smtp_configured
+    if not await asyncio.to_thread(smtp_configured):
+        raise HTTPException(status_code=400, detail="Email is not set up — Settings → Email")
+    where = "is_active AND telegram_chat_id IS NULL AND COALESCE(TRIM(email), '') <> ''"
+    if body.scope == "onboard":
+        where += " AND is_onboard"
+    people = db.execute(text(f"SELECT emp_code, email, COALESCE(NULLIF(full_name, ''), emp_code) AS name "
+                             f"FROM personnel WHERE {where}")).fetchall()
+    sent = 0
+    for p in people:
+        url = link_url(db, emp_code=p.emp_code)
+        res = await asyncio.to_thread(
+            send_email, p.email, "Get ApexPOB site alerts on Telegram",
+            f"<p>Hello {p.name},</p><p>Tap the link below on your phone and press <b>Start</b> to receive site alerts "
+            f"(musters, emergencies, all-clear) on Telegram:</p><p><a href='{url}'>{url}</a></p>"
+            f"<p style='color:#64748b'>This link is personal — please don't share it.</p>",
+            f"Tap {url} on your phone and press Start to receive ApexPOB site alerts on Telegram.")
+        sent += res.get("sent", 0)
+    return {"success": True, "data": {"emailed": sent, "people": len(people)}}

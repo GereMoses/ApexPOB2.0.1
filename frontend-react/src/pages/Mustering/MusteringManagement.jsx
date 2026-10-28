@@ -2017,6 +2017,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
           <Form.Item label="Alert by" extra="Everyone expected gets the instruction; the response team (Settings → WhatsApp & Alerts) gets the situation. An all-clear goes out the same way when you end the event." style={{ marginBottom: 0 }}>
             <Space size={16}>
               <Form.Item name="notify_whatsapp" valuePropName="checked" initialValue noStyle><Checkbox>WhatsApp</Checkbox></Form.Item>
+              <Form.Item name="notify_telegram" valuePropName="checked" initialValue noStyle><Checkbox>Telegram</Checkbox></Form.Item>
               <Form.Item name="notify_email" valuePropName="checked" initialValue noStyle><Checkbox>Email</Checkbox></Form.Item>
               <Form.Item name="notify_sms" valuePropName="checked" initialValue={false} noStyle><Checkbox>SMS</Checkbox></Form.Item>
             </Space>

@@ -116,10 +116,13 @@ def save_responders(db: Session, responders: List[Dict[str, Any]], updated_by: s
         name = str(r.get("name") or "").strip()
         email = str(r.get("email") or "").strip()
         phone = str(r.get("phone") or "").strip()
-        if not (email or phone):
+        if not (email or phone or r.get("telegram_chat_id") or name):
             continue
-        clean.append({"name": name or email or phone, "role": str(r.get("role") or "").strip(),
-                      "email": email, "phone": phone})
+        item = {"name": name or email or phone, "role": str(r.get("role") or "").strip(),
+                "email": email, "phone": phone}
+        if r.get("telegram_chat_id"):
+            item["telegram_chat_id"] = str(r["telegram_chat_id"])
+        clean.append(item)
     _upsert(db, _RESPONDERS, json.dumps(clean), False, updated_by, "Emergency response team (always alerted)")
     db.commit()
     return clean

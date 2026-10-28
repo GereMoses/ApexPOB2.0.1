@@ -70,6 +70,7 @@ class MusteringService:
         notify_sms: bool = False,
         notify_email: bool = False,
         notify_whatsapp: bool = False,
+        notify_telegram: bool = False,
         notify_siren: bool = False,
         notes: str = None
     ) -> Dict[str, Any]:
@@ -155,8 +156,8 @@ class MusteringService:
                 total_missing=total_expected,
                 total_injured=0,
                 notes=notes,
-                notify_channels=[c for c, on in (("whatsapp", notify_whatsapp), ("email", notify_email),
-                                                 ("sms", notify_sms)) if on],
+                notify_channels=[c for c, on in (("whatsapp", notify_whatsapp), ("telegram", notify_telegram),
+                                                 ("email", notify_email), ("sms", notify_sms)) if on],
             )
 
             self.db.add(event)
@@ -254,9 +255,9 @@ class MusteringService:
             # mail/gateway problem must never fail the muster). The event is already
             # committed, so notifications run against a persisted event.
             notify_result = None
-            if notify_sms or notify_email or notify_whatsapp:
+            if notify_sms or notify_email or notify_whatsapp or notify_telegram:
                 notify_result = self._send_notifications(
-                    event.id, sms=notify_sms, email=notify_email, whatsapp=notify_whatsapp
+                    event.id, sms=notify_sms, email=notify_email, whatsapp=notify_whatsapp, telegram=notify_telegram
                 )
 
             # Raise an IN-APP alert as well. Personnel get email/SMS, but anyone
@@ -986,7 +987,8 @@ class MusteringService:
         return self.start_mustering_event(
             zone_ids=self.operational_zone_ids(self.db), event_type=etype, initiated_by=initiated_by,
             muster_zone_ids=muster_zone_ids or None, notes=notes,
-            notify_whatsapp=live["whatsapp"], notify_email=live["email"], notify_sms=live["sms"])
+            notify_whatsapp=live["whatsapp"], notify_email=live["email"], notify_sms=live["sms"],
+            notify_telegram=live.get("telegram", False))
 
     def _visitors_on_site(self) -> List[Dict[str, Any]]:
         """Checked-in visitors as muster rows (emp_code VIS-<visit id>)."""
@@ -1358,14 +1360,15 @@ class MusteringService:
             "zones": ", ".join(names[z] for z in (event.zone_ids or []) if z in names) or "site",
         }
 
-    def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool) -> Dict[str, Any]:
+    def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool,
+                            telegram: bool = False) -> Dict[str, Any]:
         """Alert the expected people and the response team (background, logged).
 
         Personnel get the instruction; the response team gets the situation. Both
         go out on every requested channel that is configured — see notify_dispatch.
         """
         from .notify_dispatch import dispatch_background, people_from_personnel
-        channels = [c for c, on in (("whatsapp", whatsapp), ("email", email), ("sms", sms)) if on]
+        channels = [c for c, on in (("whatsapp", whatsapp), ("telegram", telegram), ("email", email), ("sms", sms)) if on]
         try:
             event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
             if not event or not channels:

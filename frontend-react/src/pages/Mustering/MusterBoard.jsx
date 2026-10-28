@@ -13,7 +13,7 @@ import { App, Button, Input, Modal, Select, Tooltip, Empty } from 'antd';
 import {
   FireOutlined, AlertOutlined, ExperimentOutlined, UserDeleteOutlined, SoundOutlined, PrinterOutlined,
   FullscreenOutlined, FullscreenExitOutlined, ArrowLeftOutlined, CheckOutlined, MedicineBoxOutlined,
-  SearchOutlined, StopOutlined, EnvironmentOutlined, TeamOutlined, WhatsAppOutlined, MailOutlined,
+  SearchOutlined, StopOutlined, EnvironmentOutlined, TeamOutlined, WhatsAppOutlined, MailOutlined, SendOutlined,
 } from '@ant-design/icons';
 import apiService from '../../services/api';
 
@@ -139,7 +139,7 @@ export default function MusterBoard() {
           {event && <span className="mb-clock">{fmtElapsed(event.start_time)}</span>}
         </div>
         <div className="mb-top-r">
-          <span className="mb-chan"><WhatsAppOutlined style={{ color: channels.whatsapp ? '#4ade80' : '#64748b' }} /> <MailOutlined style={{ color: channels.email ? '#4ade80' : '#64748b' }} /></span>
+          <span className="mb-chan"><WhatsAppOutlined style={{ color: channels.whatsapp ? '#4ade80' : '#64748b' }} /> <SendOutlined style={{ color: channels.telegram ? '#4ade80' : '#64748b' }} /> <MailOutlined style={{ color: channels.email ? '#4ade80' : '#64748b' }} /></span>
           <Button className="mb-ghost" icon={<PrinterOutlined />} onClick={() => openPdf(message)}>Muster list</Button>
           <Tooltip title={full ? 'Exit full screen (Esc)' : 'Full screen'}>
             <Button className="mb-ghost" icon={full ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => setFull(!full)} />
@@ -166,7 +166,7 @@ export default function MusterBoard() {
               </button>
             ))}
           </div>
-          {!channels.whatsapp && !channels.email && (
+          {!channels.whatsapp && !channels.telegram && !channels.email && (
             <div className="mb-warn">No alert channel is set up — nobody will be messaged. Settings → Email / WhatsApp &amp; Alerts.</div>
           )}
         </div>
@@ -227,7 +227,7 @@ export default function MusterBoard() {
         onOk={() => startM.mutate({ kind: start.kind, muster_zone_ids: points })}
         title={<span style={{ color: start?.color }}>{start?.icon} Start {start?.label?.toLowerCase()}</span>}>
         <p>Everyone on board{start?.kind === 'drill' ? '' : ' and every visitor'} goes on the muster list and is told to go to the assembly point
-          {channels.whatsapp || channels.email ? ` by ${[channels.whatsapp && 'WhatsApp', channels.email && 'email'].filter(Boolean).join(' and ')}` : ' (no alert channel is set up)'}.
+          {channels.whatsapp || channels.telegram || channels.email ? ` by ${[channels.whatsapp && 'WhatsApp', channels.telegram && 'Telegram', channels.email && 'email'].filter(Boolean).join(' and ')}` : ' (no alert channel is set up)'}.
           {['fire', 'gas'].includes(start?.kind) ? ' Fire exits unlock and sirens sound.' : ''}</p>
         <div style={{ fontWeight: 600, margin: '12px 0 6px' }}>Assembly points</div>
         <Select mode="multiple" allowClear style={{ width: '100%' }} value={points} onChange={setPoints}

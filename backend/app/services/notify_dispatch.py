@@ -24,14 +24,16 @@ from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-ALL_CHANNELS = ("whatsapp", "email", "sms")
+ALL_CHANNELS = ("whatsapp", "telegram", "email", "sms")
 
 
 def configured_channels() -> Dict[str, bool]:
     from .notify_email import smtp_configured
     from .notify_sms import sms_configured
     from .notify_whatsapp import whatsapp_configured
-    return {"email": smtp_configured(), "whatsapp": whatsapp_configured(), "sms": sms_configured()}
+    from .notify_telegram import telegram_configured
+    return {"email": smtp_configured(), "whatsapp": whatsapp_configured(), "sms": sms_configured(),
+            "telegram": telegram_configured()}
 
 
 def people_from_personnel(db, *, ids: Iterable[int] = (), emp_codes: Iterable[str] = ()) -> List[Dict[str, str]]:
@@ -42,11 +44,13 @@ def people_from_personnel(db, *, ids: Iterable[int] = (), emp_codes: Iterable[st
     rows = db.execute(text("""
         SELECT COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name)), emp_code) AS name,
                NULLIF(TRIM(email), '') AS email,
-               NULLIF(TRIM(phone), '') AS phone   -- never the emergency contact: next of kin must not get "evacuate now"
+               NULLIF(TRIM(phone), '') AS phone,  -- never the emergency contact: next of kin must not get "evacuate now"
+               telegram_chat_id
         FROM personnel
         WHERE is_active AND (id = ANY(:ids) OR emp_code = ANY(:codes))
     """), {"ids": ids, "codes": emp_codes}).fetchall()
-    return [{"name": r.name, "email": r.email or "", "phone": r.phone or "", "kind": "personnel"} for r in rows]
+    return [{"name": r.name, "email": r.email or "", "phone": r.phone or "", "kind": "personnel",
+             "telegram": str(r.telegram_chat_id) if r.telegram_chat_id else ""} for r in rows]
 
 
 def onboard_people(db, zone_ids: Optional[List[int]] = None) -> List[Dict[str, str]]:
@@ -61,8 +65,16 @@ def onboard_people(db, zone_ids: Optional[List[int]] = None) -> List[Dict[str, s
 
 
 def responders(db) -> List[Dict[str, str]]:
+    """The response team: each member, plus every Telegram group ticked as a team group."""
     from .whatsapp_config import get_responders
-    return [{**r, "kind": "responder"} for r in get_responders(db)]
+    team = [{**r, "kind": "responder", "telegram": str(r.get("telegram_chat_id") or "")} for r in get_responders(db)]
+    try:
+        from .notify_telegram import get_settings
+        team += [{"name": f"Telegram group: {g.get('title')}", "telegram": str(g["chat_id"]), "kind": "group"}
+                 for g in get_settings(db).get("groups", []) if g.get("team")]
+    except Exception:  # noqa: BLE001
+        pass
+    return team
 
 
 def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, str]], subject: str, message: str,
@@ -73,6 +85,7 @@ def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, 
     from .notify_email import send_email
     from .notify_sms import send_sms
     from .notify_whatsapp import send_whatsapp
+    from .notify_telegram import send_telegram
 
     db = SessionLocal()
     summary: Dict[str, Any] = {}
@@ -85,18 +98,20 @@ def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, 
 
         log_rows: List[Dict[str, Any]] = []
         for ch in wanted:
-            field = "email" if ch == "email" else "phone"
+            field = {"email": "email", "telegram": "telegram"}.get(ch, "phone")
             by_addr: Dict[str, str] = {}
             for p in everyone:
                 addr = (p.get(field) or "").strip()
                 if addr and addr not in by_addr:
                     by_addr[addr] = p.get("name") or addr
             if not by_addr:
-                summary[ch] = {"sent": 0, "failed": 0, "note": "nobody has a " + ("email address" if ch == "email" else "phone number")}
+                summary[ch] = {"sent": 0, "failed": 0, "note": "nobody has " + {"email": "an email address",
+                               "telegram": "linked Telegram"}.get(ch, "a phone number")}
                 continue
             if not cfg.get(ch):
                 reason = {"email": "Email (SMTP) is not set up — Settings → Email",
                           "whatsapp": "WhatsApp is not set up — Settings → WhatsApp & Alerts",
+                          "telegram": "Telegram is not set up — Settings → WhatsApp & Alerts",
                           "sms": "SMS gateway is not set up"}[ch]
                 summary[ch] = {"sent": 0, "failed": 0, "skipped": len(by_addr), "note": reason}
                 log_rows += [dict(channel=ch, name=n, addr=a, status="SKIPPED", error=reason) for a, n in by_addr.items()]
@@ -110,6 +125,8 @@ def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, 
                 res = send_email(addrs, subject, body, body_text=message)
             elif ch == "whatsapp":
                 res = send_whatsapp(addrs, message)
+            elif ch == "telegram":
+                res = send_telegram(addrs, f"{subject}\n\n{message}" if subject and subject not in message else message)
             else:
                 res = send_sms(addrs, message)
             failed = set(res.get("failed") or [])

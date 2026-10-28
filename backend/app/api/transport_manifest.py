@@ -946,7 +946,7 @@ async def _notify_passengers(db: Session, s: TransportSchedule, subject: str, bo
     entries = [e for e in (s.manifest_entries or []) if e.status not in ("NO_SHOW", "OFFLOADED")]
     pids = [e.personnel_id for e in entries if e.personnel_id]
     people = people_from_personnel(db, ids=pids) if pids else []
-    channels = ["whatsapp"] + (["email"] if email else []) + (["sms"] if sms else [])
+    channels = ["whatsapp", "telegram"] + (["email"] if email else []) + (["sms"] if sms else [])
     summary = await asyncio.to_thread(dispatch, "transport", s.id, people, subject, body, channels, False)
     return {ch: (summary.get(ch) or {"sent": 0}) for ch in channels}
 

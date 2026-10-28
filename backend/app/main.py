@@ -1011,6 +1011,12 @@ async def startup_event():
         _background_tasks.append(asyncio.create_task(_supervised("controller_poller", controller_poller_loop)))
         logger.info("✅ Access-controller poller started (leader, auto-restart on crash)")
 
+        # Telegram can't call into a LAN server, so the bot is POLLED for Start presses
+        # (people linking their Telegram) and for groups it has been added to.
+        from .services.notify_telegram import telegram_poll_loop
+        _background_tasks.append(asyncio.create_task(_supervised("telegram_poller", telegram_poll_loop)))
+        logger.info("✅ Telegram poller started (leader, auto-restart on crash)")
+
         from .services.zkteco.live_capture import live_capture_supervisor
         _background_tasks.append(asyncio.create_task(_supervised("live_capture_supervisor", live_capture_supervisor)))
         logger.info("✅ ZKTeco live capture supervisor started (leader, auto-restart on crash)")

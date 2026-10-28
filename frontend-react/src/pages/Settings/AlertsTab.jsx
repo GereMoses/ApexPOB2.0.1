@@ -7,11 +7,11 @@
  */
 import React, { useEffect, useState } from 'react';
 import {
-  Form, Input, Button, Switch, Segmented, Table, Tag, App, Tooltip, Select, Skeleton, Alert,
+  Form, Input, Button, Switch, Segmented, Table, Tag, App, Tooltip, Select, Skeleton, Alert, Checkbox, Modal, Popconfirm,
 } from 'antd';
 import {
   WhatsAppOutlined, MailOutlined, MessageOutlined, SaveOutlined, SendOutlined, PlusOutlined,
-  DeleteOutlined, TeamOutlined, CheckCircleFilled, CloseCircleFilled, ReloadOutlined, CopyOutlined,
+  DeleteOutlined, TeamOutlined, CheckCircleFilled, CloseCircleFilled, ReloadOutlined, CopyOutlined, LinkOutlined,
 } from '@ant-design/icons';
 import apiService from '../../services/api';
 
@@ -67,6 +67,19 @@ export default function AlertsTab() {
       loadLog();
     } catch (e) { message.error(e.message); } finally { setTesting(false); }
   };
+  const showLink = async (body, who) => {
+    try {
+      const r = await apiService.post('/api/v1/settings/alerts/telegram/link', body);
+      Modal.info({
+        title: `Telegram link for ${who}`, width: 520,
+        content: <div>
+          <p>Send this to {who}. They open it on their phone and press <b>Start</b> — alerts then come to their Telegram.</p>
+          <Input.TextArea value={r.url} autoSize readOnly />
+          <Button style={{ marginTop: 8 }} icon={<CopyOutlined />} onClick={() => { navigator.clipboard?.writeText(r.url); message.success('Copied'); }}>Copy link</Button>
+        </div>,
+      });
+    } catch (e) { message.error(e.message); }
+  };
   const editTeam = (key, field, value) => setTeam(t => t.map(r => (r.key === key ? { ...r, [field]: value } : r)));
 
   if (!data) return <Skeleton active paragraph={{ rows: 10 }} />;
@@ -82,7 +95,7 @@ export default function AlertsTab() {
           <div className="al-sub">Musters, emergencies, panic alarms, escalations and the all-clear go out on every channel set up here.</div>
         </div>
         <div className="al-chips">
-          {[['whatsapp', 'WhatsApp', <WhatsAppOutlined />], ['email', 'Email', <MailOutlined />], ['sms', 'SMS', <MessageOutlined />]].map(([k, l, i]) => (
+          {[['whatsapp', 'WhatsApp', <WhatsAppOutlined />], ['telegram', 'Telegram', <SendOutlined />], ['email', 'Email', <MailOutlined />], ['sms', 'SMS', <MessageOutlined />]].map(([k, l, i]) => (
             <span key={k} className={`al-chip ${ch[k] ? 'on' : ''}`}>
               {i} {l} {ch[k] ? <CheckCircleFilled /> : <CloseCircleFilled />}
               <small>{ch[k] ? 'Ready' : 'Not set up'}</small>
@@ -166,9 +179,18 @@ export default function AlertsTab() {
           <div className="al-sub2">Check a channel end to end before you rely on it.</div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <Select value={test.channel} style={{ width: 130 }} onChange={(v) => setTest({ ...test, channel: v })}
-              options={[{ value: 'whatsapp', label: 'WhatsApp' }, { value: 'email', label: 'Email' }, { value: 'sms', label: 'SMS' }]} />
+              options={[{ value: 'whatsapp', label: 'WhatsApp' }, { value: 'telegram', label: 'Telegram' }, { value: 'email', label: 'Email' }, { value: 'sms', label: 'SMS' }]} />
+            {test.channel === 'telegram' ? (
+              <Select style={{ flex: 1 }} placeholder="Choose a linked chat" value={test.address || undefined}
+                onChange={(v) => setTest({ ...test, address: v })}
+                options={[
+                  ...((data.telegram?.groups) || []).map(g => ({ value: String(g.chat_id), label: `Group: ${g.title}` })),
+                  ...team.filter(r => r.telegram_chat_id).map(r => ({ value: String(r.telegram_chat_id), label: `${r.name} (team)` })),
+                ]} notFoundContent="Nobody linked yet" />
+            ) : (
             <Input placeholder={test.channel === 'email' ? 'name@company.com' : '0803 123 4567'} value={test.address}
               onChange={(e) => setTest({ ...test, address: e.target.value })} onPressEnter={sendTest} />
+            )}
             <Button type="primary" loading={testing} disabled={!test.address.trim()} onClick={sendTest}>Send</Button>
           </div>
 
@@ -185,6 +207,11 @@ export default function AlertsTab() {
                 <Input placeholder="Role" value={r.role} onChange={e => editTeam(r.key, 'role', e.target.value)} />
                 <Input placeholder="Phone (WhatsApp)" value={r.phone} onChange={e => editTeam(r.key, 'phone', e.target.value)} />
                 <Input placeholder="Email" value={r.email} onChange={e => editTeam(r.key, 'email', e.target.value)} />
+                <Tooltip title={r.telegram_chat_id ? 'Telegram linked' : 'Get their personal Telegram link (save the team first)'}>
+                  <Button type="text" icon={<SendOutlined style={{ color: r.telegram_chat_id ? '#16a34a' : '#94a3b8' }} />}
+                    disabled={!data.telegram?.ready || typeof r.key !== 'number' || r.key >= team.length}
+                    onClick={() => showLink({ responder_index: team.indexOf(r) }, r.name)} />
+                </Tooltip>
                 <Button type="text" danger icon={<DeleteOutlined />} onClick={() => setTeam(t => t.filter(x => x.key !== r.key))} />
               </div>
             ))}
@@ -195,6 +222,8 @@ export default function AlertsTab() {
           </div>
         </section>
       </div>
+
+      <TelegramCard data={data.telegram || {}} reload={load} showLink={showLink} />
 
       <section className="al-card" style={{ marginTop: 16 }}>
         <div className="al-card-h">
@@ -239,8 +268,98 @@ const CSS = `
 .al-state { font-size: 13px; color: #94a3b8; display: inline-flex; gap: 6px; align-items: center; }
 .al-state.ok { color: #16a34a; font-weight: 600; }
 .al-team { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
-.al-team-row { display: grid; grid-template-columns: 1.1fr .9fr 1fr 1.2fr 32px; gap: 6px; }
+.al-team-row { display: grid; grid-template-columns: 1.1fr .9fr 1fr 1.2fr 32px 32px; gap: 6px; }
+.al-tg-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
+.al-tg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; }
 .al-empty { color: #94a3b8; font-size: 13px; padding: 14px; border: 1px dashed #e2e8f0; border-radius: 10px; text-align: center; }
 @media (max-width: 1100px) { .al-grid { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .al-two, .al-team-row { grid-template-columns: 1fr; } }
 `;
+
+
+function TelegramCard({ data, reload, showLink }) {
+  const { message } = App.useApp();
+  const [token, setToken] = useState('');
+  const [busy, setBusy] = useState(null);
+  const [person, setPerson] = useState(null);
+  const [opts, setOpts] = useState([]);
+  const run = async (key, fn, ok) => {
+    setBusy(key);
+    try { const r = await fn(); if (ok) message.success(typeof ok === 'function' ? ok(r) : ok, 6); await reload(); }
+    catch (e) { message.error(e.message, 8); } finally { setBusy(null); }
+  };
+  const search = async (q) => {
+    if (!q || q.length < 2) return;
+    try {
+      const r = await apiService.get('/api/v1/personnel/', { search: q, page_size: 20 });
+      setOpts((r?.results || []).map(p => ({ value: p.emp_code, label: `${p.full_name || p.first_name} · ${p.emp_code}` })));
+    } catch { /* ignore */ }
+  };
+  const groups = data.groups || [];
+  return (
+    <section className="al-card" style={{ marginTop: 16 }}>
+      <div className="al-card-h">
+        <span><SendOutlined style={{ color: '#229ED9' }} /> Telegram</span>
+        {data.has_token && (
+          <Switch checked={data.enabled} checkedChildren="On" unCheckedChildren="Off" loading={busy === 'toggle'}
+            onChange={(v) => run('toggle', () => apiService.put('/api/v1/settings/alerts/telegram', { enabled: v }), v ? 'Telegram alerts on' : 'Telegram alerts off')} />
+        )}
+      </div>
+      {!data.has_token ? (
+        <>
+          <div className="al-hint" style={{ background: '#eff6ff', borderColor: '#bfdbfe', color: '#1e3a8a' }}>
+            1. In Telegram, open <b>@BotFather</b> → <code>/newbot</code> → give it a name such as <i>Marconi Site Alerts</i>.<br />
+            2. Paste the token it gives you below.<br />
+            3. Staff press <b>Start</b> on the bot through their personal link; add the bot to your response-team group too.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Input.Password placeholder="123456789:AA… (bot token from @BotFather)" value={token} onChange={e => setToken(e.target.value)} />
+            <Button type="primary" disabled={!token.trim()} loading={busy === 'token'}
+              onClick={() => run('token', () => apiService.put('/api/v1/settings/alerts/telegram', { bot_token: token.trim(), enabled: true }), 'Bot connected')}>Connect bot</Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="al-tg-head">
+            <div><span className="al-tg-dot" style={{ background: data.enabled ? '#16a34a' : '#94a3b8' }} />
+              Bot <a href={`https://t.me/${data.bot_username}`} target="_blank" rel="noreferrer"><b>@{data.bot_username}</b></a>
+              {' · '}<b>{data.linked_people}</b> staff linked</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button size="small" icon={<ReloadOutlined />} loading={busy === 'check'}
+                onClick={() => run('check', () => apiService.post('/api/v1/settings/alerts/telegram/check'),
+                  r => `Checked — ${r.data.linked || 0} new link(s), ${r.data.groups_added || 0} new group(s)`)}>Check now</Button>
+              <Popconfirm title="Email every person on board who hasn't linked Telegram their personal link?"
+                onConfirm={() => run('email', () => apiService.post('/api/v1/settings/alerts/telegram/email-links', { scope: 'onboard' }),
+                  r => `Emailed ${r.data.emailed} of ${r.data.people} people`)}>
+                <Button size="small" icon={<MailOutlined />} loading={busy === 'email'}>Email links to staff on board</Button>
+              </Popconfirm>
+            </div>
+          </div>
+          <div className="al-sub2" style={{ marginTop: 10 }}>Personal link for one person:</div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+            <Select showSearch filterOption={false} style={{ flex: 1 }} placeholder="Type a name…" value={person}
+              onSearch={search} onChange={setPerson} options={opts} notFoundContent="Type 2+ letters" />
+            <Button icon={<LinkOutlined />} disabled={!person} onClick={() => showLink({ emp_code: person }, opts.find(o => o.value === person)?.label || person)}>Get link</Button>
+          </div>
+          <div className="al-sub2" style={{ marginTop: 14 }}>Groups the bot is in — tick the response-team group(s); they get every team alert:</div>
+          {groups.length === 0 ? (
+            <div className="al-empty" style={{ marginTop: 6 }}>No groups yet — add <b>@{data.bot_username}</b> to your team's Telegram group, then press Check now.</div>
+          ) : groups.map(g => (
+            <div key={g.chat_id} style={{ padding: '6px 0' }}>
+              <Checkbox checked={!!g.team}
+                onChange={(e) => run('group', () => apiService.put('/api/v1/settings/alerts/telegram/groups',
+                  groups.map(x => (x.chat_id === g.chat_id ? { ...x, team: e.target.checked } : x))), 'Saved')}>
+                {g.title} {g.team && <Tag color="green" style={{ marginLeft: 6 }}>team group</Tag>}
+              </Checkbox>
+            </div>
+          ))}
+          <div className="al-foot" style={{ marginTop: 10 }}>
+            <Input.Password size="small" placeholder="Replace bot token…" value={token} onChange={e => setToken(e.target.value)} style={{ maxWidth: 320 }} />
+            <Button size="small" disabled={!token.trim()} loading={busy === 'token'}
+              onClick={() => run('token', () => apiService.put('/api/v1/settings/alerts/telegram', { bot_token: token.trim() }), 'Bot token replaced')}>Replace</Button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}

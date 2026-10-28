@@ -53,6 +53,7 @@ class MusteringEventStart(BaseModel):
     notify_sms: bool = Field(default=False, description="Send SMS notifications")
     notify_email: bool = Field(default=False, description="Send email notifications")
     notify_whatsapp: bool = Field(default=False, description="Send WhatsApp notifications")
+    notify_telegram: bool = Field(default=False, description="Send Telegram notifications")
     notify_siren: bool = Field(default=False, description="Trigger sirens")
     notes: Optional[str] = Field(None, description="Event notes")
 
@@ -424,6 +425,7 @@ async def start_mustering_event(
             notify_sms=event_data.notify_sms,
             notify_email=event_data.notify_email,
             notify_whatsapp=event_data.notify_whatsapp,
+            notify_telegram=event_data.notify_telegram,
             notify_siren=event_data.notify_siren,
             notes=event_data.notes
         )

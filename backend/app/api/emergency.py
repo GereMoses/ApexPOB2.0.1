@@ -361,7 +361,7 @@ async def send_emergency_notification(
         channels = []
         for channel_name, enabled in request.channels.items():
             if enabled:
-                channel_map = {"sms": 0, "email": 1, "whatsapp": 2, "push": 3, "pa": 4, "siren": 5}
+                channel_map = {"sms": 0, "email": 1, "whatsapp": 2, "push": 3, "pa": 4, "siren": 5, "telegram": 6}
                 if channel_name.lower() in channel_map:
                     channels.append(channel_map[channel_name.lower()])
 
@@ -409,10 +409,12 @@ def _notification_channel_config() -> Dict[str, bool]:
     from app.services.notify_email import smtp_configured
     from app.services.notify_sms import sms_configured
     from app.services.notify_whatsapp import whatsapp_configured
+    from app.services.notify_telegram import telegram_configured
     return {
         "email": smtp_configured(),
         "sms": sms_configured(),
         "whatsapp": whatsapp_configured(),
+        "telegram": telegram_configured(),
     }
 
 

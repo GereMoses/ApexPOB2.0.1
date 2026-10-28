@@ -38,6 +38,9 @@ from ..services.mustering_service import MusteringService
 # Configure logging
 logger = logging.getLogger(__name__)
 
+TELEGRAM_CHANNEL = 6   # not in the legacy NotificationChannel enum
+
+
 class EmergencyService:
     """Comprehensive emergency management service"""
     
@@ -647,6 +650,7 @@ class EmergencyService:
                         # The muster's own alerts: instruction + assembly point to staff and
                         # visitors, situation to the response team, then the all-clear.
                         notify_whatsapp=live["whatsapp"], notify_email=live["email"], notify_sms=live["sms"],
+                        notify_telegram=live.get("telegram", False),
                     )
                     mustering_event_id = muster_result["event_id"]
                     # Update the already-committed emergency event with the muster link
@@ -679,7 +683,7 @@ class EmergencyService:
                 else:
                     results["notifications_sent"] = await self.send_emergency_notifications(
                         emergency_event.id,
-                        [NotificationChannel.WHATSAPP.value, NotificationChannel.EMAIL.value, NotificationChannel.SMS.value],
+                        [NotificationChannel.WHATSAPP.value, TELEGRAM_CHANNEL, NotificationChannel.EMAIL.value, NotificationChannel.SMS.value],
                         db
                     )
                 
@@ -798,7 +802,7 @@ class EmergencyService:
             raise ValueError(f"Emergency event {emergency_event_id} not found")
 
         names = {NotificationChannel.SMS.value: "sms", NotificationChannel.EMAIL.value: "email",
-                 NotificationChannel.WHATSAPP.value: "whatsapp"}
+                 NotificationChannel.WHATSAPP.value: "whatsapp", TELEGRAM_CHANNEL: "telegram"}
         wanted = [names[c] for c in channels if c in names]
         if not wanted:
             return 0

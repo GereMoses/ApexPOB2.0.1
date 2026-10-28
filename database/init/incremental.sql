@@ -621,3 +621,14 @@ CREATE TABLE IF NOT EXISTS staff_reset_job (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at   TIMESTAMPTZ
 );
+
+-- Telegram alerts: a person's chat (set when they press Start on the bot via their personal link)
+ALTER TABLE personnel ADD COLUMN IF NOT EXISTS telegram_chat_id BIGINT;
+CREATE TABLE IF NOT EXISTS telegram_link (
+    code          VARCHAR(32) PRIMARY KEY,
+    emp_code      VARCHAR(50),
+    responder_key VARCHAR(200),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    used_at       TIMESTAMPTZ,
+    chat_id       BIGINT
+);

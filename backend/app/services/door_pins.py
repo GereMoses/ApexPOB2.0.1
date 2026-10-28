@@ -62,5 +62,5 @@ def send_pin(db: Session, emp_code: str, pin: str) -> Dict:
         return {"error": "person not found"}
     msg = (f"Your ApexPOB door PIN is {pin}. Use it with your card at keypad doors. "
            f"Keep it private — do not share it. If someone learns it, ask security for a new one.")
-    return dispatch("door_pin", None, people, "Your door PIN", msg, ["whatsapp", "email"], include_responders=False,
+    return dispatch("door_pin", None, people, "Your door PIN", msg, ["whatsapp", "telegram", "email"], include_responders=False,
                     log_text="Door PIN sent (hidden)")

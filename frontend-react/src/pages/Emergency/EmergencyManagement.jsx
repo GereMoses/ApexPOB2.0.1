@@ -48,6 +48,7 @@ const CHANNEL_CFG = {
   sms:      { label: 'SMS',      color: '#1890ff', bg: '#e6f7ff', border: '#91d5ff' },
   email:    { label: 'Email',    color: '#52c41a', bg: '#f6ffed', border: '#b7eb8f' },
   whatsapp: { label: 'WhatsApp', color: '#25d366', bg: '#f0fff4', border: '#95de64' },
+  telegram: { label: 'Telegram', color: '#229ED9', bg: '#eef8fd', border: '#9fd5ef' },
   push:     { label: 'Push',     color: '#722ed1', bg: '#f9f0ff', border: '#d3adf7' },
   pa:       { label: 'PA System',color: '#fa8c16', bg: '#fff7e6', border: '#ffd591' },
 };
@@ -801,7 +802,7 @@ const Notifications = () => {
   const qc = useQueryClient();
   const [form] = Form.useForm();
   const [sendOpen, setSendOpen] = useState(false);
-  const [activeChannels, setActiveChannels] = useState({ whatsapp: true, email: true });
+  const [activeChannels, setActiveChannels] = useState({ whatsapp: true, telegram: true, email: true });
 
   const { data: notifData, isLoading, refetch } = useQuery({
     queryKey: ['emergency-notifications'],
@@ -814,7 +815,7 @@ const Notifications = () => {
     onSuccess: (r) => {
       message.success(r?.data?.message || 'Alert sent', 8);
       qc.invalidateQueries(['emergency-notifications']);
-      setSendOpen(false); form.resetFields(); setActiveChannels({ whatsapp: true, email: true });
+      setSendOpen(false); form.resetFields(); setActiveChannels({ whatsapp: true, telegram: true, email: true });
     },
     onError: (e) => message.error(e?.message || 'Send failed'),
   });
@@ -936,7 +937,7 @@ const Notifications = () => {
           </Form.Item>
           <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 12, color: '#141414' }}>Channels</div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 8 }}>
-            {Object.entries(CHANNEL_CFG).filter(([key]) => ['whatsapp', 'email', 'sms'].includes(key)).map(([key, ch]) => (
+            {Object.entries(CHANNEL_CFG).filter(([key]) => ['whatsapp', 'telegram', 'email', 'sms'].includes(key)).map(([key, ch]) => (
               <div
                 key={key}
                 onClick={() => setActiveChannels(p => ({ ...p, [key]: !p[key] }))}
