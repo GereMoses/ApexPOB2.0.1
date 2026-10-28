@@ -562,3 +562,62 @@ CREATE TABLE IF NOT EXISTS ta_terminal_user (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (sn, pin)
 );
+
+-- Staff reset "keep history": deleting a person keeps their mirror row (inactive) when pob.keep_mirror=on
+CREATE OR REPLACE FUNCTION public.sync_personnel_to_employee()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+DECLARE
+  v_status smallint;
+BEGIN
+  IF (TG_OP = 'DELETE') THEN
+    -- "Remove staff, keep history": the mirror row carries attendance history; keep
+    -- it (inactive) so the same employee code re-attaches to it when re-pulled.
+    IF current_setting('pob.keep_mirror', true) = 'on' THEN
+      UPDATE personnel_employee SET status = 1, updated_at = NOW() WHERE emp_code = OLD.emp_code;
+    ELSE
+      DELETE FROM personnel_employee WHERE emp_code = OLD.emp_code;
+    END IF;
+    RETURN OLD;
+  END IF;
+
+  v_status := CASE WHEN COALESCE(NEW.is_active, TRUE) = FALSE THEN 1
+                   WHEN NEW.status::text IN ('active','ACTIVE','onshore','offshore','transit','on_leave') THEN 0
+                   ELSE 1 END;
+
+  IF EXISTS (SELECT 1 FROM personnel_employee WHERE id = NEW.id AND emp_code <> NEW.emp_code) THEN
+    INSERT INTO personnel_employee (emp_code, first_name, last_name, status, dept_id, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.emp_code, NEW.first_name, NEW.last_name, v_status, NEW.department_id,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, status = EXCLUDED.status,
+      dept_id = EXCLUDED.dept_id, card_no = EXCLUDED.card_no, updated_at = NOW();
+  ELSE
+    INSERT INTO personnel_employee (id, emp_code, first_name, last_name, status, dept_id, hire_date, card_no, created_at, updated_at)
+    VALUES (NEW.id, NEW.emp_code, NEW.first_name, NEW.last_name, v_status, NEW.department_id,
+            NULL, CASE WHEN NEW.card_number IS NOT NULL THEN NEW.card_number::text ELSE NULL END, NOW(), NOW())
+    ON CONFLICT (emp_code) DO UPDATE SET
+      first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, status = EXCLUDED.status,
+      dept_id = EXCLUDED.dept_id, card_no = EXCLUDED.card_no, updated_at = NOW();
+    PERFORM setval('public.personnel_employee_id_seq',
+                   GREATEST((SELECT last_value FROM public.personnel_employee_id_seq), NEW.id));
+  END IF;
+  RETURN NEW;
+END;
+$function$;
+
+-- Global-admin staff reset runs (remove all staff → pull back from SeamlessHR)
+CREATE TABLE IF NOT EXISTS staff_reset_job (
+    id            SERIAL PRIMARY KEY,
+    started_by    VARCHAR(150),
+    mode          VARCHAR(20) NOT NULL,          -- keep_history | everything
+    repopulate    BOOLEAN NOT NULL DEFAULT TRUE,
+    state         VARCHAR(10) NOT NULL DEFAULT 'queued',   -- queued | running | done | failed
+    steps         JSONB NOT NULL DEFAULT '[]'::jsonb,
+    result        JSONB,
+    error         TEXT,
+    backup_schema VARCHAR(80),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    finished_at   TIMESTAMPTZ
+);

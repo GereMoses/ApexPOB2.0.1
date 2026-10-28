@@ -187,7 +187,8 @@ def _att_report(args, db):
                 WHEN 2 THEN 'Absent'  WHEN 4 THEN 'Day-off'
                 ELSE 'Other' END AS status
         FROM att_report r
-        LEFT JOIN personnel p  ON r.emp_id = p.id
+        LEFT JOIN personnel_employee pe ON pe.id = r.emp_id
+        LEFT JOIN personnel p  ON p.emp_code = pe.emp_code
         LEFT JOIN departments d ON d.id = r.department_id
         WHERE r.att_date BETWEEN :start AND :end
         ORDER BY r.att_date DESC, p.first_name
@@ -388,7 +389,8 @@ def _att_exceptions(args, db):
                ae.att_date, ae.exception_type, ae.deviation_minutes,
                ae.exception_note, ae.handle_action
         FROM att_exception ae
-        LEFT JOIN personnel p ON ae.emp_id = p.id
+        LEFT JOIN personnel_employee pe ON pe.id = ae.emp_id
+        LEFT JOIN personnel p ON p.emp_code = pe.emp_code
         ORDER BY ae.att_date DESC LIMIT 20
     """)).fetchall()
     return {"count": len(rows), "exceptions": [_safe(r) for r in rows]}

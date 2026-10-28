@@ -90,7 +90,7 @@ docker exec -i pob_postgres pg_restore -U pob_user -d pob_system --clean --if-ex
 ## 10. SeamlessHR → Marconi switch-over
 Everything was proven on SeamlessHR's sandbox (Integration Company); Marconi uses the same API. On the day:
 1. **Back up**: `docker exec pob_postgres pg_dump -U pob_user pob_system > pre_marconi.sql`.
-2. **Remove the sandbox staff** (≈344 `hr_source='SEAMLESSHR'` records) and the HR sync history — a pull adds/updates but never deletes, so they would otherwise sit beside Marconi's staff in POB and mustering.
+2. **Remove the sandbox staff** — the global administrator: Settings → HR Integration → **Danger zone → Remove all staff…** → *Remove everything — clean start*, **untick** "pull back" (the new credentials aren't in yet) → type `DELETE ALL STAFF`. A pull adds/updates but never deletes, so sandbox staff would otherwise sit beside Marconi's in POB and mustering.
 3. **Settings → HR Integration**: API Base URL = SeamlessHR's **production** URL (ask SeamlessHR — the form defaults to the sandbox), Client ID, Client Secret → **Test Connection** → **Pull employees** (≈2–3 min; the sandbox throttles, the pull retries and pages slowly by design).
 4. **Attendance IDs** (= the reader PIN on every door panel and T&A terminal, = what SeamlessHR matches punches on). Settings → HR Integration → *Attendance ID comes from*:
    - **SeamlessHR's Attendance ID** — read from SeamlessHR (needs Time & Attendance read on Marconi's client — the sandbox key is refused);
@@ -144,3 +144,10 @@ Readers (IN and OUT per door) are wired to C3 controllers; ApexPOB talks to each
 - People are counted safe by tapping any reader at a muster point; someone who taps out at the site gate during a muster is **Left site** (accounted for).
 - Missing people escalate to the response team at 10 / 20 / 30 / 60 minutes (one message per level, not per person).
 - **Print muster list** on the board = paper fallback for power or network loss.
+
+## 16. Removing all staff (global administrator)
+Settings → HR Integration → **Danger zone → Remove all staff…** (only visible to, and only accepted from, the global administrator).
+- **Remove staff, keep history** (recommended for a refresh): staff and their live data go; attendance history stays and re-attaches when the same employee codes are pulled back; **cards, Attendance IDs, door PINs, badges, photos and who is on board are put back** on the re-pulled records; readers are not touched.
+- **Remove everything — clean start** (switching SeamlessHR tenant): also deletes all attendance history, punches, leave and overtime, and takes everyone off the door panels and T&A terminals (biometrics stored on the terminals go too).
+- **Pull back straight away** (default): runs *Pull staff & update readers* when the removal finishes; progress is shown step by step.
+- Safeguards: type `DELETE ALL STAFF`; refused while a **muster is running**; refused unless **SeamlessHR is answering** (so you're never left with no staff); every affected table is copied to a backup schema `staff_backup_<date>_<run>` first (restore with `INSERT INTO personnel SELECT * FROM staff_backup_…personnel` etc.); the run is audit-logged.

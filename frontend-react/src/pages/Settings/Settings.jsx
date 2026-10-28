@@ -24,6 +24,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 import EmailSetup from '../Emergency/EmailSetup';
 import AlertsTab from './AlertsTab';
+import StaffReset from './StaffReset';
 import DatabaseTab from './DatabaseTab';
 import AttendanceIdsDrawer from './AttendanceIdsDrawer';
 import dayjs from 'dayjs';
@@ -3012,6 +3013,7 @@ const HRIntegrationTab = () => {
                 instead of pulling manually.
               </Text>
             </Card>
+            <StaffReset />
 
             <Card title={<Space><ApiOutlined />Real-time Sync (Webhook)</Space>} size="small">
               <Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>

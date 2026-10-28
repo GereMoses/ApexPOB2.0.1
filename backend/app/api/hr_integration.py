@@ -11,12 +11,13 @@ Endpoints:
   GET    /preview/{date}    — preview attendance records that would be sent
 """
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -486,3 +487,78 @@ async def preview_sync(
         "records":      records[:100],   # cap preview at 100
         "truncated":    len(records) > 100,
     }
+
+
+# ── Global admin: remove all staff and pull them back from SeamlessHR ─────────
+
+def _require_global_admin(current_user=Depends(get_current_user)):
+    if not getattr(current_user, "is_global_admin", False):
+        raise HTTPException(status_code=403, detail="Only the global administrator can remove all staff")
+    return current_user
+
+
+class StaffResetIn(BaseModel):
+    mode: str = Field("keep_history", pattern="^(keep_history|everything)$")
+    repopulate: bool = True
+    confirm: str
+
+
+@router.get("/staff-reset/preview")
+async def staff_reset_preview(mode: str = "keep_history", repopulate: bool = True,
+                              db: Session = Depends(get_db), current_user=Depends(_require_global_admin)):
+    """What a reset would remove, and whether it can run right now (nothing is changed)."""
+    from ..services.staff_reset import preflight, CONFIRM_PHRASE
+    pre = await asyncio.to_thread(preflight, db, mode, repopulate)
+
+    def n(sql):
+        try:
+            return db.execute(text(sql)).scalar() or 0
+        except Exception:
+            db.rollback()
+            return 0
+    return {"success": True, "confirm_phrase": CONFIRM_PHRASE, "preflight": pre, "counts": {
+        "staff": n("SELECT count(*) FROM personnel"),
+        "with_card": n("SELECT count(card_number) FROM personnel"),
+        "with_attendance_id": n("SELECT count(*) FROM personnel WHERE COALESCE(attendance_id, '') <> ''"),
+        "on_board": n("SELECT count(*) FROM personnel WHERE is_onboard"),
+        "daily_attendance_rows": n("SELECT count(*) FROM att_report"),
+        "punches": n("SELECT count(*) FROM iclock_transaction"),
+    }, "last_jobs": [dict(r) for r in db.execute(text(
+        "SELECT id, mode, state, started_by, created_at, finished_at, error FROM staff_reset_job ORDER BY id DESC LIMIT 5")).mappings().all()]}
+
+
+@router.post("/staff-reset")
+async def staff_reset(body: StaffResetIn, background: BackgroundTasks, db: Session = Depends(get_db),
+                      current_user=Depends(_require_global_admin)):
+    from ..services.staff_reset import preflight, run_reset, CONFIRM_PHRASE
+    if (body.confirm or "").strip().upper() != CONFIRM_PHRASE:
+        raise HTTPException(status_code=400, detail=f'Type "{CONFIRM_PHRASE}" to confirm')
+    if db.execute(text("SELECT 1 FROM staff_reset_job WHERE state IN ('queued', 'running') LIMIT 1")).scalar():
+        raise HTTPException(status_code=409, detail="A staff reset is already running")
+    pre = await asyncio.to_thread(preflight, db, body.mode, body.repopulate)
+    if not pre["ok"]:
+        raise HTTPException(status_code=409, detail=" ".join(pre["problems"]))
+    who = getattr(current_user, "email", None) or getattr(current_user, "username", "global admin")
+    job_id = db.execute(text("""INSERT INTO staff_reset_job (started_by, mode, repopulate) VALUES (:w, :m, :r) RETURNING id"""),
+                        {"w": who, "m": body.mode, "r": body.repopulate}).scalar()
+    try:
+        db.execute(text("""INSERT INTO base_operationlog (user_id, action, table_name, record_id, new_values, created_at)
+                           VALUES (:u, 'STAFF_RESET', 'personnel', :j, :v, NOW())"""),
+                   {"u": current_user.id, "j": job_id, "v": f'{{"mode": "{body.mode}", "repopulate": {str(body.repopulate).lower()}, "staff": {pre["staff"]}}}'})
+    except Exception as e:  # noqa: BLE001 — audit must not block, but log it
+        logger.warning("Staff reset audit write failed: %s", e)
+        db.rollback()
+        job_id = db.execute(text("""INSERT INTO staff_reset_job (started_by, mode, repopulate) VALUES (:w, :m, :r) RETURNING id"""),
+                            {"w": who, "m": body.mode, "r": body.repopulate}).scalar()
+    db.commit()
+    background.add_task(run_reset, job_id, body.mode, body.repopulate)
+    return {"success": True, "job_id": job_id,
+            "message": "Removing staff" + (" and pulling them back from SeamlessHR — this takes a few minutes." if body.repopulate else ".")}
+
+
+@router.get("/staff-reset/{job_id}")
+async def staff_reset_status(job_id: int, db: Session = Depends(get_db), current_user=Depends(_require_global_admin)):
+    row = db.execute(text("SELECT * FROM staff_reset_job WHERE id = :i"), {"i": job_id}).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No such reset")
+    return {"success": True, "data": dict(row)}
