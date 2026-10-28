@@ -1,3 +1,4 @@
+import asyncio
 """
 MTD (Medical, Training, Development) Celery Tasks
 POB Version 2.0 - HSE Compliance Module
@@ -254,7 +255,7 @@ def generate_compliance_report():
         total_personnel = db.query(Personnel).filter(Personnel.is_active == True).count()
         
         # Get compliance data using service
-        compliance_report = await mtd_service.get_compliance_report(db=db)
+        compliance_report = asyncio.run(mtd_service.get_compliance_report(db=db))
         
         logger.info(f"Daily compliance report generated: {compliance_report}")
         
@@ -272,7 +273,7 @@ def send_expiry_notifications():
     db = next(get_db())
     try:
         # Get all expiring items
-        expiring_data = await mtd_service.get_expiring_items(days=30, db=db)
+        expiring_data = asyncio.run(mtd_service.get_expiring_items(days=30, db=db))
         
         total_expiring = (
             len(expiring_data.get('medical', [])) +
@@ -298,7 +299,7 @@ def auto_suspend_non_compliant():
     db = next(get_db())
     try:
         # Get non-compliant personnel from compliance service
-        compliance_report = await mtd_service.get_compliance_report(db=db)
+        compliance_report = asyncio.run(mtd_service.get_compliance_report(db=db))
         
         non_compliant_personnel = compliance_report.get('non_compliant_list', [])
         
