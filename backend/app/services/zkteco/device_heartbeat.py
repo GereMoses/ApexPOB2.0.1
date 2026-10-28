@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import text
+from sqlalchemy import text, or_
 from ...core.database import SessionLocal
 from ...models.device import Device, DeviceStatus
 from ...models.biotime_models import IClockTerminal, MusteringEvent
@@ -85,7 +85,12 @@ def _db_get_adms_terminals() -> list:
     try:
         rows = (
             db.query(IClockTerminal)
-            .filter(IClockTerminal.state.notin_([STATE_REJECTED]))
+            .filter(IClockTerminal.state.notin_([STATE_REJECTED]),
+                    # C3/inBio reader ports are mirrored as terminals (connection_mode
+                    # 'controller'); they never heartbeat — their panel's health is
+                    # watched by the controller poller — so never age them offline.
+                    or_(IClockTerminal.connection_mode.is_(None),
+                        IClockTerminal.connection_mode != "controller"))
             .all()
         )
         return [
@@ -243,7 +248,7 @@ def _sync_terminal_to_devices(db, term: IClockTerminal, online: bool, now: datet
     Ensure an iclock_terminal row has a matching entry in the `devices` table.
     Creates one if missing; updates status and hardware stats on every call.
     """
-    if not term.ip_address:
+    if not term.ip_address or (term.connection_mode or "").lower() == "controller":
         return
 
     new_status = DeviceStatus.ONLINE if online else DeviceStatus.OFFLINE

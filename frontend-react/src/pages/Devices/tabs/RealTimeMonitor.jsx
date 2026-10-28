@@ -22,7 +22,8 @@ const PUNCH_COLORS = { 0: '#52c41a', 1: '#1890ff', 2: '#fa8c16', 3: '#13c2c2', 4
 
 const getDeviceTypeName = t => ({ 0: 'Attendance', 1: 'Access Control', 2: 'Mustering', 3: 'Emergency' }[t] ?? 'Unknown');
 const getDeviceTypeColor = t => ({ 0: '#1890ff', 1: '#52c41a', 2: '#faad14', 3: '#ff4d4f' }[t] ?? '#d9d9d9');
-const fmtTime = dt => dt ? dayjs(dt).format('HH:mm:ss') : '—';
+// Today's taps show the time; older ones the date too (a 15 Oct tap must not look like today's).
+const fmtTime = dt => !dt ? '—' : (dayjs(dt).isSame(dayjs(), 'day') ? dayjs(dt).format('HH:mm:ss') : dayjs(dt).format('DD MMM HH:mm:ss'));
 const fmtDt   = dt => dt ? dayjs(dt).format('DD MMM HH:mm') : 'Never';
 
 // ─── Live Transaction Feed ────────────────────────────────────────────────────
@@ -47,7 +48,7 @@ const LiveFeed = ({ terminals }) => {
     {
       title: 'Time',
       dataIndex: 'punch_time',
-      width: 90,
+      width: 150,
       render: v => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{fmtTime(v)}</span>,
     },
     {

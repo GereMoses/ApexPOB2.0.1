@@ -22,6 +22,9 @@ from ..models.personnel import Personnel, PersonnelStatus
 from ..models.resignation import Resignation, ResignationType
 from ..services.device_planes import is_controller as _is_controller
 
+import logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # finger_id 0-9 = fingerprint slots; -1 = face (ADMS); 10-15 = face on direct-connect devices
@@ -109,7 +112,10 @@ async def get_enrollment_status(
     for e in db.query(Personnel).all():
         # Resolve separation reason for inactive employees
         separation_reason = None
-        if str(getattr(e, "status", "")).upper() == "INACTIVE":
+        # A leaver pulled from SeamlessHR is is_active=False while its HR status text
+        # may still read "ACTIVE" — is_active is the truth.
+        inactive = (e.is_active is False) or str(getattr(e, "status", "")).upper() == "INACTIVE"
+        if inactive:
             res = resignation_map.get(e.id)
             if res:
                 type_labels = {
@@ -124,7 +130,7 @@ async def get_enrollment_status(
                 separation_reason = "Inactive"
         p_info[e.emp_code] = {
             "emp_name": f"{e.first_name or ''} {e.last_name or ''}".strip(),
-            "status": str(getattr(e, "status", "active")).replace("PersonnelStatus.", "").lower(),
+            "status": "inactive" if inactive else str(getattr(e, "status", "active")).replace("PersonnelStatus.", "").lower(),
             "department": e.department or "",
             "position": e.position or "",
             "personnel_type": e.personnel_type or "STAFF",
@@ -783,12 +789,21 @@ async def assign_card(
 
     emp.card_number = payload.card_number
     db.commit()
+    # Same as Access Control → Cards & PINs: the card goes to the readers now, not tonight.
+    readers = None
+    try:
+        from ..services.hr_reader_pipeline import update_readers
+        readers = update_readers(db)
+    except Exception as e:  # noqa: BLE001 — the card is saved; tonight's sync retries
+        logger.warning("Card assigned but reader update failed: %s", e)
+        db.rollback()
     return {
         "success": True,
         "data": {
             "emp_code": emp.emp_code,
             "card_number": emp.card_number,
-            "message": f"Card {'assigned' if payload.card_number else 'unassigned'} successfully",
+            "readers_updated": readers is not None,
+            "message": f"Card {'assigned' if payload.card_number else 'unassigned'} — sent to the readers",
         }
     }
 

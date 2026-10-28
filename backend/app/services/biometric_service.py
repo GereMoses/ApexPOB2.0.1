@@ -297,7 +297,7 @@ class BiometricService:
             Biometric analytics data
         """
         try:
-            total_personnel = self.db.query(Personnel).count()
+            total_personnel = self.db.query(Personnel).filter(Personnel.is_active == True).count()  # noqa: E712
             enrolled_personnel = self.db.query(Personnel).filter(Personnel.biometric_enrolled == True).count()
             not_enrolled_personnel = total_personnel - enrolled_personnel
             

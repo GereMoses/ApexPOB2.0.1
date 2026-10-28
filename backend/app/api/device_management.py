@@ -284,7 +284,8 @@ async def get_terminals(
         status_filter = status.lower() if status else None
 
         # ── Phase 1: iclock_terminal rows (ADMS / dual-mode) ─────────────────
-        query = db.query(IClockTerminal)
+        query = db.query(IClockTerminal).filter(
+            or_(IClockTerminal.connection_mode.is_(None), IClockTerminal.connection_mode != "controller"))
         if search:
             query = query.filter(or_(
                 IClockTerminal.sn.ilike(f"%{search}%"),

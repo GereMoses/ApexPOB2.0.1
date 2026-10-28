@@ -2248,27 +2248,22 @@ async def cmd_push_users(body: PushUsersRequest, db: Session = Depends(get_db)):
     use_adms = pushver.startswith("2") or (terminal.connection_mode or "").lower() == "adms"
 
     if use_adms:
-        # ADMS DATA UPDATE USERINFO (v2.x / adms-mode)
-        q = db.query(PersonnelEmployee)
-        if body.emp_codes:
-            q = q.filter(PersonnelEmployee.emp_code.in_(body.emp_codes))
-        employees = q.all()
-        queued = 0
-        for emp in employees:
-            name  = f"{emp.first_name or ''} {emp.last_name or ''}".strip()
-            card  = getattr(emp, 'card_no', '') or ''
-            # ZKTeco PUSH USERINFO format: a SPACE after USERINFO, then tab-separated
-            # fields with EXACT names PIN/Name/Pri/Passwd/Card/Grp/TZ. Wrong names
-            # (Pin/Privilege/Password/Group/TimeZone) make the device reject it with
-            # Return=-1&CMD=DATA.
-            cmd   = (
-                f"DATA UPDATE USERINFO PIN={emp.emp_code}\t"
-                f"Name={name or emp.emp_code}\tPri=0\tPasswd=\t"
-                f"Card={card}\tGrp=1\tTZ=0"
-            )
-            queue_command(body.sn, cmd, db)
-            queued += 1
-        return {"detail": f"Queued {queued} USERINFO commands to {body.sn}"}
+        # ADMS DATA UPDATE USERINFO — the same rules as the nightly T&A sync:
+        # active staff with an Attendance ID only (never leavers), and never a blank
+        # Passwd= / Card= that would wipe what was set at the terminal.
+        from ..services.panel_sync import active_panel_users
+        from ..services.ta_sync import _userinfo
+        users, skipped = active_panel_users(db, body.emp_codes or None)
+        for u in users:
+            queue_command(body.sn, _userinfo(u), db)
+            db.execute(text("""
+                INSERT INTO ta_terminal_user (sn, pin, emp_code, card_no, state, updated_at)
+                VALUES (:s, :p, :e, :c, 'queued', NOW())
+                ON CONFLICT (sn, pin) DO UPDATE SET emp_code = EXCLUDED.emp_code, card_no = EXCLUDED.card_no,
+                    state = 'queued', updated_at = NOW()"""), {"s": body.sn, "p": u["pin"], "e": u["emp_code"], "c": u["card_no"]})
+        db.commit()
+        note = f" · {skipped} staff without an Attendance ID skipped" if skipped else ""
+        return {"detail": f"Queued {len(users)} USERINFO commands to {body.sn}{note}"}
 
     # PushVer 1.x — use ZKLib direct TCP
     ip = terminal.ip_address
@@ -2842,7 +2837,7 @@ async def get_time_drift(db: Session = Depends(get_db)):
                d.ip_address, d.port, d.connection_mode
         FROM iclock_terminal t
         LEFT JOIN devices d ON d.serial_number = t.sn
-        WHERE t.state = :approved
+        WHERE t.state = :approved AND COALESCE(t.connection_mode, '') <> 'controller'
     """), {"approved": STATE_APPROVED}).fetchall()
 
     server_now = datetime.now()

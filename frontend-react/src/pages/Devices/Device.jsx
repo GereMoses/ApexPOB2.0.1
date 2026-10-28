@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Tabs, Card, Button, Space, Badge, message } from 'antd';
 import {
   AppstoreOutlined, DatabaseOutlined, ThunderboltOutlined,
-  MonitorOutlined, CloudUploadOutlined, SettingOutlined,
+  MonitorOutlined, SettingOutlined,
   WifiOutlined, ReloadOutlined, SafetyOutlined, ToolOutlined,
   CalendarOutlined, BarChartOutlined, SyncOutlined,
 } from '@ant-design/icons';
@@ -12,7 +12,6 @@ import DeviceList         from './tabs/DeviceList';
 import AreaManagement     from './tabs/AreaManagement';
 import DeviceCommands     from './tabs/DeviceCommands';
 import RealTimeMonitor    from './tabs/RealTimeMonitor';
-import FirmwareManagement from './tabs/FirmwareManagement';
 import AutoRegisterSettings from './tabs/AutoRegisterSettings';
 import BiometricEnrollment  from './tabs/BiometricEnrollment';
 import DeviceSchedules      from './tabs/DeviceSchedules';
@@ -103,11 +102,6 @@ const Device = () => {
         </span>
       ),
       children: <MaintenanceTracking terminals={terminals} />,
-    },
-    {
-      key: '9',
-      label: <span><CloudUploadOutlined />Firmware</span>,
-      children: <FirmwareManagement />,
     },
     {
       key: '10',

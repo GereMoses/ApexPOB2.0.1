@@ -140,21 +140,21 @@ async def get_biometric_template_usage(
     try:
         cutoff = datetime.utcnow() - timedelta(days=days)
 
-        total_personnel = db.query(func.count(Personnel.id)).scalar() or 0
-        enrolled = db.query(func.count(Personnel.id)).filter(
+        total_personnel = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).scalar() or 0
+        enrolled = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True
         ).scalar() or 0
-        recently_enrolled = db.query(func.count(Personnel.id)).filter(
+        recently_enrolled = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.updated_at >= cutoff,
         ).scalar() or 0
 
         # Count fingerprint vs face templates from JSON columns
-        fp_count = db.query(func.count(Personnel.id)).filter(
+        fp_count = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.fingerprint_templates.isnot(None),
         ).scalar() or 0
-        face_count = db.query(func.count(Personnel.id)).filter(
+        face_count = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.face_template.isnot(None),
         ).scalar() or 0
@@ -244,19 +244,19 @@ async def get_biometric_quality_compliance(
 ) -> Dict[str, Any]:
     """Biometric enrollment quality report based on template presence."""
     try:
-        total = db.query(func.count(Personnel.id)).scalar() or 0
-        enrolled = db.query(func.count(Personnel.id)).filter(Personnel.biometric_enrolled == True).scalar() or 0
-        both = db.query(func.count(Personnel.id)).filter(
+        total = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).scalar() or 0
+        enrolled = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(Personnel.biometric_enrolled == True).scalar() or 0
+        both = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.fingerprint_templates.isnot(None),
             Personnel.face_template.isnot(None),
         ).scalar() or 0
-        fp_only = db.query(func.count(Personnel.id)).filter(
+        fp_only = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.fingerprint_templates.isnot(None),
             Personnel.face_template.is_(None),
         ).scalar() or 0
-        face_only = db.query(func.count(Personnel.id)).filter(
+        face_only = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True,
             Personnel.fingerprint_templates.is_(None),
             Personnel.face_template.isnot(None),
@@ -350,8 +350,8 @@ async def get_biotime_analytics_dashboard(
     try:
         sync_status = await biotime_sync_service.get_sync_status()
 
-        total_personnel = db.query(func.count(Personnel.id)).scalar() or 0
-        biometric_enrolled = db.query(func.count(Personnel.id)).filter(
+        total_personnel = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).scalar() or 0
+        biometric_enrolled = db.query(func.count(Personnel.id)).filter(Personnel.is_active == True).filter(
             Personnel.biometric_enrolled == True
         ).scalar() or 0
 

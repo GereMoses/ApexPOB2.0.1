@@ -1069,14 +1069,14 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
       {/* Enhanced Toolbar with Statistics */}
       <Card className="device-toolbar" style={{ marginBottom: 16 }}>
         <Row gutter={16} align="middle">
-          <Col span={6}>
-            <Space>
-              <Title level={4} style={{ margin: 0 }}>Device Management</Title>
-              <Text type="secondary">Manage and monitor all devices in the system</Text>
+          <Col flex="none">
+            <Space direction="vertical" size={0}>
+              <Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>T&amp;A and ADMS readers</Title>
+              <Text type="secondary">Door readers on ZKTeco controllers are under Access Control → Controllers</Text>
             </Space>
           </Col>
-          
-          <Col span={18} style={{ textAlign: 'right' }}>
+
+          <Col flex="auto" style={{ textAlign: 'right' }}>
             <Space>
               <Button
                 icon={<ImportOutlined />}
