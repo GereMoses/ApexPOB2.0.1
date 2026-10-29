@@ -57,6 +57,14 @@ import socket
 for h in ('postgres', 'redis'): socket.getaddrinfo(h, 0)
 socket.create_connection(('graph.facebook.com', 443), timeout=8)
 print('  ✓ celery worker → postgres, redis, internet (email / WhatsApp)')"
-code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/health || true)
-echo "  ✓ https://localhost/health → $code"
+# The backend takes a while to boot after a restart — wait for it, then insist on 200.
+for _ in $(seq 1 60); do
+  code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/health || true)
+  [ "$code" = "200" ] && break
+  sleep 3
+done
+if [ "$code" != "200" ]; then
+  echo "  ✗ https://localhost/health → $code after 3 minutes"; docker logs --tail 20 pob_backend; exit 1
+fi
+echo "  ✓ https://localhost/health → 200"
 echo "✅ deployed"

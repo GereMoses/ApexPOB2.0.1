@@ -281,7 +281,7 @@ services:
   # pattern Meta's automated detection looks for. Keep email and SMS enabled
   # alongside it — WhatsApp must never be the only route for an emergency.
   whatsapp-gateway:
-    image: evoapicloud/evolution-api:latest
+    image: evoapicloud/evolution-api:v2.3.7
     container_name: pob_whatsapp_gateway
     profiles: ["whatsapp"]
     environment:

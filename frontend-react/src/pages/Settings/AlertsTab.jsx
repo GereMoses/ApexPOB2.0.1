@@ -120,7 +120,8 @@ export default function AlertsTab() {
           <Form form={form} layout="vertical" requiredMark={false}>
             <Form.Item name="provider" label="Provider">
               <Segmented block options={[
-                { label: 'Meta Cloud API (recommended)', value: 'meta' },
+                { label: 'Linked phone (QR)', value: 'linked' },
+                { label: 'Meta Cloud API', value: 'meta' },
                 { label: 'Termii', value: 'termii' }, { label: 'Twilio', value: 'twilio' }]} />
             </Form.Item>
 
@@ -146,6 +147,12 @@ export default function AlertsTab() {
                   <br />Just testing? Use Meta's free test number with template <code>hello_world</code> (it can't carry the alert text, but proves delivery).
                 </div>
               </>
+            )}
+            {provider === 'linked' && (
+              <LinkedPhone onLinked={async () => {
+                await apiService.put('/api/v1/settings/alerts/whatsapp', { ...form.getFieldsValue(), provider: 'linked', enabled: true });
+                await load();
+              }} />
             )}
             {provider === 'termii' && (
               <div className="al-two">
@@ -269,6 +276,10 @@ const CSS = `
 .al-state.ok { color: #16a34a; font-weight: 600; }
 .al-team { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
 .al-team-row { display: grid; grid-template-columns: 1.1fr .9fr 1fr 1.2fr 32px 32px; gap: 6px; }
+.al-wa-linked { display: flex; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid #bbf7d0; background: #f0fdf4; border-radius: 12px; }
+.al-wa-pair { display: flex; gap: 18px; align-items: center; padding: 12px; border: 1px dashed #cbd5e1; border-radius: 12px; flex-wrap: wrap; }
+.al-wa-pair img { border-radius: 8px; background: #fff; }
+.al-wa-code { font: 600 30px/1 ui-monospace, Menlo, monospace; letter-spacing: 4px; padding: 18px 22px; background: #f1f5f9; border-radius: 10px; }
 .al-tg-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; }
 .al-tg-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 8px; }
 .al-empty { color: #94a3b8; font-size: 13px; padding: 14px; border: 1px dashed #e2e8f0; border-radius: 10px; text-align: center; }
@@ -361,5 +372,102 @@ function TelegramCard({ data, reload, showLink }) {
         </>
       )}
     </section>
+  );
+}
+
+
+/** WhatsApp through one phone, paired like WhatsApp Web (server: services/whatsapp_link.py). */
+function LinkedPhone({ onLinked }) {
+  const { message } = App.useApp();
+  const [st, setSt] = useState(null);
+  const [pair, setPair] = useState(null);        // { qr } | { pairing_code }
+  const [phone, setPhone] = useState('');
+  const [busy, setBusy] = useState(null);
+  const url = '/api/v1/settings/alerts/whatsapp/link';
+
+  const refresh = async () => {
+    try { const r = await apiService.get(url); setSt(r.data); return r.data; } catch (e) { setSt({ state: 'error', error: e.message }); return null; }
+  };
+  useEffect(() => { refresh(); }, []); // eslint-disable-line
+
+  // While pairing: watch for the phone to connect, and refresh the QR (it expires after ~40 s).
+  useEffect(() => {
+    if (!pair) return undefined;
+    let n = 0;
+    const t = setInterval(async () => {
+      n += 1;
+      const s = await refresh();
+      if (s?.linked) {
+        clearInterval(t); setPair(null);
+        message.success(`WhatsApp linked — alerts now go out from ${s.number}`, 8);
+        onLinked();
+      } else if (pair.qr && n % 10 === 0) {
+        try { const r = await apiService.post(url, {}); if (r.data.qr) setPair({ qr: r.data.qr }); } catch { /* keep the old one */ }
+      }
+      if (n > 100) { clearInterval(t); setPair(null); }   // give up after ~5 min
+    }, 3000);
+    return () => clearInterval(t);
+  }, [pair]); // eslint-disable-line
+
+  const start = async (withPhone) => {
+    setBusy(withPhone ? 'code' : 'qr');
+    try {
+      const r = await apiService.post(url, withPhone ? { phone } : {});
+      if (r.data.linked) { message.success('Already linked'); await refresh(); onLinked(); }
+      else setPair(withPhone ? { pairing_code: r.data.pairing_code } : { qr: r.data.qr });
+    } catch (e) { message.error(e.message, 8); } finally { setBusy(null); }
+  };
+  const unlink = async () => {
+    setBusy('unlink');
+    try { await apiService.delete(url); message.success('Phone unlinked'); setPair(null); await refresh(); }
+    catch (e) { message.error(e.message, 8); } finally { setBusy(null); }
+  };
+
+  if (!st) return <Skeleton active paragraph={{ rows: 2 }} />;
+  if (st.state === 'gateway_down') {
+    return <Alert type="error" showIcon style={{ marginBottom: 16 }} message="The WhatsApp gateway isn't running"
+      description={<>On the server run <code>docker compose -f docker-compose.prod.yml --env-file .env.prod --profile whatsapp up -d whatsapp-gateway</code>, then reopen this page.</>} />;
+  }
+  return (
+    <div style={{ marginBottom: 12 }}>
+      {st.linked ? (
+        <div className="al-wa-linked">
+          <CheckCircleFilled style={{ color: '#16a34a', fontSize: 22 }} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600 }}>Linked to {st.number}</div>
+            <div style={{ fontSize: 12.5, color: '#64748b' }}>{st.name ? `${st.name} · ` : ''}every WhatsApp alert goes out from this phone. Keep it charged and online.</div>
+          </div>
+          <Popconfirm title="Unlink this phone? WhatsApp alerts stop until a phone is linked again." onConfirm={unlink}>
+            <Button danger size="small" loading={busy === 'unlink'}>Unlink</Button>
+          </Popconfirm>
+        </div>
+      ) : pair ? (
+        <div className="al-wa-pair">
+          {pair.qr ? <img src={pair.qr} alt="WhatsApp QR code" width={220} height={220} /> : (
+            <div className="al-wa-code">{(pair.pairing_code || '').replace(/(.{4})(.{4})/, '$1-$2') || '—'}</div>
+          )}
+          <div style={{ flex: 1, fontSize: 13.5, lineHeight: 1.7 }}>
+            On the alerts phone open <b>WhatsApp → Settings → Linked devices → Link a device</b>
+            {pair.qr ? <>, then scan this code.</> : <>, tap <b>Link with phone number instead</b> and type this code.</>}
+            <div style={{ color: '#64748b', marginTop: 6 }}><Tag color="processing">waiting for the phone…</Tag></div>
+            <Button size="small" style={{ marginTop: 8 }} onClick={() => setPair(null)}>Cancel</Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <Button type="primary" icon={<WhatsAppOutlined />} loading={busy === 'qr'} onClick={() => start(false)}>Link phone — show QR code</Button>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Input placeholder="…or the phone's number, e.g. 0803 123 4567" value={phone} onChange={e => setPhone(e.target.value)} style={{ maxWidth: 300 }} />
+            <Button disabled={!phone.trim()} loading={busy === 'code'} onClick={() => start(true)}>Get pairing code</Button>
+          </div>
+        </>
+      )}
+      <div className="al-hint" style={{ background: '#fffbeb', borderColor: '#fde68a', color: '#78350f', marginTop: 12 }}>
+        Use a <b>dedicated SIM</b> for site alerts, not anyone's personal number. This links like WhatsApp Web, which WhatsApp does not
+        officially support for automated messages, so a number sending many alerts can be blocked. Keep <b>Telegram</b> and <b>Email</b> on too.
+      </div>
+    </div>
   );
 }

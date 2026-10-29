@@ -27,7 +27,7 @@ _PREFIX = "whatsapp."
 # key -> (is_secret, is_bool, default)
 _FIELDS: Dict[str, tuple] = {
     "enabled": (False, True, False),
-    "provider": (False, False, "meta"),            # meta | termii | twilio | generic
+    "provider": (False, False, "meta"),            # meta | linked | termii | twilio
     "country_code": (False, False, "234"),         # prepended to local 0-numbers
     # Meta WhatsApp Cloud API (official)
     "meta_phone_number_id": (False, False, ""),
@@ -89,6 +89,9 @@ def db_whatsapp_ready(s: Dict[str, Any]) -> bool:
     p = s.get("provider")
     if p == "meta":
         return bool(s.get("meta_phone_number_id") and s.get("meta_access_token"))
+    if p == "linked":                              # one phone paired by QR (services/whatsapp_link.py)
+        from .whatsapp_link import linked_cached
+        return linked_cached()
     if p == "termii":
         return bool(s.get("termii_api_key") and s.get("termii_sender"))
     if p == "twilio":

@@ -377,4 +377,13 @@ def _send_db(cfg: Dict[str, object], recipients: List[str], message: str) -> Dic
                 return str(exc)
         return _parallel(recipients, one, "twilio")
 
+    if provider == "linked":
+        from . import whatsapp_link
+        intl = {normalize_msisdn(n, cc): n for n in recipients}
+        out = whatsapp_link.send(list(intl), message)
+        out["failed"] = [intl.get(n, n) for n in out.get("failed", [])]
+        if out.get("errors"):
+            out["errors"] = {intl.get(n, n): e for n, e in out["errors"].items()}
+        return out
+
     return {"sent": 0, "failed": recipients, "error": f"unknown WhatsApp provider {provider!r}"}

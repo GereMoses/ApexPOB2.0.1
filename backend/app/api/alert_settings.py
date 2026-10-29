@@ -40,7 +40,7 @@ def _public(s: Dict[str, Any]) -> Dict[str, Any]:
 
 class WhatsAppIn(BaseModel):
     enabled: Optional[bool] = None
-    provider: Optional[str] = Field(None, pattern="^(meta|termii|twilio)$")
+    provider: Optional[str] = Field(None, pattern="^(meta|linked|termii|twilio)$")
     country_code: Optional[str] = None
     meta_phone_number_id: Optional[str] = None
     meta_access_token: Optional[str] = None
@@ -53,6 +53,44 @@ class WhatsAppIn(BaseModel):
     twilio_sid: Optional[str] = None
     twilio_token: Optional[str] = None
     twilio_from: Optional[str] = None
+
+
+# ── WhatsApp through one linked phone (QR pairing, services/whatsapp_link.py) ─
+
+class LinkIn(BaseModel):
+    phone: Optional[str] = None      # set → 8-character pairing code instead of a QR
+
+
+@router.get("/whatsapp/link")
+async def whatsapp_link_status(current_user=Depends(get_current_user)):
+    from ..services import whatsapp_link
+    return {"success": True, "data": await asyncio.to_thread(whatsapp_link.status)}
+
+
+@router.post("/whatsapp/link")
+async def whatsapp_link_start(body: LinkIn, request: Request, current_user=Depends(get_current_user),
+                              db: Session = Depends(get_db)):
+    _require_change(request, current_user)
+    from ..services import whatsapp_link
+    from ..services.notify_sms import normalize_msisdn
+    phone = None
+    if body.phone and body.phone.strip():
+        phone = normalize_msisdn(body.phone, str(get_whatsapp_settings(db).get("country_code") or "234"))
+    try:
+        return {"success": True, "data": await asyncio.to_thread(whatsapp_link.start_link, phone)}
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.delete("/whatsapp/link")
+async def whatsapp_unlink(request: Request, current_user=Depends(get_current_user)):
+    _require_change(request, current_user)
+    from ..services import whatsapp_link
+    try:
+        await asyncio.to_thread(whatsapp_link.unlink)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+    return {"success": True, "message": "Phone unlinked"}
 
 
 class Responder(BaseModel):
