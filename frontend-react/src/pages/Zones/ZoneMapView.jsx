@@ -21,13 +21,15 @@ const TILE_LAYERS = {
   },
   light: {
     label: 'Light',
-    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    attribution: '© <a href="https://carto.com/">CARTO</a>',
+    // CARTO basemaps now need an API key (every tile read "API KEY REQUIRED") — Esri
+    // grey canvas is free and keyless; it stops at zoom 16, so deeper zooms stretch 16.
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attribution: '© <a href="https://www.esri.com/">Esri</a>', maxNativeZoom: 16,
   },
   dark: {
     label: 'Dark',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution: '© <a href="https://carto.com/">CARTO</a>',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attribution: '© <a href="https://www.esri.com/">Esri</a>', maxNativeZoom: 16,
   },
   satellite: {
     label: 'Satellite',
@@ -168,13 +170,18 @@ const MapController = ({ zone, allZones }) => {
             .filter(z => z.latitude && z.longitude)
             .map(z => [parseFloat(z.latitude), parseFloat(z.longitude)])
             .filter(([a, b]) => !isNaN(a) && !isNaN(b));
-          if (coords.length) map.fitBounds(coords, { padding: [50, 50], maxZoom: 10, animate: false });
+          // Zones on one installation are metres apart: one zone → street level; several
+          // → fit them all (capped at street level so a cluster doesn't zoom to rooftops).
+          if (coords.length === 1) map.setView(coords[0], 16, { animate: false });
+          else if (coords.length) map.fitBounds(coords, { padding: [50, 50], maxZoom: 17, animate: false });
         }
       } catch (_) {}
     };
     if (size && size.x > 0) go();
     else { map.once('resize', go); return () => map.off('resize', go); }
-  }, [zone, map]); // eslint-disable-line
+    // Re-fit when the zones (or their coordinates) arrive — they load after the map
+    // mounts, so fitting only on mount left the default country-wide view.
+  }, [zone, map, allZones.map(z => `${z.latitude},${z.longitude}`).join('|')]); // eslint-disable-line
 
   return null;
 };
@@ -638,7 +645,7 @@ const ZoneMapView = ({ zones: zonesProp = [] }) => {
           zoomControl={false}
         >
           <PlaceOnClick active={!!placingId} onPlace={placeZone} />
-          <TileLayer url={tile.url} attribution={tile.attribution} maxZoom={19} key={tileKey} />
+          <TileLayer url={tile.url} attribution={tile.attribution} maxZoom={19} maxNativeZoom={tile.maxNativeZoom || 19} key={tileKey} />
           <ZoomControl position="bottomright" />
           <MapController zone={selectedZone?.has_gps ? selectedZone : null} allZones={geoZones} />
 

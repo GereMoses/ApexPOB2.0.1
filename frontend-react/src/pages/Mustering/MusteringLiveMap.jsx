@@ -14,13 +14,15 @@ const TILE_LAYERS = {
   },
   light: {
     label: 'Light',
-    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    attribution: '© <a href="https://carto.com/">CARTO</a>',
+    // CARTO basemaps now need an API key (every tile read "API KEY REQUIRED") — Esri
+    // grey canvas is free and keyless; it stops at zoom 16, so deeper zooms stretch 16.
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attribution: '© <a href="https://www.esri.com/">Esri</a>', maxNativeZoom: 16,
   },
   dark: {
     label: 'Dark',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution: '© <a href="https://carto.com/">CARTO</a>',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    attribution: '© <a href="https://www.esri.com/">Esri</a>', maxNativeZoom: 16,
   },
   satellite: {
     label: 'Satellite',
@@ -113,14 +115,17 @@ const MapController = ({ focusZone, allZones }) => {
         } else if (!focusZone && allZones.length > 0) {
           const coords = allZones
             .filter(z => z.latitude != null && z.longitude != null)
-            .map(z => [z.latitude, z.longitude]);
-          if (coords.length) map.fitBounds(coords, { padding: [60, 60], maxZoom: 12, animate: false });
+            .map(z => [parseFloat(z.latitude), parseFloat(z.longitude)])
+            .filter(([a, b]) => !isNaN(a) && !isNaN(b));
+          if (coords.length === 1) map.setView(coords[0], 16, { animate: false });
+          else if (coords.length) map.fitBounds(coords, { padding: [60, 60], maxZoom: 17, animate: false });
         }
       } catch (_) {}
     };
     if (size && size.x > 0) go();
     else { map.once('resize', go); return () => map.off('resize', go); }
-  }, [focusZone, map]); // eslint-disable-line
+    // Re-fit when the zones arrive (they load after the map mounts).
+  }, [focusZone, map, allZones.map(z => `${z.latitude},${z.longitude}`).join('|')]); // eslint-disable-line
 
   return null;
 };
@@ -462,7 +467,7 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs, isEventActive, zoneLiv
           style={{ height: '100%', width: '100%', background: isDark ? '#0f172a' : '#e8edf0' }}
           preferCanvas
         >
-          <TileLayer url={tile.url} attribution={tile.attribution} />
+          <TileLayer key={tile.url} url={tile.url} attribution={tile.attribution} maxZoom={19} maxNativeZoom={tile.maxNativeZoom || 19} />
           <ZoomControl position="bottomright" />
           <MapController focusZone={focusZone} allZones={geoZones} />
 

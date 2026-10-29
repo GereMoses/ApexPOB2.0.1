@@ -70,7 +70,7 @@ const FitToZones = ({ coords }) => {
 
 /* Free basemaps — no API key required */
 const BASEMAPS = {
-  light:     { label: 'Light',     url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', sub: ['a', 'b', 'c', 'd'] },
+  light:     { label: 'Light',     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', sub: [], maxNativeZoom: 16 },   // CARTO now needs an API key
   street:    { label: 'Street',    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',              sub: ['a', 'b', 'c'] },
   satellite: { label: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', sub: [] },
 };
@@ -87,7 +87,7 @@ const LiveZoneMap = ({ zones, getCount, onZoneClick }) => {
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <MapContainer center={center} zoom={11} style={{ width: '100%', height: '100%' }}
         scrollWheelZoom attributionControl={false} preferCanvas>
-        <TileLayer key={bm} url={tile.url} subdomains={tile.sub} maxZoom={19} />
+        <TileLayer key={bm} url={tile.url} subdomains={tile.sub} maxZoom={19} maxNativeZoom={tile.maxNativeZoom || 19} />
         <FitToZones coords={coords} />
         {pts.map(z => {
           const c = getCount(z);
