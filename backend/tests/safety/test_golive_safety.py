@@ -254,3 +254,30 @@ def test_leaving_site_journey_moves_staff_not_guests_and_undoes(db, make_person,
     assert person_state(db, p["emp_code"])[0] is False and r["pob_applied_count"] == 1
     run(J.cancel_journey(j["id"], db, NS(id=1)))
     assert person_state(db, p["emp_code"])[0] is True
+
+
+@needs_db
+def test_access_door_tap_puts_person_on_board_but_is_not_attendance(db, make_person, make_zone, superuser_headers):
+    """Access-control readers drive on-board status and the door feed; T&A readers drive
+    attendance. A door tap writes no attendance punch; a T&A tap never shows in the feed."""
+    import uuid as _u
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.api.adms_protocol import handle_attlog
+    z = make_zone()
+    acc, ta = "AC" + _u.uuid4().hex[:8].upper(), "TA" + _u.uuid4().hex[:8].upper()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose, zone_id) VALUES (:s, 'Gate door', 1, 'ACCESS_ENTRY', :z)"), {"s": acc, "z": z})
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) VALUES (:s, 'Abuja F18', 1, 'ATTENDANCE')"), {"s": ta})
+    db.commit()
+    pin = str(_u.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    t = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%d %H:%M:%S")
+    handle_attlog([{"PIN": pin, "Time": t, "Status": "0"}], acc, db)
+    assert person_state(db, p["emp_code"])[0] is True
+    assert db.execute(text("SELECT count(*) FROM iclock_transaction WHERE terminal_sn = :s"), {"s": acc}).scalar() == 0
+    handle_attlog([{"PIN": pin, "Time": t, "Status": "0"}], ta, db)
+    assert db.execute(text("SELECT count(*) FROM iclock_transaction WHERE terminal_sn = :s"), {"s": ta}).scalar() == 1
+    feed = TestClient(app, headers=superuser_headers).get("/api/v1/pob-status/dashboard").json()
+    feed = (feed.get("data") or feed).get("recent_events", [])
+    assert any(e["type"] == "ENTRY" for e in feed)
+    assert not any(e["type"] in ("CHECK_IN", "CHECK_OUT", "REPEAT_TAP") for e in feed)

@@ -573,29 +573,9 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 logger.error(f"Zone access error {emp_code}@{sn}: {e}")
             # On-board status is set inside _handle_zone_access (entry = on site,
             # exit through a site-boundary zone = off site).
-            # Force punch direction so T&A calculation is unambiguous
-            forced_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
-            if _punch_already_stored(emp_code, punch_time, sn, db):
-                continue
-            try:
-                txn = IClockTransaction(
-                    emp_code=emp_code,
-                    punch_time=punch_time,
-                    punch_state=forced_state,
-                    verify_type=0,
-                    work_code=0,
-                    terminal_sn=sn,
-                    area_alias='',
-                    upload_time=datetime.now(timezone.utc),
-                )
-                db.add(txn)
-                db.flush()
-                saved += 1
-                affected_codes.add(emp_code)
-                affected_dates.add(punch_time.strftime('%Y-%m-%d'))
-            except Exception as e:
-                logger.error(f"ATTLOG (access reader) T&A save error {emp_code}@{sn}: {e}")
-                db.rollback()
+            # Door taps are NOT attendance: time & attendance comes only from T&A
+            # readers (same rule as the ZKTeco controllers' access readers).
+            saved += 1
 
             # Write to acc_event so every door swipe appears in the access control log.
             # Use _ensure_access_control_records so door_id is always valid.

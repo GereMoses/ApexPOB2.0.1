@@ -118,49 +118,40 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
     except Exception:
         overdue = 0
 
-    # ── live activity feed (last 24 h biometric movements) ──────────────
+    # ── live activity feed: door taps on ACCESS-CONTROL readers (last 24 h) ──
+    # Who came on site, moved between zones or was refused. T&A clock-ins are not
+    # shown here: a T&A terminal can be in another state or country, so it says
+    # nothing about who is on board.
     recent_events = []
     try:
         rows = db.execute(text("""
-            SELECT
-              t.id, t.punch_time, t.punch_state, t.verify_type,
-              COALESCE(p.full_name,
-                       TRIM(p.first_name || ' ' || p.last_name),
-                       t.emp_code)                                   AS pname,
-              COALESCE(NULLIF(TRIM(p.current_location), ''), 'Unknown') AS loc,
-              COALESCE(p.department, '—')                             AS dept,
-              ROW_NUMBER() OVER (PARTITION BY t.emp_code, (t.punch_time AT TIME ZONE :tz)::date
-                                 ORDER BY t.punch_time)                AS nth_today,
-              EXTRACT(EPOCH FROM t.punch_time - MIN(t.punch_time) OVER (
-                  PARTITION BY t.emp_code, (t.punch_time AT TIME ZONE :tz)::date)) / 60 AS since_first
-            FROM iclock_transaction t
-            LEFT JOIN personnel p ON p.emp_code = t.emp_code
-            WHERE t.punch_time >= NOW() - INTERVAL '24 hours'
-            ORDER BY t.punch_time DESC
+            SELECT a.id, a."timestamp", a.direction, a.access_granted,
+                   COALESCE(NULLIF(a.access_method, ''), NULLIF(a.verification_method, ''), 'Card') AS method,
+                   COALESCE(p.full_name, TRIM(p.first_name || ' ' || p.last_name), 'Unknown card') AS pname,
+                   COALESCE(z.name, 'Unknown zone') AS loc,
+                   COALESCE(p.department, '—') AS dept,
+                   a.denial_reason
+            FROM access_logs a
+            LEFT JOIN personnel p ON p.id = a.personnel_id
+            LEFT JOIN zones z ON z.id = a.zone_id
+            WHERE a."timestamp" >= NOW() - INTERVAL '24 hours'
+            ORDER BY a."timestamp" DESC
             LIMIT 25
-        """), {"tz": tz}).fetchall()
-        try:
-            from .adms_protocol import _punch_state_mode
-            by_position = _punch_state_mode(db) != "device"
-        except Exception:
-            by_position = True
-
-        PUNCH  = {0: "CHECK_IN", 1: "CHECK_OUT", 2: "BREAK_OUT", 3: "BREAK_IN"}
-        VERIFY = {0: "Password", 1: "Fingerprint", 2: "Face", 3: "Card"}
+        """)).fetchall()
         for r in rows:
             recent_events.append({
-                "id":            r[0],
-                "timestamp":     r[1].isoformat() if r[1] else None,
-                # first_last attendance: the first tap of the person's site day is the
-                # clock-in, later taps clock-out — whatever key the reader stamped.
-                "type":          (("CHECK_IN" if r[7] == 1 else "REPEAT_TAP" if (r[8] or 0) < minw else "CHECK_OUT")
-                                  if by_position else PUNCH.get(r[2], "UNKNOWN")),
-                "verify_method": VERIFY.get(r[3], "Unknown"),
-                "personnel":     r[4],
-                "location":      r[5],
-                "department":    r[6],
+                "id":            r.id,
+                "timestamp":     r.timestamp.isoformat() if r.timestamp else None,
+                "type":          ("DENIED" if not r.access_granted else
+                                  "ENTRY" if r.direction == "ENTRY" else "EXIT" if r.direction == "EXIT" else "UNKNOWN"),
+                "verify_method": str(r.method).title(),
+                "personnel":     r.pname,
+                "location":      r.loc,
+                "department":    r.dept,
+                "reason":        r.denial_reason,
             })
     except Exception as e:
+        db.rollback()
         logger.warning(f"Live feed query failed: {e}")
 
     # ── active transports (ORM — table name is dynamic) ─────────────────

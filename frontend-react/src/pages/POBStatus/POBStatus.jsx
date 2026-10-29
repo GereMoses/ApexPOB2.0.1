@@ -46,6 +46,9 @@ const VERIFY_COLORS = {
 };
 
 const PUNCH_CONFIG = {
+  ENTRY:      { color: '#22C55E', label: 'Entered',    icon: <ArrowDownOutlined /> },
+  EXIT:       { color: '#EF4444', label: 'Exited',     icon: <ArrowUpOutlined /> },
+  DENIED:     { color: '#B91C1C', label: 'Refused',    icon: <MinusOutlined /> },
   CHECK_IN:   { color: '#22C55E', label: 'Check In',   icon: <ArrowDownOutlined /> },
   CHECK_OUT:  { color: '#EF4444', label: 'Check Out',  icon: <ArrowUpOutlined /> },
   REPEAT_TAP: { color: '#94A3B8', label: 'Repeat tap', icon: <ArrowDownOutlined /> },
@@ -477,11 +480,11 @@ export default function POBStatus() {
         {/* Live activity feed */}
         <Col xs={24} md={12}>
           <Card
-            title={<Space><ThunderboltOutlined style={{ color: C.offshore }} />Live Activity (Last 24h)</Space>}
+            title={<Space><ThunderboltOutlined style={{ color: C.offshore }} />Door Activity (Last 24h)</Space>}
             bodyStyle={{ padding: 0 }}
           >
             {liveEvents.length === 0 ? (
-              <Empty description="No recent activity" style={{ padding: '32px 0' }} />
+              <Empty description="No door taps in the last 24 h — this shows access-control readers only (T&A clock-ins are under Attendance)" style={{ padding: '32px 16px' }} />
             ) : (
               <div style={{ maxHeight: Math.max(200, deptData.length * 30) + 48, overflowY: 'auto' }}>
                 {liveEvents.map(evt => {
@@ -515,6 +518,7 @@ export default function POBStatus() {
                         <div style={{ fontSize: 11, color: '#6B7A8D', marginTop: 2 }}>
                           <EnvironmentOutlined style={{ marginRight: 3 }} />{evt.location}
                           {evt.department && <span style={{ marginLeft: 8, color: '#9CA3AF' }}>{evt.department}</span>}
+                          {evt.reason && <span style={{ marginLeft: 8, color: '#B91C1C' }}>{evt.reason}</span>}
                         </div>
                       </div>
                       <div style={{ fontSize: 10, color: '#9CA3AF', flexShrink: 0, marginTop: 2 }}>
