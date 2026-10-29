@@ -338,8 +338,8 @@ def ingest_event(controller: AccessController, event: C3Event, db: Session) -> D
         if zone_id:
             shim = SimpleNamespace(zone_id=zone_id, alias=reader.name or sn)
             updates = _handle_zone_access(emp_code, sn, punch_time, shim, direction, db) or {}
-        if reader.purpose == "ATTENDANCE" and direction == "ENTRY":
-            _mark_onboard(emp_code, True, db)
+        # (An attendance reader no longer marks anyone on board: T&A can be in another
+        # state or country — on-board status comes from access-control readers.)
         if reader.purpose == "ATTENDANCE":
             _recalc_later(emp_code, punch_time)
 

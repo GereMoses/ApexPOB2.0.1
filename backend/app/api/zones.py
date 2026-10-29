@@ -63,6 +63,17 @@ HAZARD_COLORS = {
 }
 
 
+def _zone_readers_count(db: Session, zone_id: int) -> dict:
+    r = db.execute(text("""
+        SELECT
+          (SELECT count(*) FROM iclock_terminal t WHERE t.zone_id = :z
+             AND COALESCE(t.connection_mode, '') <> 'controller'
+             AND COALESCE(NULLIF(t.reader_purpose, ''), 'ATTENDANCE') <> 'ATTENDANCE') AS readers,
+          (SELECT count(DISTINCT (ar.controller_id, ar.door_no)) FROM access_readers ar WHERE ar.zone_id = :z) AS doors
+    """), {"z": zone_id}).fetchone()
+    return {"access_reader_count": int(r.readers or 0), "door_count": int(r.doors or 0)}
+
+
 def _to_dict(zone: Zone, db: Session) -> dict:
     assigned_count = db.query(ZonePersonnelAssignment).filter(
         ZonePersonnelAssignment.zone_id == zone.id,
@@ -106,6 +117,9 @@ def _to_dict(zone: Zone, db: Session) -> dict:
         "tile_position": zone.tile_position or "auto",
         "is_site_boundary": bool(getattr(zone, "is_site_boundary", False)),
         # Mustering fields — without these the edit form showed them blank.
+        # What actually feeds this zone: access-control ADMS readers (T&A terminals are
+        # not part of zones) and doors on the ZKTeco controllers.
+        **_zone_readers_count(db, zone.id),
         "reader_sn": zone.reader_sn,
         "evac_point": zone.evac_point,
         "evac_gps": zone.evac_gps,
@@ -375,8 +389,11 @@ def get_map_live(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 @router.get("/available-devices")
 def get_available_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    # Controller reader ports are mirrored as terminals — they are mapped to zones by
+    # door (assign-door), not here.
     rows = db.execute(text(
-        "SELECT id, sn, alias, ip_address, zone_id, last_activity, state FROM iclock_terminal ORDER BY alias"
+        "SELECT id, sn, alias, ip_address, zone_id, last_activity, state, reader_purpose, device_type "
+        "FROM iclock_terminal WHERE COALESCE(connection_mode, '') <> 'controller' ORDER BY alias"
     )).fetchall()
     return [
         {
@@ -389,9 +406,16 @@ def get_available_devices(db: Session = Depends(get_db), _=Depends(get_current_u
             "state": r.state,
             "status": "online" if r.state == 1 else "offline",
             "already_assigned": r.zone_id is not None,
+            "reader_purpose": r.reader_purpose or "ATTENDANCE",
+            # T&A terminals take no part in zones (they can be in another state/country).
+            "assignable": _is_zone_reader(r.reader_purpose, r.device_type),
         }
         for r in rows
     ]
+
+
+def _is_zone_reader(purpose, device_type=None) -> bool:
+    return (purpose or "ATTENDANCE").upper() != "ATTENDANCE" or device_type == 2
 
 
 @router.get("/available-doors")
@@ -621,22 +645,42 @@ def update_zone(
 
 
 @router.patch("/{zone_id}/status")
-def update_zone_status(
+async def update_zone_status(
     zone_id: int,
     body: dict,
     db: Session = Depends(get_db),
-    _=Depends(get_current_user),
+    current_user=Depends(get_current_user),
 ):
-    """Quick status-only update — no other fields touched."""
+    """Quick status-only update. LOCKDOWN really locks the zone's doors (it used to be
+    a label only — the operator believed a zone was secured when nothing had moved);
+    leaving LOCKDOWN releases them."""
     zone = db.query(Zone).filter(Zone.id == zone_id).first()
     if not zone:
         raise HTTPException(status_code=404, detail="Zone not found")
     new_status = (body.get("status") or "").upper()
     if new_status not in {"ACTIVE", "INACTIVE", "MAINTENANCE", "EMERGENCY", "LOCKDOWN"}:
         raise HTTPException(status_code=400, detail="Invalid status value")
+    old_status = (zone.status or "").upper()
+    if new_status == "LOCKDOWN" and (zone.zone_type or "").upper() == "MUSTER_POINT":
+        raise HTTPException(status_code=400, detail="A muster point is a safe assembly area — it cannot be locked down")
+    doors = None
+    if new_status != old_status and "LOCKDOWN" in (new_status, old_status):
+        from ..services.emergency_service import emergency_service
+        action = "lock" if new_status == "LOCKDOWN" else "unlock"
+        try:
+            doors = await emergency_service.execute_lockdown(
+                scope="zone", zone_ids=[zone_id], action=action,
+                reason=body.get("reason") or f"Zone {zone.name} set to {new_status.title()}",
+                initiated_by=getattr(current_user, "id", None), db=db)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        zone = db.query(Zone).filter(Zone.id == zone_id).first()
     zone.status = new_status
     db.commit()
-    return {"success": True, "id": zone_id, "status": new_status}
+    out = {"success": True, "id": zone_id, "status": new_status}
+    if doors is not None:
+        out["doors"] = {k: doors.get(k) for k in ("message", "total_doors", "processed_doors", "failed_doors", "skipped_doors")}
+    return out
 
 
 @router.patch("/{zone_id}/position")
@@ -721,15 +765,30 @@ def delete_zone(
             detail=f"Cannot delete: {sub_count} sub-zone(s) belong to this zone. Delete sub-zones first.",
         )
 
+    ids = [zone_id] + ([r[0] for r in db.execute(text(
+        "WITH RECURSIVE t AS (SELECT id FROM zones WHERE parent_zone_id = :z "
+        "UNION ALL SELECT z.id FROM zones z JOIN t ON z.parent_zone_id = t.id) SELECT id FROM t"),
+        {"z": zone_id}).fetchall()] if cascade else [])
+    busy = db.execute(text("""
+        SELECT id FROM mustering_event WHERE status = 0 AND (
+            zone_id = ANY(:ids) OR muster_zone_id = ANY(:ids)
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(zone_ids, '[]'::jsonb)) e WHERE e::int = ANY(:ids))
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(COALESCE(muster_zone_ids, '[]'::jsonb)) e WHERE e::int = ANY(:ids)))
+        LIMIT 1"""), {"ids": ids}).scalar()
+    if busy:
+        raise HTTPException(status_code=409, detail="A muster that covers this zone is running — end it before deleting the zone")
+    located = db.execute(text("SELECT count(*) FROM personnel WHERE current_zone_id = ANY(:ids)"), {"ids": ids}).scalar() or 0
+    note = f" {located} person(s) recorded in it now have no zone." if located else ""
+
     zone_name = zone.name
     if cascade and sub_count > 0:
         total = _cascade_delete_zone(db, zone_id)
         db.commit()
-        return {"message": f"Zone '{zone_name}' and {total - 1} sub-zone(s) deleted successfully"}
+        return {"message": f"Zone '{zone_name}' and {total - 1} sub-zone(s) deleted.{note}"}
 
     _delete_single_zone(db, zone_id)
     db.commit()
-    return {"message": f"Zone '{zone_name}' deleted successfully"}
+    return {"message": f"Zone '{zone_name}' deleted.{note}"}
 
 
 @router.get("/{zone_id}/sub-zones")
@@ -959,10 +1018,17 @@ def assign_reader(
         raise HTTPException(status_code=400, detail=f"Unknown reader purpose {reader_purpose}")
 
     terminal = db.execute(text(
-        "SELECT id, sn, alias, zone_id FROM iclock_terminal WHERE id = :tid"
+        "SELECT id, sn, alias, zone_id, reader_purpose, device_type, connection_mode "
+        "FROM iclock_terminal WHERE id = :tid"
     ), {"tid": terminal_id}).fetchone()
     if not terminal:
         raise HTTPException(status_code=404, detail="Terminal not found")
+    if (terminal.connection_mode or "") == "controller":
+        raise HTTPException(status_code=400, detail="This is a ZKTeco controller door reader — use Doors on the zone instead")
+    if not _is_zone_reader(reader_purpose or terminal.reader_purpose, terminal.device_type):
+        raise HTTPException(status_code=400, detail=(
+            f"{terminal.alias or terminal.sn} is a time & attendance reader. T&A readers are not part of zones "
+            f"or mustering — set it to Access Control Entry/Exit (or Mustering) under Devices first."))
     if terminal.zone_id == zone_id:
         raise HTTPException(status_code=400, detail="Terminal already assigned to this zone")
 

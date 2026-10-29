@@ -433,3 +433,21 @@ def test_lockdown_with_no_doors_says_so(superuser_headers, panel, db, make_zone)
     zid = make_zone()          # a fresh zone has no doors
     r = _client(superuser_headers).post("/api/emergency/lockdown/", json={"scope": "zone", "zone_ids": [zid], "action": "unlock", "reason": "t"}).json()["data"]
     assert r["total_doors"] == 0 and "No doors are set up" in r["message"] and r["success"] is False
+
+
+@needs_db
+def test_zone_status_lockdown_really_locks_its_doors(superuser_headers, panel, db, make_zone):
+    c = _client(superuser_headers)
+    z = make_zone()
+    ip = f"10.5.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    cid = c.post("/api/v1/access-controllers", json={"name": "Zone panel", "ip_address": ip, "model": "C3-100", "door_count": 1}).json()["id"]
+    assert c.post(f"/api/v1/zones/{z}/assign-door", json={"controller_id": cid, "door_no": 1}).status_code == 200
+    r = c.patch(f"/api/v1/zones/{z}/status", json={"status": "LOCKDOWN"}).json()
+    assert r["status"] == "LOCKDOWN" and r["doors"]["processed_doors"] == 1
+    assert ("door", ip, 1, 0) in panel                                   # relay released = locked
+    r = c.patch(f"/api/v1/zones/{z}/status", json={"status": "ACTIVE"}).json()
+    assert r["doors"]["processed_doors"] == 1 and ("door", ip, 1, 255) in panel
+    mp = db.execute(text("INSERT INTO zones (name, code, zone_type, status) VALUES (:n, :c, 'MUSTER_POINT', 'ACTIVE') RETURNING id"),
+                    {"n": "MP " + uuid.uuid4().hex[:5], "c": uuid.uuid4().hex[:8]}).scalar()
+    db.commit()
+    assert c.patch(f"/api/v1/zones/{mp}/status", json={"status": "LOCKDOWN"}).status_code == 400

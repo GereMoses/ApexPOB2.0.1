@@ -95,6 +95,15 @@ const timeAgo = (iso) => {
   return `${Math.floor(h / 24)}d ago`;
 };
 
+// What feeds a zone: access-control readers + ZKTeco controller doors (T&A terminals
+// are not part of zones).
+const zoneReaders = (z) => (z?.access_reader_count ?? 0) + (z?.door_count ?? 0);
+const zoneReadersLabel = (z) => {
+  const r = z?.access_reader_count ?? 0, d = z?.door_count ?? 0;
+  if (!r && !d) return 'No doors or readers';
+  return [d && `${d} door${d !== 1 ? 's' : ''}`, r && `${r} reader${r !== 1 ? 's' : ''}`].filter(Boolean).join(' · ');
+};
+
 const getZoneStyle = (type) => ZONE_STYLE[type] || { color: '#6B7280', dark: '#4B5563', bg: '#F9FAFB', icon: <GlobalOutlined /> };
 const getStatusStyle = (s) => STATUS_STYLE[s] || STATUS_STYLE.INACTIVE;
 const getHazardStyle = (h) => HAZARD_STYLE[h] || HAZARD_STYLE.LOW;
@@ -281,7 +290,7 @@ const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChan
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, color: '#6B7280' }}>
               <ApiOutlined style={{ color: '#7C3AED', fontSize: 13 }} />
-              <span>{zone.device_count ?? zone.reader_count ?? 0} reader{(zone.device_count ?? zone.reader_count ?? 0) !== 1 ? 's' : ''}</span>
+              <span>{zoneReadersLabel(zone)}</span>
             </div>
             {zone.state && (
               <span style={{ fontSize: 11, color: '#9CA3AF' }}>{zone.state}</span>
@@ -416,6 +425,11 @@ const ZoneDetailDrawer = ({ zone, open, onClose, onPrev, onNext, hasPrev, hasNex
     queryFn: () => apiService.get(`/api/v1/zones/${zone.id}/readers`),
     enabled: !!zone && open,
   });
+  const { data: zoneDoors } = useQuery({
+    queryKey: ['zone-doors', zone?.id],
+    queryFn: () => apiService.get(`/api/v1/zones/${zone.id}/doors`),
+    enabled: !!zone && open,
+  });
 
   if (!zone) return null;
 
@@ -424,7 +438,9 @@ const ZoneDetailDrawer = ({ zone, open, onClose, onPrev, onNext, hasPrev, hasNex
   const hs = getHazardStyle(zone.hazard_level);
   const personnelList = Array.isArray(personnel) ? personnel : [];
   const trackingList  = Array.isArray(tracking)  ? tracking  : [];
-  const readerList    = Array.isArray(readers)    ? readers   : [];
+  // T&A terminals are not part of zones — list only access / mustering readers.
+  const readerList    = (Array.isArray(readers) ? readers : []).filter(r => (r.reader_purpose || 'ATTENDANCE') !== 'ATTENDANCE');
+  const doorList      = Array.isArray(zoneDoors) ? zoneDoors : [];
   const count = zone.current_personnel_count ?? 0;
 
   return (
@@ -508,7 +524,7 @@ const ZoneDetailDrawer = ({ zone, open, onClose, onPrev, onNext, hasPrev, hasNex
             { label: 'Access', value: zone.access_level },
             { label: 'State',  value: zone.state || '—' },
             { label: 'Capacity', value: zone.max_capacity ? `${count} / ${zone.max_capacity}` : '—' },
-            { label: 'Readers', value: `${readerList.length} device${readerList.length !== 1 ? 's' : ''}` },
+            { label: 'Doors & readers', value: zoneReadersLabel({ door_count: doorList.length, access_reader_count: readerList.length }) },
           ].map(item => (
             <div key={item.label} style={{
               background: 'white', border: '1px solid #E5E7EB', borderRadius: 8,
@@ -611,11 +627,22 @@ const ZoneDetailDrawer = ({ zone, open, onClose, onPrev, onNext, hasPrev, hasNex
             },
             {
               key: 'readers',
-              label: <Space size={4}><ApiOutlined />Readers ({readerList.length})</Space>,
+              label: <Space size={4}><ApiOutlined />Doors & readers ({doorList.length + readerList.length})</Space>,
               children: (
                 <Spin spinning={rLoading}>
-                  {readerList.length === 0 ? (
-                    <Empty description="No readers assigned" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '32px 0' }} />
+                  {doorList.length > 0 && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
+                      {doorList.map(d => (
+                        <div key={`${d.controller_id}:${d.door_no}`} style={{ padding: '10px 14px', borderRadius: 10, background: '#F5F3FF', border: '1px solid #DDD6FE', display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <ApiOutlined style={{ color: '#7C3AED' }} />
+                          <span style={{ fontWeight: 600 }}>Door {d.door_no}</span>
+                          <span style={{ fontSize: 12, color: '#6B7280' }}>{d.controller_name}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {readerList.length === 0 ? (doorList.length === 0 &&
+                    <Empty description="No doors or readers — assign controller doors with Doors on the zone card" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '32px 0' }} />
                   ) : (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingBottom: 16 }}>
                       {readerList.map((r) => (
@@ -1140,6 +1167,13 @@ const ReadersTab = () => {
                 onClick={() => setPendingZoneAssign(null)}
               >✕</Button>
             </div>
+          );
+        }
+        if ((r.reader_purpose || 'ATTENDANCE') === 'ATTENDANCE' && r.device_type !== 2) {
+          return (
+            <Tooltip title="Time & attendance readers are not part of zones or mustering (they can be in another state or country). To use it on a door, change its purpose to Access Entry/Exit under Devices.">
+              <span style={{ fontSize: 11, color: '#6B7280' }}>T&amp;A — not in a zone{r.zone_id ? ' (old link ignored)' : ''}</span>
+            </Tooltip>
           );
         }
         return (
@@ -2287,6 +2321,23 @@ function MusterPointsTab({ musterPoints, isLoading }) {
                     {(() => {
                       const term = terminals.find(t => t.sn === mp.reader_sn);
                       const isOnline = term?.status?.toLowerCase() === 'online';
+                      const doors = mp.door_count || 0;
+                      const doorsNote = doors > 0 && (
+                        <div style={{ fontSize: 11.5, color: '#16a34a', marginBottom: 8, fontWeight: 600 }}>
+                          <ApiOutlined style={{ fontSize: 11, marginRight: 5 }} />
+                          {doors} controller door{doors !== 1 ? 's' : ''} count people safe here
+                        </div>
+                      );
+                      if (term && (term.reader_purpose || 'ATTENDANCE') === 'ATTENDANCE' && term.device_type !== 2) return (
+                        <>
+                          {doorsNote}
+                          <div style={{ fontSize: 11.5, color: '#b45309', marginBottom: 8, fontWeight: 600 }}>
+                            <WifiOutlined style={{ fontSize: 11, marginRight: 5 }} />
+                            {term.alias || term.sn} is a T&amp;A reader — it does not count anyone safe. Choose an access or mustering reader.
+                          </div>
+                        </>
+                      );
+                      if (!mp.reader_sn && doors > 0) return doorsNote;
                       if (mp.reader_sn) return (
                         <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6,
                           background: term ? (isOnline ? '#f0fdf4' : '#fafafa') : '#fff7ed',
@@ -2401,7 +2452,7 @@ function MusterPointsTab({ musterPoints, isLoading }) {
           <Row gutter={16}>
             <Col span={14}>
               <Form.Item name="reader_sn" label="Headcount Reader"
-                tooltip="ZKTeco reader — personnel scan here to be marked SAFE during a muster event">
+                tooltip="A standalone access or mustering reader where people scan to be marked SAFE during a muster. Doors on the ZKTeco controllers count too — assign them to this muster point with Doors on the Zones tab. T&A readers never count anyone safe.">
                 <Select
                   showSearch
                   allowClear
@@ -2413,7 +2464,7 @@ function MusterPointsTab({ musterPoints, isLoading }) {
                     </div>
                   }
                 >
-                  {terminals.map(t => {
+                  {terminals.filter(t => (t.reader_purpose || 'ATTENDANCE') !== 'ATTENDANCE' || t.device_type === 2).map(t => {
                     const isOnline = t.status?.toLowerCase() === 'online';
                     const inUse = musterPoints.find(mp => mp.reader_sn === t.sn && mp.id !== editing?.id);
                     return (
@@ -2536,7 +2587,7 @@ function MusterPointsTab({ musterPoints, isLoading }) {
    MAIN COMPONENT
 ───────────────────────────────────────────────────────────────── */
 const ZoneManagement = () => {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const [activeTab,        setActiveTab]        = useState('zones');
   const [detailZoneId,     setDetailZoneId]     = useState(null);
   const [editingZone,      setEditingZone]      = useState(null);
@@ -2639,7 +2690,7 @@ const ZoneManagement = () => {
       totalPOB:        zones.reduce((s, z) => s + (z.current_personnel_count || 0), 0),
       operationalZones: ops.length,
       activeZones:     ops.filter(z => z.is_active && z.status === 'ACTIVE').length,
-      totalReaders:    zones.reduce((s, z) => s + (z.device_count || z.reader_count || 0), 0),
+      totalReaders:    zones.reduce((s, z) => s + zoneReaders(z), 0),
       alerts:          zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length,
     };
   }, [zones]);
@@ -2751,9 +2802,14 @@ const ZoneManagement = () => {
 
   const patchStatusM = useMutation({
     mutationFn: ({ id, status }) => apiService.patch(`/api/v1/zones/${id}/status`, { status }),
-    onSuccess: (_, vars) => {
-      message.success(`Zone status → ${vars.status.toLowerCase()}`);
+    onSuccess: (r, vars) => {
+      const d = r?.doors;
+      if (d) {
+        const bad = (d.failed_doors || 0) > 0 || !d.total_doors;
+        (bad ? message.warning : message.success)(`Zone ${vars.status === 'LOCKDOWN' ? 'locked down' : `→ ${vars.status.toLowerCase()}`}: ${d.message}`, 8);
+      } else message.success(`Zone status → ${vars.status.toLowerCase()}`);
       queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['em-door-state'] });
     },
     onError: err => message.error(err?.message || 'Status update failed'),
   });
@@ -2779,7 +2835,7 @@ const ZoneManagement = () => {
       z.name, z.code, z.zone_type, z.status, z.hazard_level,
       z.current_personnel_count ?? 0,
       z.max_capacity ? `${z.current_personnel_count ?? 0}/${z.max_capacity}` : '',
-      z.state || '', z.device_count ?? z.reader_count ?? 0,
+      z.state || '', zoneReaders(z),
       z.latitude || '', z.longitude || '',
     ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(','));
     const blob = new Blob([[header.join(','), ...lines].join('\n')], { type: 'text/csv' });
@@ -2843,7 +2899,7 @@ const ZoneManagement = () => {
             <div>
               <div style={{ fontWeight: 700, fontSize: 16 }}>Zone Management</div>
               <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
-                Real-time personnel tracking via ZKTeco ADMS readers over 4G
+                Who is where on site — from ZKTeco access-control doors and readers
               </div>
             </div>
             <Space size="middle" style={{ overflow: 'visible' }}>
@@ -2891,7 +2947,7 @@ const ZoneManagement = () => {
             { label: 'Active Zones',              value: activeZones,         color: '#059669', icon: <CheckCircleOutlined /> },
             { label: 'Zones',                     value: operationalZones,    color: '#374151', icon: <RadarChartOutlined /> },
             { label: 'Muster Points',             value: musterPoints.length, color: '#10B981', icon: <SafetyOutlined /> },
-            { label: 'ADMS Readers',              value: totalReaders,        color: '#6D28D9', icon: <ApiOutlined /> },
+            { label: 'Doors & Readers',           value: totalReaders,        color: '#6D28D9', icon: <ApiOutlined /> },
             { label: 'Alerts',                    value: alerts,              color: alerts > 0 ? '#DC2626' : '#94a3b8', icon: <AlertOutlined /> },
           ].map(s => (
             <Col key={s.label} xs={12} sm={4}>
@@ -3046,7 +3102,13 @@ const ZoneManagement = () => {
                             onEdit={handleEdit}
                             onAssignReader={handleAssignReader}
                             onDelete={id => deleteMutation.mutate({ id })}
-                            onStatusChange={(id, s) => patchStatusM.mutate({ id, status: s })}
+                            onStatusChange={(id, s) => (s === 'LOCKDOWN'
+                              ? modal.confirm({
+                                  title: 'Lock down this zone?', okType: 'danger', okText: 'Lock doors',
+                                  content: "Every door into the zone is locked (fire exits stay free). Setting it back to Active unlocks them. The response team is alerted.",
+                                  onOk: () => patchStatusM.mutate({ id, status: s }),
+                                })
+                              : patchStatusM.mutate({ id, status: s }))}
                             onResetOccupancy={id => resetOccupancyM.mutate(id)}
                           />
                         </Col>
@@ -3367,8 +3429,8 @@ const ZoneManagement = () => {
                       /* ── Readers ── */
                       {
                         title: 'Readers', key: 'reader_count', width: 90, align: 'center',
-                        sorter: (a, b) => (a.device_count ?? a.reader_count ?? 0) - (b.device_count ?? b.reader_count ?? 0),
-                        render: (_, row) => { const n = row.device_count ?? row.reader_count ?? 0; return (
+                        sorter: (a, b) => zoneReaders(a) - zoneReaders(b),
+                        render: (_, row) => { const n = zoneReaders(row); return (
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5 }}>
                             <ApiOutlined style={{ color: n > 0 ? '#7C3AED' : '#D1D5DB', fontSize: 13 }} />
                             <span style={{ fontWeight: 700, color: n > 0 ? '#7C3AED' : '#9CA3AF', fontSize: 13 }}>{n ?? 0}</span>
@@ -3735,6 +3797,11 @@ const ZoneManagement = () => {
           <WifiOutlined />
           Access doors map controller events to this zone (controller port → door → zone). Standalone Horus H1 readers go to mustering points, not here.
         </div>
+        {availableDoors.length === 0 && (
+          <Alert type="info" showIcon style={{ marginBottom: 12 }}
+            message="No ZKTeco controller doors yet"
+            description="Add the controllers under Access Control → Controllers; each door then appears here to assign to a zone." />
+        )}
         <Form form={readerForm} layout="vertical">
           <Form.Item name="door" label="Select Doors (one or more)" rules={[{ required: true, message: 'Please select at least one door' }]}>
             <Select

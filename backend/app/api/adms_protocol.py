@@ -1531,10 +1531,29 @@ def _recalc_zone_occupancy(zone_id: int, db: Session) -> int:
         ) last WHERE last.event_type = 'CLOCK_IN'
     """), {"zid": zone_id}).fetchone()
     cnt = int(row.cnt) if row else 0
+    before = db.execute(text("SELECT current_occupancy, max_capacity, name FROM zones WHERE id = :zid"),
+                        {"zid": zone_id}).fetchone()
     db.execute(text("""
         UPDATE zones SET current_occupancy = :cnt, current_personnel_count = :cnt,
             updated_at = NOW() WHERE id = :zid
     """), {"cnt": cnt, "zid": zone_id})
+    # Crossing the zone's capacity (a lifeboat station, the helideck, a room) is a
+    # safety limit: tell everyone signed in — once per crossing, not on every tap.
+    if before and before.max_capacity and cnt > before.max_capacity >= (before.current_occupancy or 0):
+        try:
+            db.execute(text("""
+                INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, link, expires_at)
+                VALUES (:dk, 'zone_over_capacity', :t, :m, 'high', '/zones', NOW() + INTERVAL '12 hours')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {"dk": f"zone_cap_{zone_id}_{datetime.now(timezone.utc):%Y%m%d%H%M}",
+                   "t": f"{before.name} over capacity — {cnt}/{before.max_capacity}",
+                   "m": f"{before.name} now has {cnt} people; its limit is {before.max_capacity}."})
+            from .notifications import notify_sync
+            notify_sync({"type": "zone_over_capacity", "priority": "high", "link": "/zones",
+                         "title": f"{before.name} over capacity — {cnt}/{before.max_capacity}",
+                         "message": f"{before.name} now has {cnt} people; its limit is {before.max_capacity}."})
+        except Exception as e:  # noqa: BLE001 — never block a door tap on a notification
+            logger.warning("over-capacity notice for zone %s failed: %s", zone_id, e)
     # Push the new count to the POB dashboard live, from any context (ADMS push,
     # direct poll, live-capture, reset) — so it updates without a refresh.
     try:
