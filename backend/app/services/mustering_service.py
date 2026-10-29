@@ -435,6 +435,9 @@ class MusteringService:
             device = self.db.query(IClockTerminal).filter(IClockTerminal.sn == device_sn).first()
             if not device:
                 raise ValueError(f"Device {device_sn} not found")
+            if (device.reader_purpose or "ATTENDANCE") == "ATTENDANCE" and getattr(device, "device_type", None) != 2:
+                # T&A terminals can be in another state/country — never a muster reader.
+                raise ValueError(f"{device_sn} is a time & attendance terminal — mustering uses access-control readers only")
             
             # Find zone for this device — reader_sn, then the terminal's assigned
             # zone_id (per-location headcount), then any active event zone.

@@ -235,26 +235,51 @@ def test_gate_exit_during_muster_marks_left_site(db, make_person, make_zone, sen
 
 
 @needs_db
-def test_any_reader_at_a_muster_point_counts_people_safe(db, make_person, make_zone, sent):
+def test_access_reader_at_a_muster_point_counts_people_safe_but_ta_terminal_never(db, make_person, make_zone, sent):
+    """Mustering is access-control only: a T&A terminal (which can be in another state or
+    country) never checks anyone in, even standing in a muster-point zone."""
     from app.api.adms_protocol import handle_attlog
     from app.services.mustering_service import MusteringService
     from datetime import datetime, timezone
     area = make_zone()
-    sn = "AT" + uuid.uuid4().hex[:8].upper()
-    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) VALUES (:sn, 'gate F18', 1, 'ATTENDANCE')"), {"sn": sn})
+    ta, acc = "AT" + uuid.uuid4().hex[:8].upper(), "AC" + uuid.uuid4().hex[:8].upper()
     mp = db.execute(text("INSERT INTO zones (name, code, zone_type, status, reader_sn) VALUES (:n, :c, 'MUSTER_POINT', 'active', :sn) RETURNING id"),
-                    {"n": "MP " + sn, "c": uuid.uuid4().hex[:10].upper(), "sn": sn}).scalar()
+                    {"n": "MP " + acc, "c": uuid.uuid4().hex[:10].upper(), "sn": acc}).scalar()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose, zone_id) VALUES (:sn, 'T&A F18', 1, 'ATTENDANCE', :z)"), {"sn": ta, "z": mp})
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose, zone_id) VALUES (:sn, 'MP door', 1, 'ACCESS_ENTRY', :z)"), {"sn": acc, "z": mp})
     db.commit()
     pin = str(uuid.uuid4().int)[:8]
     p = make_person(attendance_id=pin)
     _set(db, p["emp_code"], True, area)
     ev = MusteringService(db).start_mustering_event([area], 0, 1, muster_zone_ids=[mp])["event_id"]
+    status = lambda: db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
+                                {"e": ev, "c": p["emp_code"]}).scalar()
+    now = lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        handle_attlog([{"PIN": pin, "Time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "Status": "0"}], sn, db)
-        assert db.execute(text("SELECT status FROM mustering_log WHERE event_id = :e AND emp_code = :c"),
-                          {"e": ev, "c": p["emp_code"]}).scalar() == 1
+        handle_attlog([{"PIN": pin, "Time": now(), "Status": "0"}], ta, db)
+        assert status() == 0                                   # T&A tap: still missing
+        handle_attlog([{"PIN": pin, "Time": now(), "Status": "0"}], acc, db)
+        assert status() == 1                                   # access reader at the point: safe
     finally:
         _end(db, ev)
+
+
+@needs_db
+def test_ta_tap_does_not_put_anyone_on_board_or_on_a_muster_list(db, make_person, make_zone):
+    from app.api.adms_protocol import handle_attlog
+    from datetime import datetime, timezone
+    sn = "AT" + uuid.uuid4().hex[:8].upper()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) VALUES (:sn, 'Lagos office F18', 1, 'ATTENDANCE')"), {"sn": sn})
+    db.commit()
+    pin = str(uuid.uuid4().int)[:8]
+    p = make_person(attendance_id=pin)
+    db.execute(text("UPDATE personnel SET is_onboard = FALSE, current_zone_id = NULL WHERE emp_code = :c"), {"c": p["emp_code"]})
+    db.commit()
+    handle_attlog([{"PIN": pin, "Time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "Status": "0"}], sn, db)
+    row = db.execute(text("SELECT is_onboard, current_zone_id FROM personnel WHERE emp_code = :c"), {"c": p["emp_code"]}).first()
+    assert row.is_onboard is False and row.current_zone_id is None
+    assert db.execute(text("SELECT count(*) FROM iclock_transaction WHERE emp_code = :c AND terminal_sn = :sn"),
+                      {"c": p["emp_code"], "sn": sn}).scalar() == 1      # attendance still recorded
 
 
 @needs_db

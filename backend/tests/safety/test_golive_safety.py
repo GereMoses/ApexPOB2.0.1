@@ -90,9 +90,11 @@ def test_zone_moves_parent_exit_late_upload_and_boundary(db, make_person, make_z
 
 
 @needs_db
-def test_attendance_tap_marked_check_out_puts_person_on_board(db, make_person):
+def test_attendance_tap_never_changes_on_board_status(db, make_person):
+    """T&A terminals can be in another state or country: a tap there (in or out) leaves
+    on-board status — and so the muster list — exactly as it was."""
     from app.api.adms_protocol import handle_attlog
-    p = make_person(attendance_id="77001")
+    p = make_person(attendance_id="77001", onboard=True)
     db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) "
                     "VALUES ('SAFETYTEST1', 't', 1, 'ATTENDANCE') ON CONFLICT DO NOTHING"))
     db.commit()

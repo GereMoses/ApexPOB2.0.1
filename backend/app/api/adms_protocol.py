@@ -508,11 +508,16 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
     # if EITHER its access-door has mustering_mode set OR its purpose is MUSTERING
     # (the simple way to designate a Horus handheld at a muster point) OR it's a
     # mustering-type terminal (device_type=2).
+    #
+    # Time & attendance terminals NEVER take part in mustering: they can be in another
+    # state or country. Mustering works on access-control readers only (zones + doors).
     acc_door = db.query(AccDoor).filter(AccDoor.terminal_sn == sn).first()
-    mustering_mode = (bool(acc_door and getattr(acc_door, 'mustering_mode', False))
-                      or reader_purpose == 'MUSTERING'
-                      or getattr(terminal, 'device_type', None) == 2)
-    if not mustering_mode:
+    ta_terminal = reader_purpose == 'ATTENDANCE' and getattr(terminal, 'device_type', None) != 2
+    mustering_mode = (not ta_terminal) and (
+        bool(acc_door and getattr(acc_door, 'mustering_mode', False))
+        or reader_purpose == 'MUSTERING'
+        or getattr(terminal, 'device_type', None) == 2)
+    if not mustering_mode and not ta_terminal:
         # Any reader that stands at a MUSTER POINT (placed there on the zone, or the
         # zone names it as its reader) counts people safe while a muster is running —
         # no need to re-purpose it, and it goes back to normal when the muster ends.
@@ -552,6 +557,14 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
         # relying on the device's Status field (which may be 0 for both on some models).
         if reader_purpose in ('ACCESS_ENTRY', 'ACCESS_EXIT'):
             direction = 'ENTRY' if reader_purpose == 'ACCESS_ENTRY' else 'EXIT'
+            if mustering_mode:
+                # An access-control door at a muster point counts the person safe while a
+                # muster runs — and is still recorded as a normal door tap below.
+                try:
+                    MusteringService(db).process_mustering_punch(emp_code=emp_code, device_sn=sn, check_time=punch_time)
+                except Exception as e:
+                    logger.warning(f"Muster check-in at access reader {sn} for {emp_code}: {e}")
+                    db.rollback()
             try:
                 updates = _handle_zone_access(emp_code, sn, punch_time, terminal, direction, db)
                 zone_updates.update(updates)
@@ -687,25 +700,10 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
             affected_codes.add(emp_code)
             affected_dates.add(punch_time.strftime('%Y-%m-%d'))
 
-            try:
-                _update_zone_personnel_count(emp_code, sn, punch_state, punch_time, db)
-            except Exception as ze:
-                logger.warning(f"Zone tracking non-fatal error: {ze}")
-
-            # Maintain on-board status so the POB dashboard reflects reality.
-            try:
-                # The reader's In/Out key is not trusted (the F18 stamps every tap
-                # Check-Out), so a tap at an attendance reader only ever says "this
-                # person is on site". Leaving site is an EXIT at a site-boundary
-                # reader, or the inactivity auto-checkout. punch_state_mode=device
-                # restores the old key-driven behaviour.
-                if _punch_state_mode(db) == 'device':
-                    _onb = True if punch_state in (0, 4) else (False if punch_state in (1, 5) else None)
-                else:
-                    _onb = True
-                _mark_onboard(emp_code, _onb, db, location=zone_name)
-            except Exception as oe:
-                logger.warning(f"Onboard status non-fatal error: {oe}")
+            # A T&A tap is attendance only. It does NOT put anyone on board, move them
+            # into a zone or onto a muster list: T&A terminals can be in another state
+            # or country. Presence on site, zones and mustering come from access-control
+            # readers (_handle_zone_access / C3 controllers) and flight manifests.
 
         except Exception as e:
             logger.error(f"ATTLOG save error {emp_code}@{sn}: {e}")
@@ -1565,64 +1563,6 @@ def _recalc_zone_occupancy(zone_id: int, db: Session) -> int:
     except Exception:
         pass
     return cnt
-
-
-def _update_zone_personnel_count(
-    emp_code: str, device_sn: str, punch_state: int, punch_time: datetime, db: Session
-) -> None:
-    zone_row = db.execute(text("""
-        SELECT zra.zone_id
-        FROM zone_reader_assignments zra
-        JOIN devices d ON d.id = zra.reader_id
-        WHERE d.serial_number = :sn AND zra.status = 'active'
-        LIMIT 1
-    """), {"sn": device_sn}).fetchone()
-
-    if not zone_row:
-        zone_row = db.execute(text(
-            "SELECT zone_id FROM iclock_terminal WHERE sn = :sn LIMIT 1"
-        ), {"sn": device_sn}).fetchone()
-        if not zone_row or not zone_row.zone_id:
-            return
-
-    zone_id  = zone_row.zone_id
-    is_entry = punch_state in (0, 4)
-    event_type = "CLOCK_IN" if is_entry else "CLOCK_OUT"
-
-    # Where is this person currently "inside"? (their most recent tracking event)
-    prev_row = db.execute(text("""
-        SELECT zone_id, event_type FROM zone_personnel_tracking
-        WHERE emp_code = :emp_code ORDER BY punch_time DESC LIMIT 1
-    """), {"emp_code": emp_code}).fetchone()
-    previous_zone_id = prev_row.zone_id if prev_row else None
-    previously_inside = bool(prev_row) and prev_row.event_type == 'CLOCK_IN'
-
-    # Entering a different zone → auto-exit the previous one so the person is only
-    # counted in ONE place at a time. Without this CLOCK_OUT they stay 'CLOCK_IN'
-    # in the old zone and get double-counted (mirrors _handle_zone_access).
-    if is_entry and previously_inside and previous_zone_id and previous_zone_id != zone_id:
-        db.execute(text("""
-            INSERT INTO zone_personnel_tracking
-                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
-            VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :zid)
-        """), {"zid": previous_zone_id, "ec": emp_code, "sn": device_sn, "pt": punch_time})
-
-    db.execute(text("""
-        INSERT INTO zone_personnel_tracking
-            (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
-        VALUES (:zone_id, :emp_code, :device_sn, :event_type, :punch_time, :prev_zone_id)
-    """), {
-        "zone_id": zone_id, "emp_code": emp_code, "device_sn": device_sn,
-        "event_type": event_type, "punch_time": punch_time, "prev_zone_id": previous_zone_id,
-    })
-
-    _recalc_zone_occupancy(zone_id, db)
-
-    if previous_zone_id and previous_zone_id != zone_id and is_entry:
-        _recalc_zone_occupancy(previous_zone_id, db)
-
-    db.commit()
-    logger.debug(f"Zone {zone_id} updated after {event_type} by {emp_code}")
 
 
 def _punch_state_mode(db: Session) -> str:

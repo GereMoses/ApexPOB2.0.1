@@ -1377,6 +1377,9 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
                 label="Reader Purpose"
                 initialValue="ATTENDANCE"
                 rules={[{ required: true, message: 'Select reader purpose' }]}
+                extra={readerPurpose === 'ATTENDANCE' || !readerPurpose
+                  ? 'Attendance only. A T&A reader can be in another state or country, so its taps never put anyone on board, into a zone or on a muster list.'
+                  : 'Access-control readers work with zones and doors: they decide who is on board, where they are, and who is safe at a muster point.'}
               >
                 <Select>
                   <Option value="ATTENDANCE">T&amp;A Reader (Time &amp; Attendance)</Option>
