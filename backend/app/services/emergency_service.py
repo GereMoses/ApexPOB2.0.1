@@ -81,13 +81,9 @@ class EmergencyService:
             ).all()
             
             # Count doors by emergency action
-            locked_doors = db.query(AccDoor).filter(
-                AccDoor.emergency_action == 1  # LOCK
-            ).count()
-            
-            unlocked_doors = db.query(AccDoor).filter(
-                AccDoor.emergency_action == 2  # UNLOCK
-            ).count()
+            # Doors as last commanded from ApexPOB (not their emergency configuration).
+            locked_doors = db.query(AccDoor).filter(AccDoor.lock_state == "locked").count()
+            unlocked_doors = db.query(AccDoor).filter(AccDoor.lock_state == "unlocked").count()
             
             # Count active emergency devices
             sirens_on = db.query(EmergencyDevice).filter(
@@ -138,6 +134,7 @@ class EmergencyService:
                 ],
                 "doors_locked": locked_doors,
                 "doors_unlocked": unlocked_doors,
+                "doors_total": db.query(AccDoor).count(),
                 "sirens_on": sirens_on,
                 "recent_events": [
                     {
@@ -254,8 +251,68 @@ class EmergencyService:
             logger.error(f"Siren {device.id} (ctrl {device.controller_id} aux {device.aux_no}) {'on' if on else 'off'} failed: {e}")
             return False, str(e)
 
+    async def _command_door(self, db: Session, door: AccDoor, action: str, by: str) -> Tuple[bool, Optional[str]]:
+        """Lock / unlock one door (C3 controller port or standalone terminal relay) and
+        record the outcome on the door, so the operator sees its real state."""
+        try:
+            if getattr(door, "controller_id", None) and door.port is not None:
+                ok, err = await self._command_controller_door(db, door, action)
+            elif door.terminal:
+                res = await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF" if action == "lock" else "RELAY_ON")
+                ok, err = bool(res.get("success")), (None if res.get("success") else res.get("error") or "Command failed")
+            else:
+                ok, err = False, "Door is not wired to a controller or terminal"
+        except Exception as e:  # noqa: BLE001
+            ok, err = False, str(e)
+        now = datetime.now(timezone.utc)
+        if ok:
+            door.lock_state = "locked" if action == "lock" else "unlocked"
+            door.lock_state_error = None
+        else:
+            door.lock_state_error = f"{action} failed: {err}"
+        door.lock_state_at, door.lock_state_by = now, by
+        return ok, err
+
+    @staticmethod
+    def _add_action(event, action: Dict[str, Any]) -> None:
+        """Append to the event's JSON action log. Reassign (not .append) so SQLAlchemy
+        sees the change — an in-place append on a JSON column is silently not saved."""
+        event.actions = [*(event.actions or []), action]
+
+    @staticmethod
+    def _user_label(db: Session, user_id: Optional[int]) -> str:
+        if not user_id:
+            return "System"
+        u = db.query(AuthUser).filter(AuthUser.id == user_id).first()
+        return (f"{u.first_name or ''} {u.last_name or ''}".strip() or u.username) if u else f"user #{user_id}"
+
+    def door_states(self, db: Session) -> Dict[str, Any]:
+        """Every door with its last commanded state and its controller's health."""
+        from .controller_doors import ensure_all_controller_doors
+        ensure_all_controller_doors(db)
+        ctrls = {c.id: c for c in db.query(AccessController).all()}
+        rows = []
+        for d in db.query(AccDoor).order_by(AccDoor.name).all():
+            c = ctrls.get(d.controller_id)
+            online = (c.status == "online") if c is not None else None
+            rows.append({
+                "id": d.id, "name": d.name,
+                "controller": c.name if c else (d.terminal_sn or None),
+                "controller_online": online,
+                "emergency_action": d.emergency_action or 0,
+                "state": d.lock_state or "normal",
+                "changed_at": d.lock_state_at.isoformat() if d.lock_state_at else None,
+                "changed_by": d.lock_state_by,
+                "error": d.lock_state_error,
+            })
+        summary = {"total": len(rows),
+                   "locked": sum(r["state"] == "locked" for r in rows),
+                   "unlocked": sum(r["state"] == "unlocked" for r in rows),
+                   "problems": sum(bool(r["error"]) or r["controller_online"] is False for r in rows)}
+        return {"summary": summary, "doors": rows}
+
     async def execute_lockdown(
-        self, 
+        self,
         scope: str,
         zone_ids: Optional[List[int]] = None,
         location_ids: Optional[List[int]] = None,
@@ -265,25 +322,30 @@ class EmergencyService:
         initiated_by: Optional[int] = None,
         db: Session = None
     ) -> Dict[str, Any]:
-        """Execute emergency lockdown with full audit trail"""
-        
+        """Lock or unlock doors, record each door's state, alert the response team.
+
+        Which doors a Global/Zone command touches:
+          lock   → every door except fire exits (emergency action "unlock"), which stay
+                   free so people can get out
+          unlock → every door except secure doors (emergency action "lock"), which stay
+                   locked in an emergency
+        Doors picked one by one (scope "door") always get the command.
+        Unlocking ends the lockdown(s) it releases — it is not a new emergency.
+        """
         if db is None:
             db = next(get_db())
-        
+
         try:
-            # Validate action
             if action not in ["lock", "unlock"]:
                 raise ValueError("Action must be 'lock' or 'unlock'")
             from .controller_doors import ensure_all_controller_doors
             ensure_all_controller_doors(db)
-            
-            # Determine scope and target doors
+
             if scope == "global":
                 target_doors = db.query(AccDoor).all()
                 scope_enum = EmergencyScope.GLOBAL.value
             elif scope == "zone" and zone_ids:
-                # Muster/assembly points are safe destinations, not lockdown targets —
-                # drop them so they're neither commanded nor recorded as affected zones.
+                # Muster/assembly points are safe destinations, not lockdown targets.
                 muster_ids = self._muster_zone_ids(db)
                 zone_ids = [z for z in zone_ids if z not in muster_ids]
                 if not zone_ids:
@@ -291,9 +353,6 @@ class EmergencyService:
                         "Muster points are safe assembly areas and cannot be locked "
                         "down or evacuated. Select operational zones instead."
                     )
-                # Two door kinds map to a zone: legacy T&A/standalone doors via their
-                # terminal's zone_id, and access-control doors via a controller port
-                # (controller_id + port) mapped to an AccessReader in the zone.
                 terminal_doors = db.query(AccDoor).join(IClockTerminal).filter(
                     IClockTerminal.zone_id.in_(zone_ids)
                 ).all()
@@ -302,169 +361,166 @@ class EmergencyService:
                 )
                 scope_enum = EmergencyScope.ZONE.value
             elif scope == "location" and location_ids:
-                # Location = personnel_area: lock every door on terminals in those areas.
-                # (Controllers carry a free-text location, not an area_id, so
-                # location scope stays terminal-based; use zone or global for panels.)
                 target_doors = db.query(AccDoor).join(IClockTerminal).filter(
                     IClockTerminal.area_id.in_(location_ids)
                 ).all()
                 scope_enum = EmergencyScope.LOCATION.value
             elif scope == "door" and door_ids:
-                target_doors = db.query(AccDoor).filter(
-                    AccDoor.id.in_(door_ids)
-                ).all()
+                target_doors = db.query(AccDoor).filter(AccDoor.id.in_(door_ids)).all()
                 scope_enum = EmergencyScope.DOOR.value
             else:
                 raise ValueError("Invalid scope or missing target identifiers")
-            
-            # No doors is not a hard failure — the emergency event is still recorded
-            # for audit trail purposes and any door-command loop simply no-ops.
-            
-            # Create emergency event
+
+            by = self._user_label(db, initiated_by)
+            verb = "locked" if action == "lock" else "unlocked"
+            results: List[Dict[str, Any]] = []
+            to_send: List[AccDoor] = []
+            for door in target_doors:
+                keep = 2 if action == "lock" else 1          # emergency_action that is left alone
+                if scope != "door" and (door.emergency_action or 0) == keep:
+                    results.append({"door_id": door.id, "door_name": door.name, "result": "skipped",
+                                    "reason": "Fire exit — kept free so people can get out" if action == "lock"
+                                    else "Secure door — stays locked in an emergency"})
+                else:
+                    to_send.append(door)
+
+            # One panel takes one connection at a time: doors on the same controller go
+            # in turn, different controllers in parallel (an unreachable panel must not
+            # hold up the rest of the site).
+            groups: Dict[Any, List[AccDoor]] = {}
+            for d in to_send:
+                groups.setdefault(d.controller_id or f"t:{d.terminal_sn}", []).append(d)
+
+            async def run_group(doors):
+                out = []
+                for d in doors:
+                    ok, err = await self._command_door(db, d, action, by)
+                    out.append({"door_id": d.id, "door_name": d.name,
+                                "result": "done" if ok else "failed", "reason": None if ok else err})
+                return out
+            for chunk in await asyncio.gather(*(run_group(g) for g in groups.values())):
+                results.extend(chunk)
+
+            done = [r for r in results if r["result"] == "done"]
+            failed = [r for r in results if r["result"] == "failed"]
+            skipped = [r for r in results if r["result"] == "skipped"]
+            now = datetime.now(timezone.utc)
+
+            if not target_doors:
+                msg = ("No doors are set up yet — add the ZKTeco controllers under Access Control → "
+                       "Controllers. Nothing was locked or unlocked.")
+            else:
+                msg = f"{len(done)} of {len(target_doors)} door(s) {verb}"
+                if failed:
+                    msg += f"; {len(failed)} FAILED — check them now"
+                if skipped:
+                    msg += f"; {len(skipped)} left as they were"
+                msg += "."
+
             emergency_event = EmergencyEvent(
                 event_type=EmergencyEventType.LOCKDOWN.value,
-                status=EmergencyStatus.ACTIVE.value,
+                # A lockdown stays ACTIVE until released; an unlock (or a command that
+                # touched nothing) is a completed action, not a running emergency.
+                status=(EmergencyStatus.ACTIVE.value if action == "lock" and done
+                        else EmergencyStatus.RESOLVED.value),
                 scope=scope_enum,
                 zone_ids=zone_ids,
                 door_ids=[d.id for d in target_doors],
                 initiated_by=initiated_by,
                 initiated_type=EmergencyInitiatedType.MANUAL_UI.value,
                 trigger_source="Web UI",
-                reason=reason or f"Emergency {action} from Access Control panel",
-                actions=[{
-                    "type": "lockdown",
-                    "action": action,
-                    "doors": [d.id for d in target_doors],
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }]
+                reason=reason or f"Emergency {action}",
+                end_time=None if (action == "lock" and done) else now,
+                actions=[{"type": "lockdown", "action": action, "doors": [d.id for d in target_doors],
+                          "processed_doors": [r["door_id"] for r in done], "failed_doors": failed,
+                          "skipped_doors": skipped, "timestamp": now.isoformat()}],
             )
-            
             db.add(emergency_event)
-            db.flush()  # Get the ID
-            
-            # Process each door
-            processed_doors = []
-            failed_doors = []
-            
-            for door in target_doors:
-                try:
-                    # Access-control door (controller + port): command the C3 panel
-                    # directly (off-thread), honouring the door's emergency_action.
-                    if getattr(door, "controller_id", None) and door.port is not None:
-                        want = 1 if action == "lock" else 2
-                        if door.emergency_action != want:
-                            continue  # this door isn't configured for this action
-                        ok, err = await self._command_controller_door(db, door, action)
-                        if ok:
-                            processed_doors.append(door.id)
-                        else:
-                            failed_doors.append({
-                                "door_id": door.id,
-                                "door_name": door.name,
-                                "error": err,
-                            })
-                        continue
+            db.flush()
 
-                    # Queue command to ZKTeco device
-                    terminal = door.terminal
-                    if not terminal:
-                        failed_doors.append({
-                            "door_id": door.id,
-                            "door_name": door.name,
-                            "error": "No terminal associated"
-                        })
-                        continue
+            released = 0
+            if action == "unlock":
+                # A lockdown is over once none of its doors is still locked.
+                # Secure doors (emergency action "lock") are meant to stay locked, so they
+                # don't keep a lockdown open.
+                still_locked = {d.id for d in db.query(AccDoor.id).filter(
+                    AccDoor.lock_state == "locked", or_(AccDoor.emergency_action.is_(None), AccDoor.emergency_action != 1)).all()}
+                for ev in db.query(EmergencyEvent).filter(
+                        EmergencyEvent.event_type == EmergencyEventType.LOCKDOWN.value,
+                        EmergencyEvent.status == EmergencyStatus.ACTIVE.value,
+                        EmergencyEvent.id != emergency_event.id).all():
+                    if not (set(ev.door_ids or []) & still_locked):
+                        ev.status, ev.end_time = EmergencyStatus.RESOLVED.value, now
+                        released += 1
 
-                    # Determine command based on action and door emergency_action
-                    if action == "lock":
-                        # Lock doors with emergency_action=1 (LOCK)
-                        if door.emergency_action == 1:
-                            cmd_result = await self.zkteco_queue_command(
-                                terminal.sn, "RELAY_OFF"
-                            )
-                            if cmd_result.get("success"):
-                                processed_doors.append(door.id)
-                            else:
-                                failed_doors.append({
-                                    "door_id": door.id,
-                                    "door_name": door.name,
-                                    "error": cmd_result.get("error", "Command failed")
-                                })
-                    elif action == "unlock":
-                        # Unlock doors with emergency_action=2 (UNLOCK)
-                        if door.emergency_action == 2:
-                            cmd_result = await self.zkteco_queue_command(
-                                terminal.sn, "RELAY_ON"
-                            )
-                            if cmd_result.get("success"):
-                                processed_doors.append(door.id)
-                            else:
-                                failed_doors.append({
-                                    "door_id": door.id,
-                                    "door_name": door.name,
-                                    "error": cmd_result.get("error", "Command failed")
-                                })
-                    
-                except Exception as e:
-                    failed_doors.append({
-                        "door_id": door.id,
-                        "door_name": door.name,
-                        "error": str(e)
-                    })
-                    logger.error(f"Error processing door {door.id}: {str(e)}")
-            
-            # Update emergency event with results
-            emergency_event.actions[0]["processed_doors"] = processed_doors
-            emergency_event.actions[0]["failed_doors"] = failed_doors
-            
-            # Log operation
             await self.log_emergency_operation(
-                db=db,
-                user_id=initiated_by,
-                action=f"EMERGENCY_{action.upper()}",
-                target_type="door",
-                target_ids=[d.id for d in target_doors],
-                emergency_event_id=emergency_event.id,
-                details={
-                    "scope": scope,
-                    "action": action,
-                    "processed_count": len(processed_doors),
-                    "failed_count": len(failed_doors),
-                    "reason": reason
-                }
-            )
-            
+                db=db, user_id=initiated_by, action=f"EMERGENCY_{action.upper()}", target_type="door",
+                target_ids=[d.id for d in target_doors], emergency_event_id=emergency_event.id,
+                details={"scope": scope, "action": action, "processed_count": len(done),
+                         "failed_count": len(failed), "skipped_count": len(skipped), "reason": reason})
             db.commit()
-            
-            # Broadcast WebSocket update
+
+            if target_doors:
+                self._announce_lockdown(db, emergency_event.id, action, scope, by, reason, msg, failed)
+
             await self.broadcast_emergency_update({
                 "type": "emergency_lockdown",
-                "data": {
-                    "emergency_event_id": emergency_event.id,
-                    "action": action,
-                    "scope": scope,
-                    "processed_doors": len(processed_doors),
-                    "failed_doors": len(failed_doors),
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }
+                "data": {"emergency_event_id": emergency_event.id, "action": action, "scope": scope,
+                         "processed_doors": len(done), "failed_doors": len(failed),
+                         "timestamp": now.isoformat()},
             })
-            
+
             return {
-                "success": True,
+                "success": bool(target_doors) and not failed,
                 "emergency_event_id": emergency_event.id,
                 "action": action,
                 "scope": scope,
                 "total_doors": len(target_doors),
-                "processed_doors": len(processed_doors),
-                "failed_doors": len(failed_doors),
-                "failed_details": failed_doors,
-                "message": f"Emergency {action} completed. {len(processed_doors)} doors processed."
+                "processed_doors": len(done),
+                "failed_doors": len(failed),
+                "skipped_doors": len(skipped),
+                "lockdowns_ended": released,
+                "doors": results,
+                "failed_details": failed,
+                "message": msg,
             }
-            
+
         except Exception as e:
             db.rollback()
             logger.error(f"Error executing lockdown: {str(e)}")
             raise
+
+    def _announce_lockdown(self, db: Session, event_id: int, action: str, scope: str, by: str,
+                           reason: Optional[str], summary: str, failed: List[Dict[str, Any]]) -> None:
+        """Bell notification for everyone signed in + WhatsApp/Telegram/email to the response team."""
+        word = "LOCKDOWN" if action == "lock" else "DOORS UNLOCKED"
+        where = {"global": "whole site", "zone": "selected zones", "door": "selected doors"}.get(scope, scope)
+        text_ = f"{word} ({where}) by {by}: {summary}"
+        if reason:
+            text_ += f" Reason: {reason}."
+        if failed:
+            text_ += " Failed: " + ", ".join(f["door_name"] for f in failed[:10]) + ("…" if len(failed) > 10 else "")
+        title = f"{word} — {summary}"[:200]
+        priority = "critical" if failed or action == "lock" else "high"
+        try:
+            db.execute(text("""
+                INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, link, expires_at)
+                VALUES (:dk, 'emergency', :title, :msg, :pri, '/emergency-response', NOW() + INTERVAL '12 hours')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {"dk": f"lockdown-{event_id}", "title": title, "msg": text_, "pri": priority})
+            db.commit()
+            from ..api.notifications import broadcast_notification
+            asyncio.get_running_loop().create_task(broadcast_notification(
+                {"type": "emergency", "title": title, "message": text_, "priority": priority,
+                 "link": "/emergency-response"}))
+        except Exception as e:  # noqa: BLE001 — a notification must never undo the door commands
+            db.rollback()
+            logger.warning(f"Lockdown bell notification skipped: {e}")
+        try:
+            from .notify_dispatch import dispatch_background
+            dispatch_background("lockdown", event_id, [], title, text_, None, include_responders=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Lockdown team alert skipped: {e}")
 
     async def activate_fire_mode(
         self,
@@ -550,19 +606,14 @@ class EmergencyService:
                 for door in fire_exit_doors:
                     sp = db.begin_nested()
                     try:
-                        if door.terminal:
-                            await self.zkteco_queue_command(door.terminal.sn, "RELAY_ON")
-                            results["unlocked_doors"] += 1
-                        elif door.controller_id and door.port is not None:
-                            ok, _err = await self._command_controller_door(db, door, "unlock")
-                            if ok:
-                                results["unlocked_doors"] += 1
+                        ok, _err = await self._command_door(db, door, "unlock", "Fire mode")
+                        results["unlocked_doors"] += 1 if ok else 0
                         sp.commit()
                     except Exception as e:
                         logger.error(f"Error unlocking fire exit {door.id}: {str(e)}")
                         sp.rollback()  # roll back only this door; prior commands are preserved
 
-                emergency_event.actions.append({
+                self._add_action(emergency_event, {
                     "type": "unlock_fire_exits",
                     "doors": [d.id for d in fire_exit_doors],
                     "count": results["unlocked_doors"],
@@ -578,19 +629,14 @@ class EmergencyService:
                 for door in danger_zone_doors:
                     sp = db.begin_nested()
                     try:
-                        if door.terminal:
-                            await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF")
-                            results["locked_doors"] += 1
-                        elif door.controller_id and door.port is not None:
-                            ok, _err = await self._command_controller_door(db, door, "lock")
-                            if ok:
-                                results["locked_doors"] += 1
+                        ok, _err = await self._command_door(db, door, "lock", "Fire mode")
+                        results["locked_doors"] += 1 if ok else 0
                         sp.commit()
                     except Exception as e:
                         logger.error(f"Error locking danger zone {door.id}: {str(e)}")
                         sp.rollback()
 
-                emergency_event.actions.append({
+                self._add_action(emergency_event, {
                     "type": "lock_danger_zones",
                     "doors": [d.id for d in danger_zone_doors],
                     "count": results["locked_doors"],
@@ -619,7 +665,7 @@ class EmergencyService:
                         logger.error(f"Error activating siren {device.id}: {str(e)}")
                         sp.rollback()
 
-                emergency_event.actions.append({
+                self._add_action(emergency_event, {
                     "type": "siren_activation",
                     "devices": [d.id for d in emergency_devices],
                     "count": results["sirens_activated"],
@@ -660,7 +706,7 @@ class EmergencyService:
                     emergency_event.mustering_event_id = mustering_event_id
                     results["mustering_started"] = True
 
-                    emergency_event.actions.append({
+                    self._add_action(emergency_event, {
                         "type": "start_mustering",
                         "mustering_event_id": mustering_event_id,
                         "zone_ids": mustering_zone_ids,
@@ -704,7 +750,7 @@ class EmergencyService:
                         results["sirens_activated"] += 1
                     except Exception as e:
                         logger.error(f"Error deactivating siren {device.id}: {str(e)}")
-                emergency_event.actions.append({
+                self._add_action(emergency_event, {
                     "type": "siren_deactivation",
                     "devices": [d.id for d in emergency_devices],
                     "count": len(emergency_devices),
@@ -716,16 +762,12 @@ class EmergencyService:
                 relocked = 0
                 for door in db.query(AccDoor).filter(AccDoor.emergency_action == 2).all():
                     try:
-                        if door.controller_id and door.port is not None:
-                            ok, _err = await self._command_controller_door(db, door, "lock")
-                            relocked += 1 if ok else 0
-                        elif door.terminal:
-                            await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF")
-                            relocked += 1
+                        ok, _err = await self._command_door(db, door, "lock", "Fire mode cleared")
+                        relocked += 1 if ok else 0
                     except Exception as e:
                         logger.error(f"Error re-locking fire exit {door.id}: {e}")
                 results["locked_doors"] = relocked
-                emergency_event.actions.append({"type": "relock_fire_exits", "count": relocked,
+                self._add_action(emergency_event, {"type": "relock_fire_exits", "count": relocked,
                                                 "timestamp": datetime.now(timezone.utc).isoformat()})
                 db.commit()
 

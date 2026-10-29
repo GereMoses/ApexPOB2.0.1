@@ -243,6 +243,11 @@ class AccDoor(Base):
     mustering_mode = Column(Boolean, default=False)
     emergency_action = Column(SmallInteger, default=0)  # 0=none, 1=lock, 2=unlock
     verify_mode = Column(SmallInteger, default=4, server_default='4', nullable=False)  # 4 card, 11 card+PIN, 3 PIN
+    # Last state commanded from ApexPOB (lockdown / unlock / fire mode) — see emergency_service.
+    lock_state = Column(String(12), nullable=True)        # locked | unlocked | None (never commanded)
+    lock_state_at = Column(DateTime(timezone=True), nullable=True)
+    lock_state_by = Column(String(150), nullable=True)
+    lock_state_error = Column(Text, nullable=True)        # last command's error; None when it worked
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     

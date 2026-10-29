@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   App, Tabs, Row, Col, Button, Modal, Form, Input, Select, Table, Tag, Progress,
-  Space, Popconfirm, Card, Spin, Checkbox, DatePicker, InputNumber, Tooltip, Divider, Radio,
+  Space, Popconfirm, Card, Spin, Checkbox, Alert, DatePicker, InputNumber, Tooltip, Divider, Radio,
 } from 'antd';
 import {
   TeamOutlined, UserOutlined, ClockCircleOutlined, EnvironmentOutlined,
@@ -629,10 +629,26 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch, startRequest =
     onError: e => message.error(e?.message || 'Failed to start event'),
   });
 
+  // Fire Mode keeps exits held open and sirens on until it is cleared — ending its
+  // muster alone would leave the site in fire mode after the all-clear went out.
+  const { data: emStatusRaw } = useQuery({
+    queryKey: ['emergency-status'], queryFn: () => apiService.get('/api/emergency/status/'), refetchInterval: 30000,
+  });
+  const fireModeOn = (emStatusRaw?.data?.active_emergencies || []).some(e => e.event_type === 1);
+  const [clearFire, setClearFire] = useState(true);
+
   const endMut = useMutation({
-    mutationFn: ({ id, reason }) => apiService.post(`/api/mustering/events/${id}/end/`, { reason }),
+    mutationFn: async ({ id, reason }) => {
+      const r = await apiService.post(`/api/mustering/events/${id}/end/`, { reason });
+      if (fireModeOn && clearFire) {
+        await apiService.post('/api/emergency/fire-mode/', { action: 'clear', reason: reason || 'Muster ended — all clear' });
+        r.fireCleared = true;
+      }
+      return r;
+    },
     onSuccess: (d, v) => {
-      message.success('Event ended');
+      message.success(d?.fireCleared ? 'Event ended and Fire Mode cleared — fire exits re-locked, sirens off' : 'Event ended');
+      qc.invalidateQueries(['emergency-status']);
       qc.invalidateQueries(['muster-active']); qc.invalidateQueries(['muster-events']);
       setSummaryModal(d?.data ?? null);
       setEndModal(null); endForm.resetFields();
@@ -2045,6 +2061,15 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch, startRequest =
           <Form.Item name="reason" label="Reason for Ending">
             <TextArea rows={3} placeholder="e.g. All personnel accounted for. Drill complete." />
           </Form.Item>
+          {fireModeOn && (
+            <Alert type="warning" showIcon style={{ marginBottom: 8 }} message="Fire Mode is still ON"
+              description={<>
+                <div style={{ marginBottom: 6 }}>Fire exits are held open and sirens may be sounding until Fire Mode is cleared.</div>
+                <Checkbox checked={clearFire} onChange={e => setClearFire(e.target.checked)}>
+                  Also clear Fire Mode (re-lock fire exits, silence sirens)
+                </Checkbox>
+              </>} />
+          )}
         </Form>
       </Modal>
 

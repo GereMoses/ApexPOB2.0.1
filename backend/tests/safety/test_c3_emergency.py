@@ -365,3 +365,63 @@ def test_ta_terminals_get_cards_and_lose_leavers(superuser_headers, panel, db, m
     sync_all_terminals(db)
     assert db.execute(text("SELECT count(*) FROM iclock_devcmd WHERE sn = :s AND cmd_content = :c"),
                       {"s": sn, "c": f"DATA DELETE USERINFO PIN={pin}"}).scalar() == 1
+
+
+@needs_db
+def test_lockdown_and_unlock_report_every_door_and_keep_its_state(superuser_headers, panel, db, monkeypatch):
+    """Global lock/unlock: per-door results, fire exits / secure doors left alone, a dead
+    panel reported FAILED, door state recorded, team alerted, unlock ends the lockdown."""
+    import app.services.zkteco.c3_zkaccess as z
+    good = f"10.7.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    dead = f"10.6.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+    Fake = z.ZKAccessC3Client
+
+    class MaybeDead(Fake):
+        def __enter__(self):
+            if self.ip == dead:
+                raise ConnectionError("no reply from panel")
+            return self
+    monkeypatch.setattr(z, "ZKAccessC3Client", MaybeDead)
+    # Only this test's doors: park every other door so a global command can't touch real ones.
+    db.execute(text("UPDATE acc_door SET lock_state = NULL"))
+    db.commit()
+
+    c = _client(superuser_headers)
+    gid = c.post("/api/v1/access-controllers", json={"name": "Good panel", "ip_address": good, "model": "C3-400", "door_count": 4}).json()["id"]
+    did = c.post("/api/v1/access-controllers", json={"name": "Dead panel", "ip_address": dead, "model": "C3-100", "door_count": 1}).json()["id"]
+    gdoors = c.get(f"/api/v1/access-controllers/{gid}/doors").json()
+    fire_exit, secure = gdoors[0]["id"], gdoors[1]["id"]
+    c.put(f"/api/v1/access-controllers/doors/{fire_exit}", json={"emergency_action": 2})
+    c.put(f"/api/v1/access-controllers/doors/{secure}", json={"emergency_action": 1})
+    mine = {d["id"] for d in gdoors} | {d["id"] for d in c.get(f"/api/v1/access-controllers/{did}/doors").json()}
+
+    r = c.post("/api/emergency/lockdown/", json={"scope": "global", "action": "lock", "reason": "Intruder"}).json()["data"]
+    res = {d["door_id"]: d for d in r["doors"] if d["door_id"] in mine}
+    assert res[fire_exit]["result"] == "skipped" and "Fire exit" in res[fire_exit]["reason"]
+    assert [d["result"] for i, d in res.items() if i not in (fire_exit,)].count("done") == 3
+    dead_row = next(d for i, d in res.items() if d["result"] == "failed")
+    assert "no reply" in dead_row["reason"] and "FAILED" in r["message"] and r["success"] is False
+    assert ("alert", "lockdown") in panel
+
+    state = {d["id"]: d for d in c.get("/api/emergency/doors/state").json()["data"]["doors"]}
+    assert state[secure]["state"] == "locked" and state[secure]["changed_by"]
+    assert state[dead_row["door_id"]]["error"].startswith("lock failed") and state[fire_exit]["state"] == "normal"
+    lock_event = r["emergency_event_id"]
+    assert db.execute(text("SELECT status FROM emergency_event WHERE id = :i"), {"i": lock_event}).scalar() == 0
+
+    r = c.post("/api/emergency/lockdown/", json={"scope": "global", "action": "unlock", "reason": "All clear"}).json()["data"]
+    res = {d["door_id"]: d for d in r["doors"] if d["door_id"] in mine}
+    assert res[secure]["result"] == "skipped" and res[fire_exit]["result"] == "done"
+    state = {d["id"]: d for d in c.get("/api/emergency/doors/state").json()["data"]["doors"]}
+    assert state[fire_exit]["state"] == "unlocked" and state[secure]["state"] == "locked"
+    assert db.execute(text("SELECT status FROM emergency_event WHERE id = :i"), {"i": lock_event}).scalar() == 1
+    assert db.execute(text("SELECT status FROM emergency_event WHERE id = :i"),
+                      {"i": r["emergency_event_id"]}).scalar() == 1      # an unlock is not a new emergency
+    assert r["lockdowns_ended"] >= 1
+
+
+@needs_db
+def test_lockdown_with_no_doors_says_so(superuser_headers, panel, db, make_zone):
+    zid = make_zone()          # a fresh zone has no doors
+    r = _client(superuser_headers).post("/api/emergency/lockdown/", json={"scope": "zone", "zone_ids": [zid], "action": "unlock", "reason": "t"}).json()["data"]
+    assert r["total_doors"] == 0 and "No doors are set up" in r["message"] and r["success"] is False

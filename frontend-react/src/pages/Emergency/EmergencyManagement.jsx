@@ -239,7 +239,8 @@ const Dashboard = ({ statusData, isLoading, refetch }) => {
       <Row gutter={16} style={{ marginBottom: 24 }}>
         {[
           { label: 'Active Emergencies', value: d.total_emergencies || 0, icon: <AlertOutlined />, from: '#cf1322', to: '#820014' },
-          { label: 'Doors Locked',       value: d.doors_locked || 0,      icon: <LockOutlined />, from: '#d4380d', to: '#871400' },
+          { label: 'Doors Locked',       value: d.doors_locked || 0,      icon: <LockOutlined />, from: '#d4380d', to: '#871400',
+            sub: d.doors_total ? `${d.doors_unlocked || 0} unlocked · ${d.doors_total} doors` : 'No doors set up yet' },
           { label: 'Sirens Active',      value: d.sirens_on || 0,         icon: <SoundOutlined />, from: '#d48806', to: '#874d00' },
           { label: 'Zones Monitored',    value: (d.zone_status || []).length, icon: <GlobalOutlined />, from: '#096dd9', to: '#003a8c' },
         ].map(s => (
@@ -455,14 +456,21 @@ const Lockdown = () => {
   const { data: zonesData } = useQuery({ queryKey: ['em-zones'], queryFn: () => apiService.get('/api/mustering/zones/') });
   const zones = zonesData?.data || zonesData?.results || [];
 
+  const { data: stateRaw, isFetching: stateLoading, refetch: refetchState } = useQuery({
+    queryKey: ['em-door-state'], queryFn: () => apiService.get('/api/emergency/doors/state'), refetchInterval: 10000,
+  });
+  const doorState = stateRaw?.data || { summary: {}, doors: [] };
+  const [result, setResult] = useState(null);
+
   const doLockdown = useMutation({
     mutationFn: (body) => apiService.post('/api/emergency/lockdown/', body),
-    onSuccess: (_, v) => {
-      message.success(`${v.action === 'lock' ? 'Lockdown' : 'Unlock'} executed`);
+    onSuccess: (r, v) => {
+      setResult({ ...r.data, action: v.action });
       qc.invalidateQueries(['emergency-status']);
+      qc.invalidateQueries(['em-door-state']);
       form.resetFields(); setScopeVal('global');
     },
-    onError: (e) => message.error(e?.message || 'Action failed'),
+    onError: (e, v) => modal.error({ title: `${v.action === 'lock' ? 'Lockdown' : 'Unlock'} did not run`, content: e?.message || 'No door was changed.' }),
   });
 
   const handleSubmit = (values) => {
@@ -506,6 +514,8 @@ const Lockdown = () => {
           </div>
         }
       />
+
+      <DoorStatePanel state={doorState} loading={stateLoading} onRefresh={refetchState} />
 
       {/* Scope cards */}
       <Row gutter={16} style={{ marginBottom: 24 }}>
@@ -616,7 +626,97 @@ const Lockdown = () => {
           </div>
         </Form>
       </div>
+      <LockdownResult result={result} onClose={() => setResult(null)} />
     </div>
+  );
+};
+
+const STATE_TAG = {
+  locked:   { color: 'red',     icon: <LockOutlined />,   label: 'Locked' },
+  unlocked: { color: 'green',   icon: <UnlockOutlined />, label: 'Unlocked' },
+  normal:   { color: 'default', icon: null,               label: 'Normal' },
+};
+
+/* Every door's state as last commanded from ApexPOB, and whether its controller answers. */
+const DoorStatePanel = ({ state, loading, onRefresh }) => {
+  const s = state.summary || {};
+  const doors = state.doors || [];
+  const chip = (label, v, color, bg) => (
+    <div style={{ background: bg, borderRadius: 12, padding: '10px 16px', minWidth: 120 }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color }}>{v ?? 0}</div>
+      <div style={{ fontSize: 12, color: '#64748b', fontWeight: 600 }}>{label}</div>
+    </div>
+  );
+  return (
+    <div style={{ background: 'white', borderRadius: 16, padding: 20, marginBottom: 24, border: '1px solid #f0f0f0', boxShadow: '0 2px 16px rgba(0,0,0,0.04)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <div style={{ fontWeight: 700, fontSize: 15 }}>Door status <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 400 }}>· updates every 10 s</span></div>
+        <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => onRefresh()}>Refresh</Button>
+      </div>
+      {doors.length === 0 ? (
+        <Alert type="warning" showIcon message="No doors are set up yet"
+          description="Lock and unlock commands have nothing to act on. Add the ZKTeco controllers under Access Control → Controllers; their doors appear here automatically." />
+      ) : (
+        <>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
+            {chip('Doors', s.total, '#0f172a', '#f1f5f9')}
+            {chip('Locked', s.locked, '#cf1322', '#fff1f0')}
+            {chip('Unlocked', s.unlocked, '#389e0d', '#f6ffed')}
+            {chip('Need attention', s.problems, s.problems ? '#d46b08' : '#94a3b8', s.problems ? '#fff7e6' : '#f8fafc')}
+          </div>
+          <Table size="small" rowKey="id" dataSource={doors} pagination={doors.length > 10 ? { pageSize: 10 } : false}
+            columns={[
+              { title: 'Door', dataIndex: 'name', render: v => <b>{v}</b> },
+              { title: 'Controller', dataIndex: 'controller', render: (v, r) => (
+                <span>{v || '—'} {r.controller_online === false && <Tag color="red" style={{ marginLeft: 4 }}>offline</Tag>}</span>) },
+              { title: 'State', dataIndex: 'state', width: 120, render: v => {
+                const t = STATE_TAG[v] || STATE_TAG.normal;
+                return <Tag color={t.color} icon={t.icon}>{t.label}</Tag>;
+              } },
+              { title: 'Changed', key: 'changed', render: (_, r) => r.changed_at
+                ? <span style={{ fontSize: 12 }}>{new Date(r.changed_at).toLocaleString()}<br /><span style={{ color: '#94a3b8' }}>by {r.changed_by}</span></span> : '—' },
+              { title: 'Problem', dataIndex: 'error', render: v => v ? <span style={{ color: '#cf1322', fontSize: 12 }}><WarningOutlined /> {v}</span> : '' },
+            ]} />
+        </>
+      )}
+    </div>
+  );
+};
+
+/* What happened after Execute Lockdown / Unlock — door by door. */
+const LockdownResult = ({ result, onClose }) => {
+  if (!result) return null;
+  const lock = result.action === 'lock';
+  const none = !result.total_doors;
+  const failed = result.failed_doors > 0;
+  const status = none ? 'warning' : failed ? 'error' : 'success';
+  const color = { success: '#389e0d', warning: '#d48806', error: '#cf1322' }[status];
+  const icon = { success: <CheckCircleOutlined />, warning: <ExclamationCircleOutlined />, error: <CloseCircleOutlined /> }[status];
+  const RES = { done: { c: 'green', l: lock ? 'Locked' : 'Unlocked' }, failed: { c: 'red', l: 'Failed' }, skipped: { c: 'default', l: 'Left as is' } };
+  return (
+    <Modal open onCancel={onClose} width={640}
+      footer={<Button type="primary" onClick={onClose}>OK</Button>}
+      title={<span style={{ color }}>{icon} {none ? 'Nothing to ' + (lock ? 'lock' : 'unlock') : failed ? `${lock ? 'Lockdown' : 'Unlock'} incomplete` : `${lock ? 'Lockdown' : 'Unlock'} done`}</span>}>
+      <div style={{ fontSize: 15, marginBottom: 12 }}>{result.message}</div>
+      {!none && (
+        <>
+          <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13 }}>
+            <span><b style={{ color: '#389e0d' }}>{result.processed_doors}</b> {lock ? 'locked' : 'unlocked'}</span>
+            <span><b style={{ color: '#cf1322' }}>{result.failed_doors}</b> failed</span>
+            <span><b>{result.skipped_doors}</b> left as is</span>
+            {result.lockdowns_ended > 0 && <span><b>{result.lockdowns_ended}</b> lockdown(s) ended</span>}
+          </div>
+          <Table size="small" rowKey="door_id" pagination={false} scroll={{ y: 300 }}
+            dataSource={[...(result.doors || [])].sort((a, b) => ({ failed: 0, done: 1, skipped: 2 }[a.result] - { failed: 0, done: 1, skipped: 2 }[b.result]))}
+            columns={[
+              { title: 'Door', dataIndex: 'door_name' },
+              { title: 'Result', dataIndex: 'result', width: 110, render: v => <Tag color={RES[v]?.c}>{RES[v]?.l || v}</Tag> },
+              { title: 'Why', dataIndex: 'reason', render: v => <span style={{ fontSize: 12, color: '#64748b' }}>{v || ''}</span> },
+            ]} />
+          <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 10 }}>The response team has been alerted. Every door's state stays visible under Door status.</div>
+        </>
+      )}
+    </Modal>
   );
 };
 
@@ -827,7 +927,7 @@ const Notifications = () => {
     FAILED:    { color: '#cf1322', bg: '#fff1f0', border: '#ffa39e' },
     SKIPPED:   { color: '#8c8c8c', bg: '#fafafa', border: '#d9d9d9' },
   };
-  const SOURCE = { emergency: 'Emergency', transport: 'Flight change', door_pin: 'Door PIN', controller_offline: 'Controller offline', muster: 'Muster', muster_all_clear: 'All clear',
+  const SOURCE = { lockdown: 'Lockdown', emergency: 'Emergency', transport: 'Flight change', door_pin: 'Door PIN', controller_offline: 'Controller offline', muster: 'Muster', muster_all_clear: 'All clear',
     muster_escalation: 'Escalation', panic: 'Panic', test: 'Test' };
 
   const cols = [

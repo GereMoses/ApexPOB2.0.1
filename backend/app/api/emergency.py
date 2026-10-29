@@ -125,6 +125,12 @@ async def get_emergency_status(
 
 # Lockdown Endpoints
 
+@router.get("/doors/state")
+async def door_states(current_user: AuthUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Every door's current state (as last commanded) and its controller's health."""
+    return {"success": True, "data": emergency_service.door_states(db)}
+
+
 @router.post("/lockdown")
 async def emergency_lockdown(
     request: LockdownRequest,

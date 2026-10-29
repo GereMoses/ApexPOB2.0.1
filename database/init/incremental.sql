@@ -632,3 +632,10 @@ CREATE TABLE IF NOT EXISTS telegram_link (
     used_at       TIMESTAMPTZ,
     chat_id       BIGINT
 );
+
+-- Door state as last commanded from ApexPOB (lockdown / unlock / fire mode), so the
+-- operator can see which doors are locked or held open and which commands failed.
+ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state       VARCHAR(12);   -- locked | unlocked | NULL (never commanded)
+ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_at    TIMESTAMPTZ;
+ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_by    VARCHAR(150);
+ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_error TEXT;          -- last command's error, NULL when it worked
