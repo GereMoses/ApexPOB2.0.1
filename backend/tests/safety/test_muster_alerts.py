@@ -144,6 +144,22 @@ def test_dispatch_logs_skipped_channels_and_includes_responders(db, monkeypatch)
     save_responders(db, [])
 
 
+@needs_db
+def test_person_with_no_contact_is_logged_as_not_alerted(db, monkeypatch):
+    import app.services.notify_dispatch as nd
+    monkeypatch.setattr(nd, "configured_channels", lambda: {"email": True, "whatsapp": True, "sms": False, "telegram": False})
+    monkeypatch.setattr("app.services.notify_whatsapp.send_whatsapp", lambda to, m: {"sent": len(to), "failed": []})
+    sid = int(uuid.uuid4().int % 10**9)
+    out = nd.dispatch("test", sid, [{"name": "No Contact", "email": "", "phone": "", "kind": "personnel"},
+                                    {"name": "Has Phone", "email": "", "phone": "08030000001", "kind": "personnel"}],
+                      "s", "m", ["whatsapp", "email"], include_responders=False)
+    assert out["unreachable"] == 1
+    rows = db.execute(text("SELECT channel, recipient_name, status FROM notify_delivery WHERE source_id = :s ORDER BY id"),
+                      {"s": sid}).fetchall()
+    assert [(r.channel, r.recipient_name, r.status) for r in rows] == [
+        ("whatsapp", "Has Phone", "SENT"), ("none", "No Contact", "SKIPPED")]
+
+
 def test_meta_whatsapp_sends_template_with_alert_text(monkeypatch):
     import app.services.notify_whatsapp as nw
     cfg = {"enabled": True, "provider": "meta", "country_code": "234", "meta_phone_number_id": "111",

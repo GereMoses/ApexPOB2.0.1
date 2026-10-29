@@ -502,7 +502,7 @@ async def list_emergency_notifications(
     return {"success": True, "data": [{
         "id": r["id"], "source_type": r["source_type"], "source_id": r["source_id"],
         "emergency_event_id": r["source_id"] if r["source_type"] == "emergency" else None,
-        "channel_name": r["channel"].upper(), "recipient_name": r["recipient_name"],
+        "channel_name": "NOT ALERTED" if r["channel"] == "none" else r["channel"].upper(), "recipient_name": r["recipient_name"],
         "recipient_addr": r["address"], "message": r["message"], "subject": r["subject"],
         "status_name": r["status"], "error_msg": r["error"],
         "sent_time": r["created_at"].isoformat(sep=" ", timespec="seconds") if r["status"] == "SENT" else None,

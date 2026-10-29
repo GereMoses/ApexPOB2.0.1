@@ -425,7 +425,7 @@ const ZoneMapCanvas = ({ zones, allLogs, editMode, connectFrom, setConnectFrom, 
 
 /* ══════════════════════════════════════════════════════════════ */
 
-const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
+const MusteringManagement = ({ embedded = false, onSectionSwitch, startRequest = 0 }) => {
   const { message, modal } = App.useApp();
   const qc = useQueryClient();
 
@@ -433,6 +433,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   const [selectedEventId, setSelectedEventId] = useState(null);
 
   const [startModal,    setStartModal]    = useState(false);
+  useEffect(() => { if (startRequest) setStartModal(true); }, [startRequest]);
   const [endModal,      setEndModal]      = useState(null);
   const [zoneModal,     setZoneModal]     = useState(null);
   const [drillModal,    setDrillModal]    = useState(false);
@@ -590,6 +591,12 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   const missingCount = allLogs.filter(l => l.status === 0).length;
   const injuredCount = allLogs.filter(l => l.status === 2).length;
   const accountedCount = safeCount + injuredCount;
+  // Dashboard KPIs: every ACTIVE event (not just the one opened in Live Headcount).
+  const dash = activeEvents.reduce((t, e) => ({
+    expected: t.expected + (e.total_expected || 0), safe: t.safe + (e.total_safe || 0),
+    missing: t.missing + (e.total_missing || 0), injured: t.injured + (e.total_injured || 0),
+  }), { expected: 0, safe: 0, missing: 0, injured: 0 });
+  dash.pct = dash.expected > 0 ? Math.round(((dash.safe + dash.injured) / dash.expected) * 100) : 0;
   const safePercent = headcount?.completion_percentage != null
     ? Math.round(headcount.completion_percentage)
     : (totalPOB > 0 ? Math.round((accountedCount / totalPOB) * 100) : 0);
@@ -760,9 +767,9 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
               <div style={{ color: 'white', fontWeight: 800, fontSize: 17, letterSpacing: '-0.3px', marginBottom: 3 }}>MUSTERING EVENT IN PROGRESS</div>
               <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
                 <span>{activeEvents.length} active event{activeEvents.length !== 1 ? 's' : ''}</span>
-                <span style={{ color: '#fca5a5', fontWeight: 700 }}>{missingCount} not accounted</span>
-                {safeCount > 0 && <span style={{ color: '#86efac', fontWeight: 700 }}>{safeCount} confirmed safe</span>}
-                {totalPOB > 0 && <span style={{ color: 'rgba(255,255,255,0.7)', fontWeight: 700 }}>{safePercent}% accounted</span>}
+                <span style={{ color: '#fca5a5', fontWeight: 700 }}>{dash.missing} not accounted</span>
+                {dash.safe > 0 && <span style={{ color: '#86efac', fontWeight: 700 }}>{dash.safe} confirmed safe</span>}
+                {dash.expected > 0 && <span style={{ color: 'rgba(255,255,255,0.7)', fontWeight: 700 }}>{dash.pct}% accounted</span>}
               </div>
             </div>
           </div>
@@ -778,9 +785,9 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
         {[
           { label: 'Active Events',    value: activeEvents.length, icon: <AlertOutlined />,        color: '#ef4444', bg: '#fff1f0', sub: isActive ? 'In progress' : 'All clear',   onClick: () => setActiveTab('events') },
-          { label: isActive ? 'Expected at Muster' : 'Personnel on Board', value: isActive ? totalPOB : (pobRaw?.total ?? '—'), icon: <TeamOutlined />, color: '#1890ff', bg: '#e6f4ff', sub: isActive ? 'on the muster list' : `${zones.length} zones configured` },
-          { label: 'Confirmed Safe',    value: safeCount,           icon: <CheckCircleOutlined />,   color: '#52c41a', bg: '#f6ffed', sub: safePercent > 0 ? `${safePercent}% accounted` : 'No active event' },
-          { label: 'Not Accounted',     value: missingCount,        icon: <CloseCircleOutlined />,   color: missingCount > 0 ? '#f5222d' : '#52c41a', bg: missingCount > 0 ? '#fff1f0' : '#f6ffed', sub: injuredCount > 0 ? `${injuredCount} injured` : 'No missing' },
+          { label: isActive ? 'Expected at Muster' : 'Personnel on Board', value: isActive ? dash.expected : (pobRaw?.total ?? '—'), icon: <TeamOutlined />, color: '#1890ff', bg: '#e6f4ff', sub: isActive ? 'on the muster list' : `${zones.length} zones configured` },
+          { label: 'Confirmed Safe',    value: dash.safe,           icon: <CheckCircleOutlined />,   color: '#52c41a', bg: '#f6ffed', sub: isActive ? `${dash.pct}% accounted` : 'No active event' },
+          { label: 'Not Accounted',     value: dash.missing,        icon: <CloseCircleOutlined />,   color: dash.missing > 0 ? '#f5222d' : '#52c41a', bg: dash.missing > 0 ? '#fff1f0' : '#f6ffed', sub: dash.injured > 0 ? `${dash.injured} injured` : dash.missing > 0 ? 'still to report' : 'No missing' },
         ].map(s => (
           <Col xs={12} sm={6} key={s.label}>
             <div onClick={s.onClick} style={{
@@ -804,7 +811,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
       </Row>
 
       {/* Accountability bar — active only */}
-      {isActive && totalPOB > 0 && (
+      {isActive && dash.expected > 0 && (
         <div style={{
           background: 'white', borderRadius: 12, padding: '16px 22px', marginBottom: 20,
           boxShadow: '0 2px 10px rgba(0,0,0,0.05)', border: '1px solid #f0f0f0',
@@ -813,22 +820,22 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             <span style={{ fontWeight: 700, fontSize: 13, color: '#141414' }}>
               <TeamOutlined style={{ color: '#1890ff', marginRight: 7 }} />Accountability Progress
             </span>
-            <span style={{ fontWeight: 900, fontSize: 24, color: safePercent >= 80 ? '#52c41a' : safePercent >= 50 ? '#faad14' : '#f5222d', letterSpacing: '-0.5px' }}>
-              {safePercent}%
+            <span style={{ fontWeight: 900, fontSize: 24, color: dash.pct >= 80 ? '#52c41a' : dash.pct >= 50 ? '#faad14' : '#f5222d', letterSpacing: '-0.5px' }}>
+              {dash.pct}%
             </span>
           </div>
           <div style={{ background: '#f0f0f0', borderRadius: 8, height: 12, overflow: 'hidden', position: 'relative' }}>
             <div style={{
-              width: `${safePercent}%`, height: '100%', borderRadius: 8, transition: 'width 0.8s ease',
-              background: safePercent >= 80 ? 'linear-gradient(90deg,#52c41a,#73d13d)' : safePercent >= 50 ? 'linear-gradient(90deg,#faad14,#ffc53d)' : 'linear-gradient(90deg,#f5222d,#ff4d4f)',
-              boxShadow: `0 2px 8px ${safePercent >= 80 ? 'rgba(82,196,26,0.35)' : safePercent >= 50 ? 'rgba(250,173,20,0.35)' : 'rgba(245,34,45,0.35)'}`,
+              width: `${dash.pct}%`, height: '100%', borderRadius: 8, transition: 'width 0.8s ease',
+              background: dash.pct >= 80 ? 'linear-gradient(90deg,#52c41a,#73d13d)' : dash.pct >= 50 ? 'linear-gradient(90deg,#faad14,#ffc53d)' : 'linear-gradient(90deg,#f5222d,#ff4d4f)',
+              boxShadow: `0 2px 8px ${dash.pct >= 80 ? 'rgba(82,196,26,0.35)' : dash.pct >= 50 ? 'rgba(250,173,20,0.35)' : 'rgba(245,34,45,0.35)'}`,
             }} />
           </div>
           <div style={{ display: 'flex', gap: 20, marginTop: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 12, color: '#52c41a', fontWeight: 700 }}><CheckCircleOutlined style={{ marginRight: 4 }} />{safeCount} Safe</span>
-            <span style={{ fontSize: 12, color: '#f5222d', fontWeight: 700 }}><CloseCircleOutlined style={{ marginRight: 4 }} />{missingCount} Missing</span>
-            {injuredCount > 0 && <span style={{ fontSize: 12, color: '#fa8c16', fontWeight: 700 }}><WarningOutlined style={{ marginRight: 4 }} />{injuredCount} Injured</span>}
-            <span style={{ fontSize: 11, color: '#bfbfbf', marginLeft: 'auto' }}>{totalPOB} total expected</span>
+            <span style={{ fontSize: 12, color: '#52c41a', fontWeight: 700 }}><CheckCircleOutlined style={{ marginRight: 4 }} />{dash.safe} Safe</span>
+            <span style={{ fontSize: 12, color: '#f5222d', fontWeight: 700 }}><CloseCircleOutlined style={{ marginRight: 4 }} />{dash.missing} Missing</span>
+            {dash.injured > 0 && <span style={{ fontSize: 12, color: '#fa8c16', fontWeight: 700 }}><WarningOutlined style={{ marginRight: 4 }} />{dash.injured} Injured</span>}
+            <span style={{ fontSize: 11, color: '#bfbfbf', marginLeft: 'auto' }}>{dash.expected} total expected</span>
           </div>
         </div>
       )}

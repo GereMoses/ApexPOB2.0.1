@@ -241,7 +241,7 @@ export default function AlertsTab() {
           columns={[
             { title: 'Time', dataIndex: 'created_at', width: 140, render: v => String(v).slice(0, 16) },
             { title: 'Alert', dataIndex: 'source_type', width: 120, render: v => <Tag>{v.replace(/_/g, ' ')}</Tag> },
-            { title: 'Channel', dataIndex: 'channel', width: 100, render: v => v.toUpperCase() },
+            { title: 'Channel', dataIndex: 'channel', width: 100, render: v => (v === 'none' ? <span style={{ color: '#b45309', fontWeight: 600 }}>NOT ALERTED</span> : v.toUpperCase()) },
             { title: 'To', key: 'to', render: (_, r) => <span><b>{r.recipient_name}</b> · {r.address}</span> },
             { title: 'Status', dataIndex: 'status', width: 100,
               render: v => <Tag color={{ SENT: 'green', FAILED: 'red', SKIPPED: 'default' }[v]}>{v}</Tag> },

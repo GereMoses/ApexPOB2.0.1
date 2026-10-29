@@ -389,7 +389,7 @@ class MusteringService:
         title = f"{label} muster ACTIVE — {total_expected} expected"
         message = (
             f"A {label} muster is running (event #{event.id}). "
-            f"{total_expected} personnel are expected to report.{where} "
+            f"{total_expected} {'person is' if total_expected == 1 else 'people are'} expected to report.{where} "
             f"Open Mustering to run the roll-call."
         )
         # Drills are routine; a real emergency should stand out.
@@ -1377,11 +1377,11 @@ class MusteringService:
             drill = event.event_type == 1
             codes = [r[0] for r in self.db.query(MusteringLog.emp_code).filter(MusteringLog.event_id == event_id).all()]
             people = people_from_personnel(self.db, emp_codes=codes) + self.visitor_contacts(codes)
-            head = f"{'DRILL — ' if drill else ''}{w['type'].upper()} MUSTER"
+            head = f"{'DRILL — ' if drill and w['type'] != 'Drill' else ''}{w['type'].upper()} MUSTER"
             to_staff = (f"{head}: Stop work and go to {w['points']} now. Scan your badge at the muster "
                         f"reader so you are counted safe. Do not use lifts. Follow your warden.")
             to_team = (f"{head} started at {datetime.now(_site_tz()).strftime('%H:%M')} — area: {w['zones']}. "
-                       f"{event.total_expected} people expected at {w['points']}. Track live in ApexPOB → Emergency & Mustering.")
+                       f"{event.total_expected} {'person' if event.total_expected == 1 else 'people'} expected at {w['points']}. Track live in ApexPOB → Emergency & Mustering.")
             staff = dispatch_background("muster", event_id, people, f"{head} — go to {w['points']}", to_staff,
                                         channels, include_responders=False)
             team = dispatch_background("muster", event_id, [], f"{head} started — {event.total_expected} expected",

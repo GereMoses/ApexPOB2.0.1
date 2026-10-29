@@ -191,7 +191,7 @@ const Dashboard = ({ statusData, isLoading, refetch }) => {
       }),
       disabled: !isEmergency,
     },
-    { key: 'muster',  label: 'Start Mustering',     sub: 'Personnel headcount',         icon: <TeamOutlined />,        from: '#096dd9', to: '#003a8c', onClick: () => message.info('Navigate to the Mustering module to start a headcount event.') },
+    { key: 'muster',  label: 'Start Mustering',     sub: 'Personnel headcount',         icon: <TeamOutlined />,        from: '#096dd9', to: '#003a8c', onClick: () => window.dispatchEvent(new Event('apexpob:start-muster')) },
   ];
 
   const recentCols = [

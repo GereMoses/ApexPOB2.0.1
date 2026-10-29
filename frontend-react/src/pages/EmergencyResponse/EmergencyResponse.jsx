@@ -14,6 +14,12 @@ const EmergencyResponse = () => {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [section, setSection] = useState('emergency');
+  const [startRequest, setStartRequest] = useState(0);   // bumped → Personnel Accountability opens Start Muster
+  useEffect(() => {
+    const go = () => { setSection('mustering'); setStartRequest(n => n + 1); };
+    window.addEventListener('apexpob:start-muster', go);
+    return () => window.removeEventListener('apexpob:start-muster', go);
+  }, []);
   const [wsStatus, setWsStatus] = useState('disconnected');
   const wsRef = useRef(null);
 
@@ -123,7 +129,7 @@ const EmergencyResponse = () => {
                   {activeEvents.length > 0 && <Badge count={activeEvents.length} size="small" color={missingTotal > 0 ? '#dc2626' : '#64748b'} />}
                 </Space>
               ),
-              children: <MusteringManagement embedded />,
+              children: <MusteringManagement embedded startRequest={startRequest} />,
             },
           ]}
         />

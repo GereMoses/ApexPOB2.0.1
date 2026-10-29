@@ -139,6 +139,17 @@ def dispatch(source_type: str, source_id: Optional[int], people: List[Dict[str, 
             if res.get("error") and failed:
                 summary[ch]["note"] = res["error"]
 
+        # Someone with no phone / email / linked Telegram for any requested channel got
+        # nothing at all — say so, or the operator assumes they were told.
+        fields = {{"email": "email", "telegram": "telegram"}.get(c, "phone") for c in wanted}
+        unreachable = [p for p in everyone if p.get("kind") != "group"
+                       and not any((p.get(f) or "").strip() for f in fields)]
+        for p in unreachable:
+            log_rows.append(dict(channel="none", name=p.get("name") or "?", addr="—", status="SKIPPED",
+                                 error="No phone, email or linked Telegram on record — could not be alerted"))
+        if unreachable:
+            summary["unreachable"] = len(unreachable)
+
         if log_rows:
             db.execute(text("""
                 INSERT INTO notify_delivery (source_type, source_id, channel, recipient_name, address, status, error, subject, message)
