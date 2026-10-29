@@ -163,7 +163,9 @@ function App() {
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <ThemedShell>
-        <AntdApp>
+        {/* Pop-ups never pile up over the operator's screen: at most 3 top messages; live
+            alerts go bottom-right, stacked, each closable and timed (see Layout.jsx). */}
+        <AntdApp message={{ maxCount: 3 }} notification={{ placement: 'bottomRight', maxCount: 5, stack: { threshold: 2 } }}>
         {!isAuthenticated ? (
           <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
             <Routes>

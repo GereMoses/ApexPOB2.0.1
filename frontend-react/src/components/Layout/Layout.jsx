@@ -292,17 +292,37 @@ const Layout = ({ user, onLogout, children }) => {
     return () => mq.removeEventListener('change', handler);
   }, []);
 
-  /* ── Real-time SSE notification → toast ── */
-  const { message: appMessage } = App.useApp();
+  /* ── Real-time SSE notification → corner pop-up ──
+     Used to be a top-centre message with duration 0 — it had no close button, so every
+     high/critical alert stayed over the screen until a page refresh. Now: bottom-right,
+     stacked, closable, timed by priority; a repeat replaces the earlier one; Esc closes
+     all. Every alert is kept in the bell list regardless. */
+  const { notification: appNotify } = App.useApp();
+  const lastSeenRef = useRef({});
   useEffect(() => {
     if (!streamNotif) return;
-    const text_  = streamNotif.message || streamNotif.title || 'New notification';
-    const p      = streamNotif.priority;
-    const dur    = (p === 'high' || p === 'critical') ? 0 : p === 'medium' ? 6 : 4;
-    if (p === 'high' || p === 'critical') appMessage.error({ content: text_, duration: dur });
-    else if (p === 'medium') appMessage.warning({ content: text_, duration: dur });
-    else appMessage.info({ content: text_, duration: dur });
-  }, [streamNotif]);
+    qc.invalidateQueries(['notifications']);
+    const title = streamNotif.title || 'Notification';
+    const body = streamNotif.message && streamNotif.message !== title ? streamNotif.message : undefined;
+    const key = `${streamNotif.type || 'n'}|${title}`;
+    const now = Date.now();
+    if (now - (lastSeenRef.current[key] || 0) < 3000) return;   // the same alert arriving twice
+    lastSeenRef.current[key] = now;
+    const [kind, secs] = { critical: ['error', 20], high: ['warning', 12], medium: ['info', 8] }[streamNotif.priority] || ['info', 5];
+    const link = streamNotif.link;
+    appNotify[kind]({
+      key, message: title, description: body, duration: secs, placement: 'bottomRight',
+      btn: link ? (
+        <Button size="small" type="primary" onClick={() => { appNotify.destroy(key); navigate(link); }}>Open</Button>
+      ) : undefined,
+    });
+  }, [streamNotif]); // eslint-disable-line
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') appNotify.destroy(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [appNotify]);
 
   /* ── Ctrl+K / Cmd+K global search shortcut ── */
   useEffect(() => {
@@ -487,6 +507,10 @@ const Layout = ({ user, onLogout, children }) => {
           )}
         </div>
         <Space size={6}>
+          <Tooltip title="Close every pop-up on screen (or press Esc)">
+            <Button type="text" size="small" style={{ color: '#6B7A8D', fontSize: 12 }}
+              onClick={() => appNotify.destroy()}>Close pop-ups</Button>
+          </Tooltip>
           <Tooltip title="Refresh">
             <Button type="text" size="small" icon={<ReloadOutlined />}
               onClick={() => refetchNotifs()} style={{ color: '#6B7A8D' }} />

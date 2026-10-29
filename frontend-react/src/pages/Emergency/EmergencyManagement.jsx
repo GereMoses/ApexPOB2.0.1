@@ -815,7 +815,14 @@ const FireMode = () => {
                 <div style={{ fontWeight: 800, fontSize: 17, marginBottom: 4, color: '#141414' }}>All Clear</div>
                 <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 18 }}>End emergency — restore all systems</div>
                 <Button block size="large" loading={fireModeM.isPending}
-                  onClick={() => fireModeM.mutate({ action: 'clear', reason: 'All Clear issued from Fire Mode tab' })}
+                  onClick={() => modal.confirm({
+                    title: 'Issue All Clear?',
+                    icon: <CheckCircleOutlined style={{ color: '#389e0d' }} />,
+                    content: 'Fire Mode ends: fire exits are re-locked, sirens switched off and any running muster is closed with an all-clear message to staff and the response team.',
+                    okText: 'ISSUE ALL CLEAR', cancelText: 'Cancel',
+                    okButtonProps: { style: { background: '#389e0d', borderColor: '#389e0d' } },
+                    onOk: () => fireModeM.mutateAsync({ action: 'clear', reason: 'All Clear issued from Fire Mode tab' }),
+                  })}
                   style={{
                     background: 'linear-gradient(135deg, #389e0d, #135200)',
                     border: 'none', color: 'white', fontWeight: 700, height: 48, borderRadius: 10,
