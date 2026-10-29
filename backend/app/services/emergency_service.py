@@ -787,6 +787,21 @@ class EmergencyService:
                     "type": "end_mustering", "events_ended": ended,
                     "timestamp": datetime.now(timezone.utc).isoformat()}]
 
+                # 4. End the fire emergency itself. (Clearing used to record only this
+                #    "cleared" row, leaving the original fire event ACTIVE — the site
+                #    stayed in EMERGENCY after the operator pressed All Clear.)
+                now = datetime.now(timezone.utc)
+                fires = db.query(EmergencyEvent).filter(
+                    EmergencyEvent.event_type == EmergencyEventType.FIRE.value,
+                    EmergencyEvent.status == EmergencyStatus.ACTIVE.value,
+                    EmergencyEvent.id != emergency_event.id).all()
+                for f in fires:
+                    f.status, f.end_time = EmergencyStatus.RESOLVED.value, now
+                    self._add_action(f, {"type": "cleared", "by_event": emergency_event.id, "timestamp": now.isoformat()})
+                emergency_event.end_time = now
+                results["fire_events_ended"] = len(fires)
+                results["musters_ended"] = ended
+
             # Log operation
             await self.log_emergency_operation(
                 db=db,
@@ -817,7 +832,10 @@ class EmergencyService:
                 "action": action,
                 "zone_id": zone_id,
                 "results": results,
-                "message": f"Fire mode {action} completed successfully"
+                "message": (f"Fire mode {action} completed successfully" if action == "activate" else
+                            (f"Fire mode cleared — {results.get('locked_doors', 0)} fire exit(s) re-locked, "
+                             f"{results.get('sirens_activated', 0)} siren(s) off, {results.get('musters_ended', 0)} muster(s) ended."
+                             if results.get("fire_events_ended") else "Fire mode was not on — nothing to clear."))
             }
             
         except Exception as e:
@@ -1044,21 +1062,27 @@ class EmergencyService:
             # Build a human-readable SSE notification from the update payload
             event_type = update_data.get("type", "emergency_update")
             data = update_data.get("data", {})
-            title_map = {
-                "fire_mode": "Fire Mode Activated",
-                "lockdown": "Emergency Lockdown",
-                "panic": "PANIC ALARM",
-                "emergency_status": "Emergency Status Update",
-            }
-            title = title_map.get(event_type, "Emergency Alert")
+            if event_type == "emergency_lockdown":
+                return          # announced with its door-by-door result in _announce_lockdown
             action = data.get("action", "")
-            if action == "clear":
-                title = f"{title} — CLEARED"
+            res = data.get("results") or {}
+            if event_type == "fire_mode":
+                if action == "clear":
+                    title = "Fire Mode cleared — all clear"
+                    msg = (f"{res.get('locked_doors', 0)} fire exit(s) re-locked, {res.get('sirens_activated', 0)} "
+                           f"siren(s) off, {res.get('musters_ended', 0)} muster(s) ended.")
+                else:
+                    title = "FIRE MODE ON — evacuate"
+                    msg = (f"{res.get('unlocked_doors', 0)} fire exit(s) unlocked, {res.get('sirens_activated', 0)} "
+                           f"siren(s) on" + (", site muster started." if res.get("mustering_started") else "."))
+            else:
+                title = {"panic": "PANIC ALARM", "emergency_status": "Emergency status update"}.get(event_type, "Emergency alert")
+                msg = data.get("message") or title
             await broadcast_notification({
                 "type": event_type,
-                "priority": "critical",
+                "priority": "high" if action == "clear" else "critical",
                 "title": title,
-                "message": data.get("message") or f"Emergency event: {event_type}",
+                "message": msg,
                 **{k: v for k, v in data.items() if k in ("zone_id", "emergency_event_id")},
             })
         except Exception as e:

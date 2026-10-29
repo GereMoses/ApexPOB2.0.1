@@ -78,8 +78,10 @@ def test_fire_mode_unlocks_then_clear_relocks_and_ends_muster(superuser_headers,
         db.execute(text("UPDATE mustering_event SET status = 1 WHERE id = :i"), {"i": ev[0]})
     db.commit()
 
-    asyncio.run(emergency_service.activate_fire_mode(zone_id=None, location_id=None, muster_zone_ids=None,
+    fire = asyncio.run(emergency_service.activate_fire_mode(zone_id=None, location_id=None, muster_zone_ids=None,
                                                      action="activate", reason="test fire", initiated_by=None, db=db))
+    fire_id = fire["emergency_event_id"]
+    assert db.execute(text("SELECT status FROM emergency_event WHERE id = :i"), {"i": fire_id}).scalar() == 0
     assert ("door", ip, 1, 255) in panel                 # fire exit held open
     assert ("aux", ip, 2, 255) in panel                  # siren on
     assert db.execute(text("SELECT count(*) FROM mustering_event WHERE status = 0")).scalar() == 1
@@ -90,6 +92,12 @@ def test_fire_mode_unlocks_then_clear_relocks_and_ends_muster(superuser_headers,
     assert ("aux", ip, 2, 0) in panel                    # siren off
     assert db.execute(text("SELECT count(*) FROM mustering_event WHERE status = 0")).scalar() == 0
     assert ("alert", "muster") in panel and ("alert", "muster_all_clear") in panel
+    # All Clear really ends the fire emergency (it used to stay ACTIVE → site stuck in EMERGENCY)
+    db.expire_all()
+    row = db.execute(text("SELECT status, end_time, actions FROM emergency_event WHERE id = :i"), {"i": fire_id}).first()
+    assert row.status == 1 and row.end_time is not None
+    assert {a["type"] for a in row.actions} >= {"unlock_fire_exits", "siren_activation", "cleared"} or len(row.actions) >= 3
+    assert db.execute(text("SELECT count(*) FROM emergency_event WHERE event_type = 1 AND status = 0")).scalar() == 0
 
 
 # ── taps on C3 reader ports → attendance / POB / muster / unknown cards ──────

@@ -167,9 +167,9 @@ const Dashboard = ({ statusData, isLoading, refetch }) => {
 
   const fireModeM = useMutation({
     mutationFn: (body) => apiService.post('/api/emergency/fire-mode/', body),
-    onSuccess: () => {
-      message.success('Fire mode updated');
-      qc.invalidateQueries(['emergency-status']);
+    onSuccess: (r) => {
+      message.success(r?.data?.message || 'Fire mode updated', 8);
+      qc.invalidateQueries(['emergency-status']); qc.invalidateQueries(['em-door-state']); qc.invalidateQueries(['muster-active']);
       setFireOpen(false);
     },
     onError: (e) => message.error(e?.message || 'Fire mode failed'),
@@ -732,9 +732,9 @@ const FireMode = () => {
 
   const fireModeM = useMutation({
     mutationFn: (body) => apiService.post('/api/emergency/fire-mode/', body),
-    onSuccess: (_, v) => {
-      message.success(v.action === 'activate' ? 'Fire mode activated — evacuation in progress' : 'All Clear issued — fire mode deactivated');
-      qc.invalidateQueries(['emergency-status']);
+    onSuccess: (r, v) => {
+      message.success(v.action === 'activate' ? 'Fire mode activated — evacuation in progress' : (r?.data?.message || 'All Clear issued — fire mode deactivated'), 8);
+      qc.invalidateQueries(['emergency-status']); qc.invalidateQueries(['em-door-state']); qc.invalidateQueries(['muster-active']);
     },
     onError: (e) => message.error(e?.message || 'Action failed'),
   });
