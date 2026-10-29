@@ -12,7 +12,7 @@ import {
 import {
   PlusOutlined, CarOutlined, WarningOutlined, CheckCircleOutlined, CloseCircleOutlined,
   SendOutlined, PlayCircleOutlined, FlagOutlined, EnvironmentOutlined, PhoneOutlined,
-  ReloadOutlined, StopOutlined, ClockCircleOutlined, EditOutlined,
+  ReloadOutlined, StopOutlined, ClockCircleOutlined, EditOutlined, DeleteOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -58,6 +58,7 @@ const StatTile = ({ label, value, color }) => (
 
 export default function LandJourneys() {
   const { message, modal } = App.useApp();
+  const me = (() => { try { return JSON.parse(localStorage.getItem('user_info') || '{}'); } catch { return {}; } })();
   const qc = useQueryClient();
   const [createForm] = Form.useForm();
   const [checkinForm] = Form.useForm();
@@ -186,6 +187,16 @@ export default function LandJourneys() {
   const startM    = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/start`), ...opts('Journey started') });
   const completeM = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/complete`), ...opts('Journey completed') });
   const cancelM   = useMutation({ mutationFn: (id) => apiService.post(`/api/v1/journeys/${id}/cancel`), ...opts('Journey cancelled') });
+  const deleteM   = useMutation({
+    mutationFn: (id) => apiService.delete(`/api/v1/journeys/${id}`),
+    onSuccess: (_r, id) => {
+      message.success('Journey plan deleted');
+      setSelected(null);
+      qc.removeQueries({ queryKey: ['journey', id] });     // it's gone — don't re-fetch it
+      qc.invalidateQueries({ queryKey: ['journeys'] }); qc.invalidateQueries({ queryKey: ['journey-stats'] });
+    },
+    onError: (e) => message.error(e.message || 'Could not delete'),
+  });
   const rejectM   = useMutation({ mutationFn: ({ id, reason }) => apiService.post(`/api/v1/journeys/${id}/reject`, { reason }), ...opts('Journey rejected') });
   const checkinM  = useMutation({
     mutationFn: ({ id, body }) => apiService.post(`/api/v1/journeys/${id}/checkin`, body),
@@ -279,7 +290,11 @@ export default function LandJourneys() {
             <Form.Item name="planned_departure" label="Planned departure" rules={[{ required: true }]}>
               <DatePicker showTime style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item name="planned_arrival" label="Planned arrival (ETA)">
+            <Form.Item name="planned_arrival" label="Planned arrival (ETA)" dependencies={['planned_departure']}
+              rules={[({ getFieldValue }) => ({
+                validator: (_, v) => (!v || !getFieldValue('planned_departure') || v.isAfter(getFieldValue('planned_departure'))
+                  ? Promise.resolve() : Promise.reject(new Error('Arrival must be after departure'))),
+              })]}>
               <DatePicker showTime style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="checkin_interval_min" label="Check-in every (min)" initialValue={60}>
@@ -315,7 +330,10 @@ export default function LandJourneys() {
           <>
             {j.overdue && (
               <Alert type="error" showIcon style={{ marginBottom: 14 }}
-                message={`OVERDUE by ${j.minutes_overdue} min — last check-in ${j.last_checkin_at ? dayjs(j.last_checkin_at).fromNow() : 'n/a'}. Contact the driver.`} />
+                message={`OVERDUE by ${j.minutes_overdue} min — last check-in ${j.last_checkin_at ? dayjs(j.last_checkin_at).fromNow() : 'n/a'}. Contact the driver.`}
+                description={j.overdue_alerted_at
+                  ? `Response team alerted at ${dayjs(j.overdue_alerted_at).format('HH:mm')} (repeats every 30 min until a check-in is logged).`
+                  : 'The response team is alerted within a minute.'} />
             )}
             {j.status === 'REJECTED' && j.rejection_reason && (
               <Alert type="warning" showIcon style={{ marginBottom: 14 }} message={`Rejected: ${j.rejection_reason}`} />
@@ -349,11 +367,13 @@ export default function LandJourneys() {
                 <Button icon={<EditOutlined />} onClick={() => openEdit(j)}>Edit</Button>}
               {j.status === 'DRAFT' && <Button type="primary" icon={<SendOutlined />} loading={submitM.isPending} onClick={() => submitM.mutate(j.id)}>Submit for approval</Button>}
               {j.status === 'REJECTED' && <Button type="primary" icon={<SendOutlined />} onClick={() => submitM.mutate(j.id)}>Re-submit</Button>}
-              {j.status === 'SUBMITTED' && <>
-                <Button type="primary" icon={<CheckCircleOutlined />} loading={approveM.isPending} onClick={() => approveM.mutate(j.id)}>
-                  {j.approvals_required === 2 && j.approvals_given === 1 ? 'Second approval' : 'Approve'}</Button>
-                <Button danger icon={<CloseCircleOutlined />} onClick={() => reject(j.id)}>Reject</Button>
-              </>}
+              {j.status === 'SUBMITTED' && (me.id && me.id === j.created_by_id
+                ? <Tag color="blue" style={{ padding: '4px 10px' }}>Waiting for another person to approve (you planned it)</Tag>
+                : <>
+                  <Button type="primary" icon={<CheckCircleOutlined />} loading={approveM.isPending} onClick={() => approveM.mutate(j.id)}>
+                    {j.approvals_required === 2 && j.approvals_given === 1 ? 'Second approval' : 'Approve'}</Button>
+                  <Button danger icon={<CloseCircleOutlined />} onClick={() => reject(j.id)}>Reject</Button>
+                </>)}
               {['DRAFT', 'SUBMITTED', 'APPROVED', 'REJECTED'].includes(j.status) &&
                 <Button icon={<CarOutlined />} onClick={() => recordVehicleCheck(j)}>Vehicle check</Button>}
               {j.status === 'APPROVED' && (
@@ -365,6 +385,12 @@ export default function LandJourneys() {
               {j.status === 'IN_PROGRESS' && <Button type="primary" icon={<FlagOutlined />} loading={completeM.isPending} onClick={() => completeM.mutate(j.id)}>Complete</Button>}
               {!['COMPLETED', 'CANCELLED'].includes(j.status) &&
                 <Button icon={<StopOutlined />} onClick={() => modal.confirm({ title: 'Cancel this journey?', okType: 'danger', onOk: () => cancelM.mutate(j.id) })}>Cancel</Button>}
+              {['DRAFT', 'REJECTED', 'CANCELLED'].includes(j.status) &&
+                <Button danger icon={<DeleteOutlined />} onClick={() => modal.confirm({
+                  title: 'Delete this journey plan?', okType: 'danger', okText: 'Delete',
+                  content: 'Only drafts, rejected and cancelled plans can be deleted. Approved or completed journeys stay as a safety record.',
+                  onOk: () => deleteM.mutate(j.id),
+                })}>Delete</Button>}
             </Space>
 
             {/* Check-in call form (in-progress only) */}

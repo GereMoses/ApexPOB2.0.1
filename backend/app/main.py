@@ -1017,6 +1017,12 @@ async def startup_event():
         _background_tasks.append(asyncio.create_task(_supervised("telegram_poller", telegram_poll_loop)))
         logger.info("✅ Telegram poller started (leader, auto-restart on crash)")
 
+        # Land journeys under way that miss a check-in call alert the control room +
+        # response team (it used to show only to someone who opened the page).
+        from .api.journey_management import journey_watch_loop
+        _background_tasks.append(asyncio.create_task(_supervised("journey_watch", journey_watch_loop)))
+        logger.info("✅ Journey overdue watch started (leader, auto-restart on crash)")
+
         from .services.zkteco.live_capture import live_capture_supervisor
         _background_tasks.append(asyncio.create_task(_supervised("live_capture_supervisor", live_capture_supervisor)))
         logger.info("✅ ZKTeco live capture supervisor started (leader, auto-restart on crash)")

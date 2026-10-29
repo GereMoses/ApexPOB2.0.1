@@ -202,6 +202,7 @@ def _to_dict(j: JourneyPlan, with_checkins: bool = False) -> Dict[str, Any]:
         "created_at": j.created_at.isoformat() if j.created_at else None,
         "overdue": od["overdue"],
         "minutes_overdue": od["minutes_overdue"],
+        "overdue_alerted_at": j.overdue_alerted_at.isoformat() if j.overdue_alerted_at else None,
     }
     if with_checkins:
         d["checkins"] = [
@@ -223,6 +224,95 @@ def _get(db: Session, journey_id: int) -> JourneyPlan:
     if not j:
         raise HTTPException(status_code=404, detail="Journey not found")
     return j
+
+
+def _check_times(dep: Optional[datetime], arr: Optional[datetime]) -> None:
+    if dep and arr and _aware(arr) <= _aware(dep):
+        raise HTTPException(status_code=400, detail="Planned arrival must be after the planned departure")
+
+
+def _driver_contact(db: Session, j: JourneyPlan) -> str:
+    """'Driver NAME (0803…)' — the phone only when the driver is linked to staff."""
+    phone = None
+    if j.driver_personnel_id:
+        phone = db.execute(text("SELECT NULLIF(TRIM(phone), '') FROM personnel WHERE id = :i"),
+                           {"i": j.driver_personnel_id}).scalar()
+    name = j.driver_name or "not named"
+    return f"driver {name}" + (f" ({phone})" if phone else "")
+
+
+def _alert_team(db: Session, j: JourneyPlan, kind: str, title: str, msg: str, dedup: str) -> None:
+    """Bell for everyone signed in + WhatsApp / Telegram / email to the response team."""
+    db.execute(text("""
+        INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, link, expires_at)
+        VALUES (:dk, :kind, :t, :m, 'critical', '/transport-manifest', NOW() + INTERVAL '48 hours')
+        ON CONFLICT (dedup_key) DO NOTHING
+    """), {"dk": dedup, "kind": kind, "t": title, "m": msg})
+    db.commit()
+    try:
+        from .notifications import notify_sync
+        notify_sync({"type": kind, "priority": "critical", "title": title, "message": msg,
+                     "dedup_key": dedup, "journey_id": j.id, "link": "/transport-manifest"})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("journey alert broadcast failed: %s", e)
+    try:
+        from ..services.notify_dispatch import dispatch_background
+        dispatch_background(kind, j.id, [], title, msg, None, include_responders=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("journey alert to response team failed: %s", e)
+
+
+OVERDUE_REPEAT_MIN = 30
+
+
+def journey_overdue_watch(db: Session) -> int:
+    """Alert the control room + response team about every journey under way that has
+    missed its check-in call (or ETA). Repeats every 30 min while it stays overdue; a
+    check-in, completion or cancellation clears it. Returns how many alerts went out."""
+    sent = 0
+    now = _now()
+    for j in db.query(JourneyPlan).filter(JourneyPlan.status == "IN_PROGRESS").all():
+        od = _overdue_info(j)
+        if not od["overdue"]:
+            continue
+        last = _aware(j.overdue_alerted_at)
+        if last and now - last < timedelta(minutes=OVERDUE_REPEAT_MIN):
+            continue
+        ref = j.reference or f"JMP-{j.id}"
+        seen = (f"last check-in {_aware(j.last_checkin_at).astimezone(_site_tz()):%H:%M}"
+                if j.last_checkin_at else "no check-in yet")
+        title = f"Journey OVERDUE {ref} — {od['minutes_overdue']} min"
+        msg = (f"🚨 {ref} {j.origin} → {j.destination} is OVERDUE by {od['minutes_overdue']} min ({seen}). "
+               f"Call {_driver_contact(db, j)}"
+               f"{', vehicle ' + j.vehicle_reg if j.vehicle_reg else ''}"
+               f"{', ' + str(j.passenger_count) + ' passenger(s)' if j.passenger_count else ''}. "
+               f"Log the call in ApexPOB → Journey Management.")
+        _alert_team(db, j, "journey_overdue", title, msg, f"journey_overdue_{j.id}_{now:%Y%m%d%H%M}")
+        j.overdue_alerted_at = now
+        db.commit()
+        sent += 1
+    return sent
+
+
+async def journey_watch_loop() -> None:
+    """Leader-only background loop: check journeys under way once a minute."""
+    import asyncio
+    from ..core.database import SessionLocal
+
+    def tick():
+        db = SessionLocal()
+        try:
+            return journey_overdue_watch(db)
+        finally:
+            db.close()
+    while True:
+        try:
+            n = await asyncio.to_thread(tick)
+            if n:
+                logger.warning("Journey watch: %d overdue alert(s) sent", n)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Journey watch error: %s", e)
+        await asyncio.sleep(60)
 
 
 # ─── POB effect (journeys that cross the site boundary) ─────────────────────────
@@ -332,6 +422,7 @@ async def journey_stats(db: Session = Depends(get_db), _=Depends(get_current_use
 @router.post("", status_code=201)
 async def create_journey(payload: JourneyCreate, db: Session = Depends(get_db),
                          current_user=Depends(get_current_user)):
+    _check_times(payload.planned_departure, payload.planned_arrival)
     level, reasons = compute_risk(payload.distance_km, payload.planned_departure,
                                   payload.planned_arrival, payload.risk_factors)
     j = JourneyPlan(
@@ -379,6 +470,7 @@ async def update_journey(journey_id: int, payload: JourneyUpdate, db: Session = 
     manual = data.pop("risk_factors", None)
     if manual is not None:
         j.risk_manual_factors = manual
+    _check_times(data.get("planned_departure", j.planned_departure), data.get("planned_arrival", j.planned_arrival))
     for k, v in data.items():
         setattr(j, k, v)
     if payload.passengers is not None:
@@ -516,26 +608,16 @@ async def journey_checkin(journey_id: int, payload: CheckInBody, db: Session = D
     ))
     j.last_checkin_at = now
     j.next_checkin_due = now + timedelta(minutes=j.checkin_interval_min or 60)
+    j.overdue_alerted_at = None
     db.commit()
     if (payload.status or "OK").upper() == "CONCERN":
         # A driver reporting a problem is exactly what the control room must see now.
         ref = j.reference or f"JMP-{j.id}"
         msg = (f"⚠️ {ref} {j.origin} → {j.destination}: driver {j.driver_name or ''} reported a CONCERN"
                f"{' at ' + payload.location if payload.location else ''}. {payload.notes or ''}").strip()
-        dk = f"journey_concern_{j.id}_{now:%Y%m%d%H%M%S}"
-        db.execute(text("""
-            INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, expires_at)
-            VALUES (:dk, 'journey_concern', :t, :m, 'critical', NOW() + INTERVAL '48 hours')
-            ON CONFLICT (dedup_key) DO NOTHING
-        """), {"dk": dk, "t": f"Journey concern {ref}", "m": msg})
-        db.commit()
-        try:
-            from .notifications import notify_sync
-            notify_sync({"type": "journey_concern", "priority": "critical",
-                         "title": f"Journey concern {ref}", "message": msg,
-                         "dedup_key": dk, "journey_id": j.id})
-        except Exception as e:
-            logger.warning("journey concern broadcast failed: %s", e)
+        msg += f" Call {_driver_contact(db, j)}."
+        _alert_team(db, j, "journey_concern", f"Journey concern {ref}", msg,
+                    f"journey_concern_{j.id}_{now:%Y%m%d%H%M%S}")
     return _to_dict(j, with_checkins=True)
 
 
@@ -547,6 +629,7 @@ async def complete_journey(journey_id: int, db: Session = Depends(get_db), _=Dep
     j.status = "COMPLETED"
     j.actual_arrival = _now()
     j.next_checkin_due = None
+    j.overdue_alerted_at = None
     _apply_journey_pob(db, j, "complete", getattr(_, "id", None))
     db.commit()
     return _to_dict(j)
@@ -559,6 +642,7 @@ async def cancel_journey(journey_id: int, db: Session = Depends(get_db), _=Depen
         raise HTTPException(status_code=400, detail=f"Journey already {j.status}")
     j.status = "CANCELLED"
     j.next_checkin_due = None
+    j.overdue_alerted_at = None
     _apply_journey_pob(db, j, "undo")       # a trip abandoned under way: back on site
     db.commit()
     return _to_dict(j)

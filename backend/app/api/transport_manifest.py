@@ -77,6 +77,15 @@ class ManifestEntryUpdate(BaseModel):
 
 class FlightStatusUpdate(BaseModel):
     status: str                        # SCHEDULED / CONFIRMED / CANCELLED / COMPLETED / IN_TRANSIT
+    notify: bool = True                # tell the passengers when the flight is cancelled
+
+
+def _check_times(dep: Optional[datetime], arr: Optional[datetime]) -> None:
+    if dep and arr:
+        a = arr if arr.tzinfo else arr.replace(tzinfo=timezone.utc)
+        d = dep if dep.tzinfo else dep.replace(tzinfo=timezone.utc)
+        if a <= d:
+            raise HTTPException(status_code=400, detail="Arrival must be after departure")
 
 
 class CrewMember(BaseModel):
@@ -463,6 +472,11 @@ async def create_flight(
     current_user=Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Create a new flight/voyage schedule, auto-creating the transport if not found."""
+    _check_times(payload.departure_time, payload.arrival_time)
+    if not payload.transport_identifier.strip():
+        raise HTTPException(status_code=400, detail="Transport ID is required")
+    if payload.transport_capacity is not None and payload.transport_capacity < 1:
+        raise HTTPException(status_code=400, detail="Capacity must be at least 1 seat")
     transport = (
         db.query(Transport)
         .filter(Transport.identifier == payload.transport_identifier)
@@ -585,6 +599,18 @@ async def update_flight_status(
     for e in db.query(ManifestEntry).filter(ManifestEntry.schedule_id == flight_id).all():
         _sync_entry_pob(db, schedule, e, getattr(_, "id", None))
     db.commit()
+    notified = None
+    if new_status == "CANCELLED" and cur != "CANCELLED" and payload.notify:
+        s2 = (db.query(TransportSchedule)
+              .options(joinedload(TransportSchedule.transport), joinedload(TransportSchedule.manifest_entries))
+              .filter(TransportSchedule.id == flight_id).first())
+        if s2.manifest_entries:
+            ident = s2.transport.identifier if s2.transport else f"#{flight_id}"
+            when = s2.departure_time.astimezone(_site_tz()).strftime("%d %b %H:%M") if s2.departure_time else ""
+            notified = await _notify_passengers(
+                db, s2, f"CANCELLED: {ident} {s2.departure_location} → {s2.arrival_location}",
+                f"Your transport {ident} ({s2.departure_location} → {s2.arrival_location}, {when}) has been "
+                f"CANCELLED. You will be told about the new arrangement.", email=True, sms=True)
     delay = None
     if schedule.actual_departure_time and schedule.departure_time:
         delay = round((schedule.actual_departure_time - schedule.departure_time).total_seconds() / 60)
@@ -594,7 +620,26 @@ async def update_flight_status(
         "actual_departure_time": schedule.actual_departure_time.isoformat() if schedule.actual_departure_time else None,
         "actual_arrival_time": schedule.actual_arrival_time.isoformat() if schedule.actual_arrival_time else None,
         "departure_delay_min": delay,
+        "notified": notified,
     }
+
+
+@router.delete("/flights/{flight_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_flight(flight_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Delete a journey created by mistake. Once anyone has boarded (or it has moved),
+    it is a record of who travelled — cancel it instead."""
+    s = db.query(TransportSchedule).filter(TransportSchedule.id == flight_id).first()
+    if not s:
+        raise HTTPException(status_code=404, detail="Flight not found")
+    if (s.status or "").upper() in ("IN_TRANSIT", "COMPLETED"):
+        raise HTTPException(status_code=400, detail=f"A {s.status} journey is a travel record — it cannot be deleted")
+    entries = db.query(ManifestEntry).filter(ManifestEntry.schedule_id == flight_id).all()
+    if any(e.status == "CONFIRMED" or e.pob_applied_at for e in entries):
+        raise HTTPException(status_code=400, detail="Passengers have checked in on this journey — cancel it instead")
+    for e in entries:
+        db.delete(e)
+    db.delete(s)
+    db.commit()
 
 
 # ─── Manifest endpoints ────────────────────────────────────────────────────────
@@ -690,6 +735,12 @@ async def add_manifest_entry(
     db.refresh(entry)
     out = _entry_to_dict(entry)
     out["compliance"] = travel_compliance(person)
+    # Heads-up when the booking doesn't match where the person is now.
+    if person is not None:
+        if entry.direction == "INBOUND" and person.is_onboard:
+            out["pob_note"] = f"{passenger_name} is already on board — check this is the right direction"
+        elif entry.direction == "OUTBOUND" and not person.is_onboard:
+            out["pob_note"] = f"{passenger_name} is not on board at the moment"
     return out
 
 
@@ -908,6 +959,8 @@ async def set_cargo(flight_id: int, payload: CargoUpdate, db: Session = Depends(
 class NotifyBody(BaseModel):
     subject: Optional[str] = None
     message: Optional[str] = None
+    whatsapp: bool = True
+    telegram: bool = True
     email: bool = True
     sms: bool = False
 
@@ -934,21 +987,35 @@ async def notify_passengers(flight_id: int, payload: NotifyBody, db: Session = D
         f"Please be at the departure point in good time with your ID."
     )
 
-    result = await _notify_passengers(db, s, subject, body, payload.email, payload.sms)
+    result = await _notify_passengers(db, s, subject, body, payload.email, payload.sms,
+                                      whatsapp=payload.whatsapp, telegram=payload.telegram)
     return {"success": True, "result": result}
 
 
 async def _notify_passengers(db: Session, s: TransportSchedule, subject: str, body: str,
-                             email: bool = True, sms: bool = False) -> Dict[str, Any]:
-    """Tell the passengers (their own email / WhatsApp / SMS — never a next-of-kin
-    number) through the shared alert dispatcher, logged per recipient."""
+                             email: bool = True, sms: bool = False,
+                             whatsapp: bool = True, telegram: bool = True) -> Dict[str, Any]:
+    """Tell the passengers (their own email / WhatsApp / Telegram / SMS — never a
+    next-of-kin number) through the shared alert dispatcher, logged per recipient.
+
+    Returns {channels: {ch: {sent, failed, note?}}, passengers, registered, guests,
+    unreachable, sent_any} so the screen can say exactly what happened."""
     from ..services.notify_dispatch import dispatch, people_from_personnel
     entries = [e for e in (s.manifest_entries or []) if e.status not in ("NO_SHOW", "OFFLOADED")]
     pids = [e.personnel_id for e in entries if e.personnel_id]
     people = people_from_personnel(db, ids=pids) if pids else []
-    channels = ["whatsapp", "telegram"] + (["email"] if email else []) + (["sms"] if sms else [])
-    summary = await asyncio.to_thread(dispatch, "transport", s.id, people, subject, body, channels, False)
-    return {ch: (summary.get(ch) or {"sent": 0}) for ch in channels}
+    channels = ([c for c, on in (("whatsapp", whatsapp), ("telegram", telegram), ("email", email), ("sms", sms)) if on])
+    summary = await asyncio.to_thread(dispatch, "transport", s.id, people, subject, body, channels, False) \
+        if people and channels else {}
+    per = {ch: (summary.get(ch) or {"sent": 0, "failed": 0}) for ch in channels}
+    return {
+        "channels": per,
+        "passengers": len(entries),
+        "registered": len(people),
+        "guests": len(entries) - len(pids),
+        "unreachable": summary.get("unreachable", 0),
+        "sent_any": any((v.get("sent") or 0) > 0 for v in per.values()),
+    }
 
 
 class FlightUpdate(BaseModel):
@@ -975,6 +1042,7 @@ async def update_flight(flight_id: int, payload: FlightUpdate, db: Session = Dep
         raise HTTPException(status_code=400, detail=f"A {s.status} flight cannot be edited")
     old_dep = s.departure_time
     data = payload.dict(exclude_unset=True)
+    _check_times(data.get("departure_time", s.departure_time), data.get("arrival_time", s.arrival_time))
     data.pop("notify", None)
     if "notes" in data:
         s.special_requirements = data.pop("notes")
@@ -1188,6 +1256,8 @@ async def pob_summary(
         .filter(ManifestEntry.schedule_id.in_(flight_ids))
         .all()
     )
+    refs = {f.id: (f"{f.transport.identifier} " if f.transport else "") +
+            f"{f.departure_location} → {f.arrival_location}" for f in flights_today}
 
     # Count only movements that actually happened (flight arrived / departed) — a
     # boarded passenger on a flight that has not moved has not changed POB yet.
@@ -1200,6 +1270,7 @@ async def pob_summary(
     unreconciled = [
         {
             "flight_id": e.schedule_id,
+            "flight_ref": refs.get(e.schedule_id),
             "passenger_name": e.passenger_name,
             "emp_code": e.emp_code,
             "direction": e.direction,
@@ -1333,5 +1404,5 @@ async def reconcile_manifest_with_mustering(
             {"emp_code": c, "name": _name(c)} for c in extra_on_platform
         ],
         "verified_emp_codes": verified,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }

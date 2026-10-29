@@ -821,7 +821,7 @@ const FireMode = () => {
                     content: 'Fire Mode ends: fire exits are re-locked, sirens switched off and any running muster is closed with an all-clear message to staff and the response team.',
                     okText: 'ISSUE ALL CLEAR', cancelText: 'Cancel',
                     okButtonProps: { style: { background: '#389e0d', borderColor: '#389e0d' } },
-                    onOk: () => fireModeM.mutateAsync({ action: 'clear', reason: 'All Clear issued from Fire Mode tab' }),
+                    onOk: () => fireModeM.mutateAsync({ action: 'clear', reason: 'All Clear issued from Fire Mode tab' }).catch(() => {}),
                   })}
                   style={{
                     background: 'linear-gradient(135deg, #389e0d, #135200)',

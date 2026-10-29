@@ -324,7 +324,11 @@ function FlightList({ onSelectFlight }) {
             <Form.Item name="departure_time" label="Departure Time" rules={[{ required: true }]}>
               <DatePicker showTime style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item name="arrival_time" label="ETA (optional)">
+            <Form.Item name="arrival_time" label="ETA (optional)" dependencies={['departure_time']}
+              rules={[({ getFieldValue }) => ({
+                validator: (_, v) => (!v || !getFieldValue('departure_time') || v.isAfter(getFieldValue('departure_time'))
+                  ? Promise.resolve() : Promise.reject(new Error('ETA must be after departure'))),
+              })]}>
               <DatePicker showTime style={{ width: '100%' }} />
             </Form.Item>
           </div>
@@ -362,7 +366,21 @@ function FlightList({ onSelectFlight }) {
 
 // ─── Manifest drawer ──────────────────────────────────────────────────────────
 
-function ManifestDrawer({ flight, onClose }) {
+// What the passengers were told, in one line ("WhatsApp 3 · Email 2 · 1 guest has no contact on file").
+const notifySummary = (r) => {
+  if (!r) return { ok: false, text: 'Nothing sent' };
+  const NAMES = { whatsapp: 'WhatsApp', telegram: 'Telegram', email: 'Email', sms: 'SMS' };
+  const parts = Object.entries(r.channels || {})
+    .filter(([, v]) => (v.sent || 0) > 0 || (v.failed || 0) > 0)
+    .map(([k, v]) => `${NAMES[k] || k} ${v.sent || 0}${v.failed ? ` (${v.failed} failed)` : ''}`);
+  const gaps = [];
+  if (r.guests) gaps.push(`${r.guests} guest(s) have no contact on file`);
+  if (r.unreachable) gaps.push(`${r.unreachable} staff have no phone/email`);
+  if (!r.registered && !r.guests) gaps.push('no passengers to tell');
+  return { ok: !!r.sent_any, text: [parts.join(' · ') || 'Nothing sent', ...gaps].join(' — ') };
+};
+
+function ManifestDrawer({ flight: picked, onClose }) {
   const { message, modal } = App.useApp();
   const [addForm] = Form.useForm();
   const [crewForm] = Form.useForm();
@@ -390,17 +408,24 @@ function ManifestDrawer({ flight, onClose }) {
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
-      message.success(res?.notified ? 'Flight updated — passengers notified' : 'Flight updated');
+      if (res?.notified) {
+        const n = notifySummary(res.notified);
+        (n.ok ? message.success : message.warning)(`Flight updated — passengers: ${n.text}`, 8);
+      } else message.success('Flight updated');
       setShowEdit(false);
     },
     onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Failed to update flight'),
   });
 
   const { data, isLoading } = useQuery({
-    queryKey: ['manifest', flight?.id],
-    queryFn: () => apiService.get(`/api/v1/transport/flights/${flight.id}/manifest`),
-    enabled: !!flight,
+    queryKey: ['manifest', picked?.id],
+    queryFn: () => apiService.get(`/api/v1/transport/flights/${picked.id}/manifest`),
+    enabled: !!picked,
   });
+  // The row clicked in the list is a snapshot — after a status change or reschedule the
+  // drawer kept showing the old status/time and offering the wrong next steps. Use the
+  // live copy returned with the manifest.
+  const flight = picked ? { ...picked, ...(data?.summary || {}) } : null;
 
   const searchPersonnel = useCallback(async (term) => {
     if (term.length < 2) return;
@@ -431,6 +456,7 @@ function ManifestDrawer({ flight, onClose }) {
       if (c?.status === 'blocked') message.error(`Added — NOT fit to travel: ${c.issues.join('; ')}`, 6);
       else if (c?.status === 'warning') message.warning(`Added — ${c.issues.join('; ')}`, 5);
       else message.success('Passenger added');
+      if (res?.pob_note) message.warning(res.pob_note, 6);
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       addForm.resetFields();
@@ -455,7 +481,9 @@ function ManifestDrawer({ flight, onClose }) {
     mutationFn: ({ entryId, status, override_capacity, override_compliance, override_weight, remarks }) =>
       apiService.patch(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`,
         { status, override_capacity, override_compliance, override_weight, remarks }),
-    onSuccess: () => {
+    onSuccess: (r, v) => {
+      message.success({ CONFIRMED: `${r?.passenger_name || 'Passenger'} checked in`, NO_SHOW: `${r?.passenger_name || 'Passenger'} marked no-show`,
+        MANIFESTED: `${r?.passenger_name || 'Passenger'} reset to manifested`, OFFLOADED: `${r?.passenger_name || 'Passenger'} offloaded` }[v.status] || 'Updated');
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       qc.invalidateQueries({ queryKey: ['pob-summary'] });
@@ -517,12 +545,8 @@ function ManifestDrawer({ flight, onClose }) {
   const notifyPax = useMutation({
     mutationFn: (v) => apiService.post(`/api/v1/transport/flights/${flight.id}/notify`, v),
     onSuccess: (res) => {
-      const r = res?.result || {};
-      const em = r.email?.sent, sm = r.sms?.sent;
-      const parts = [];
-      if (r.email) parts.push(r.email.error ? `Email: ${r.email.error}` : `Email sent to ${em}`);
-      if (r.sms) parts.push(r.sms.error ? `SMS: ${r.sms.error}` : `SMS sent to ${sm}`);
-      (em || sm) ? message.success(parts.join(' · ')) : message.warning(parts.join(' · ') || 'Nothing sent');
+      const n = notifySummary(res?.result);
+      (n.ok ? message.success : message.warning)(`Passengers: ${n.text}`, 8);
       setShowNotify(false);
     },
     onError: (e) => message.error(e.message || 'Failed to notify'),
@@ -546,6 +570,17 @@ function ManifestDrawer({ flight, onClose }) {
     }
   };
 
+  const deleteFlight = useMutation({
+    mutationFn: () => apiService.delete(`/api/v1/transport/flights/${flight.id}`),
+    onSuccess: () => {
+      message.success('Journey deleted');
+      qc.invalidateQueries({ queryKey: ['transport-flights'] });
+      qc.invalidateQueries({ queryKey: ['transport-analytics'] });
+      onClose();
+    },
+    onError: (e) => message.error(e.message || 'Could not delete'),
+  });
+
   const deleteEntry = useMutation({
     mutationFn: (entryId) =>
       apiService.delete(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`),
@@ -559,15 +594,17 @@ function ManifestDrawer({ flight, onClose }) {
   const updateFlightStatus = useMutation({
     mutationFn: (newStatus) =>
       apiService.patch(`/api/v1/transport/flights/${flight.id}/status`, { status: newStatus }),
-    onSuccess: (_r, newStatus) => {
+    onSuccess: (r, newStatus) => {
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       qc.invalidateQueries({ queryKey: ['pob-summary'] });
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      qc.invalidateQueries({ queryKey: ['transport-analytics'] });
+      const told = r?.notified ? ` Passengers: ${notifySummary(r.notified).text}.` : '';
       message.success(
-        newStatus === 'IN_TRANSIT' ? 'Departed — outbound passengers taken off POB'
-        : newStatus === 'COMPLETED' ? 'Completed — inbound passengers added to POB'
-        : newStatus === 'CANCELLED' ? 'Cancelled — any POB changes undone'
-        : 'Flight status updated');
+        (newStatus === 'IN_TRANSIT' ? 'Departed — outbound passengers taken off POB.'
+        : newStatus === 'COMPLETED' ? 'Completed — inbound passengers added to POB.'
+        : newStatus === 'CANCELLED' ? 'Cancelled — any POB changes undone.'
+        : 'Flight status updated.') + told, 8);
     },
     onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Failed to update flight status'),
   });
@@ -589,7 +626,7 @@ function ManifestDrawer({ flight, onClose }) {
     content: 'This passenger will be removed from this flight.',
     okType: 'danger',
     okText: 'Remove',
-    onOk: async () => { await deleteEntry.mutateAsync(entryId); },
+    onOk: () => deleteEntry.mutateAsync(entryId).catch(() => {}),
   });
 
   const entries = data?.entries ?? [];
@@ -746,7 +783,7 @@ function ManifestDrawer({ flight, onClose }) {
                     ? 'Boarded OUTBOUND passengers will be taken off POB.'
                     : v === 'COMPLETED'
                       ? 'Boarded INBOUND passengers will be added to POB (and outbound taken off if not already).'
-                      : 'Any POB changes already made for this flight will be undone.',
+                      : 'Any POB changes already made for this flight will be undone, and the passengers are told it is cancelled.',
                   onOk: () => updateFlightStatus.mutate(v),
                 });
               } else {
@@ -756,9 +793,21 @@ function ManifestDrawer({ flight, onClose }) {
             options={[flight?.status, ...(FLIGHT_NEXT[flight?.status] || [])].filter(Boolean)
               .map(v => ({ value: v, label: FLIGHT_STATUS_CFG[v]?.label || v }))}
           />
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setShowAdd(true)}>
-            Add PAX
-          </Button>
+          {['SCHEDULED', 'CONFIRMED', 'CANCELLED'].includes(flight?.status) && (
+            <Tooltip title="Delete a journey created by mistake (only before anyone has checked in)">
+              <Button size="small" danger icon={<DeleteOutlined />} loading={deleteFlight.isPending}
+                onClick={() => modal.confirm({
+                  title: 'Delete this journey?', okType: 'danger', okText: 'Delete',
+                  content: 'The journey and its passenger list are removed. Use Cancelled instead if it was a real booking.',
+                  onOk: () => deleteFlight.mutateAsync().catch(() => {}),   // error shown by onError
+                })} />
+            </Tooltip>
+          )}
+          {!['COMPLETED', 'CANCELLED'].includes(flight?.status) && (
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setShowAdd(true)}>
+              Add PAX
+            </Button>
+          )}
         </div>
       }
     >
@@ -1005,11 +1054,12 @@ function ManifestDrawer({ flight, onClose }) {
       <Modal title="Notify passengers" open={showNotify} onCancel={() => setShowNotify(false)}
         onOk={() => notifyForm.submit()} confirmLoading={notifyPax.isPending} okText="Send">
         <p style={{ color: '#64748b', fontSize: 13, marginTop: 0 }}>
-          Emails/texts the passengers on this manifest who have contact details on file
-          (uses your configured Email / SMS gateways).
+          Sends to the passengers on this manifest who are registered staff, on their own
+          WhatsApp / Telegram / email / phone (channels set up under Settings → WhatsApp &amp; Alerts).
+          Guests have no contact on file. Every message is in the alert log.
         </p>
         <Form form={notifyForm} layout="vertical"
-          initialValues={{ email: true, sms: false }}
+          initialValues={{ whatsapp: true, telegram: true, email: true, sms: false }}
           onFinish={(v) => notifyPax.mutate(v)}>
           <Form.Item name="subject" label="Subject (optional)">
             <Input placeholder="Auto: Transport <id>: route" />
@@ -1018,6 +1068,8 @@ function ManifestDrawer({ flight, onClose }) {
             <Input.TextArea rows={3} placeholder="Auto: booking + departure details" />
           </Form.Item>
           <Space size="large">
+            <Form.Item name="whatsapp" valuePropName="checked" noStyle><Checkbox>WhatsApp</Checkbox></Form.Item>
+            <Form.Item name="telegram" valuePropName="checked" noStyle><Checkbox>Telegram</Checkbox></Form.Item>
             <Form.Item name="email" valuePropName="checked" noStyle><Checkbox>Email</Checkbox></Form.Item>
             <Form.Item name="sms" valuePropName="checked" noStyle><Checkbox>SMS</Checkbox></Form.Item>
           </Space>
@@ -1030,7 +1082,7 @@ function ManifestDrawer({ flight, onClose }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <SafetyCertificateOutlined style={{ color: reconcileResult?.reconciled ? '#16a34a' : '#dc2626' }} />
             <span>Muster Reconciliation</span>
-            {reconcileResult && (
+            {reconcileResult && (reconcileResult.summary?.manifest_total ?? 0) > 0 && (
               <span style={{
                 padding: '2px 8px', borderRadius: 999, fontSize: 12, fontWeight: 600,
                 color: reconcileResult.reconciled ? '#16a34a' : '#dc2626',
@@ -1053,7 +1105,7 @@ function ManifestDrawer({ flight, onClose }) {
               {[
                 { label: 'Manifest Total',    value: reconcileResult.summary?.manifest_total    ?? 0, color: '#64748b' },
                 { label: 'Verified',          value: reconcileResult.summary?.verified          ?? 0, color: '#16a34a' },
-                { label: 'Missing in Muster', value: reconcileResult.summary?.missing_in_muster ?? 0, color: '#dc2626' },
+                { label: reconcileResult.headcount_source === 'active_muster' ? 'Missing in Muster' : 'Not on board', value: reconcileResult.summary?.missing_in_muster ?? 0, color: '#dc2626' },
                 { label: 'Extra on Platform', value: reconcileResult.summary?.extra_on_platform ?? 0, color: '#d97706' },
               ].map(s => (
                 <div key={s.label} style={{ flex: 1, textAlign: 'center', padding: '10px 0', borderRadius: 8, background: `${s.color}0d`, border: `1px solid ${s.color}30` }}>
@@ -1064,14 +1116,14 @@ function ManifestDrawer({ flight, onClose }) {
             </div>
 
             <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 12 }}>
-              Source: {reconcileResult.headcount_source === 'active_muster' ? 'Active Muster Event' : 'Last 24h Attendance'}
+              Checked against: {reconcileResult.headcount_source === 'active_muster' ? 'the running muster (people counted safe)' : 'who is on board now (no muster running)'}
               &nbsp;·&nbsp;Generated {dayjs(reconcileResult.generated_at).format('HH:mm')}
             </div>
 
             {reconcileResult.missing_in_muster?.length > 0 && (
               <>
                 <div style={{ fontWeight: 600, color: '#dc2626', marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <WarningOutlined /> Missing in Muster ({reconcileResult.missing_in_muster.length})
+                  <WarningOutlined /> {reconcileResult.headcount_source === 'active_muster' ? 'Missing in Muster' : 'Booked to fly out but not on board'} ({reconcileResult.missing_in_muster.length})
                 </div>
                 <div style={{ background: '#fef2f2', border: '1px solid #fecaca', borderRadius: 6, padding: '8px 12px', marginBottom: 12 }}>
                   {reconcileResult.missing_in_muster.map(p => (
@@ -1100,8 +1152,13 @@ function ManifestDrawer({ flight, onClose }) {
               </>
             )}
 
-            {reconcileResult.reconciled && (
-              <Alert type="success" showIcon message="All manifested passengers are accounted for in the muster. Safe to proceed." />
+            {reconcileResult.reconciled && (reconcileResult.summary?.manifest_total ?? 0) > 0 && (
+              <Alert type="success" showIcon message={reconcileResult.headcount_source === 'active_muster'
+                ? 'All outbound passengers are accounted for in the muster. Safe to proceed.'
+                : 'All outbound passengers are on board. Safe to proceed.'} />
+            )}
+            {(reconcileResult.summary?.manifest_total ?? 0) === 0 && (
+              <Alert type="info" showIcon message="No outbound staff on this manifest — nothing to reconcile (inbound passengers are not on site yet)." />
             )}
           </>
         )}
@@ -1120,7 +1177,11 @@ function ManifestDrawer({ flight, onClose }) {
           <Form.Item name="departure_time" label="Departure" rules={[{ required: true }]}>
             <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item name="arrival_time" label="Arrival (optional)">
+          <Form.Item name="arrival_time" label="Arrival (optional)" dependencies={['departure_time']}
+            rules={[({ getFieldValue }) => ({
+              validator: (_, v) => (!v || !getFieldValue('departure_time') || v.isAfter(getFieldValue('departure_time'))
+                ? Promise.resolve() : Promise.reject(new Error('Arrival must be after departure'))),
+            })]}>
             <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="notify" valuePropName="checked">
@@ -1212,7 +1273,7 @@ function POBSummary() {
                   title: 'Direction', dataIndex: 'direction',
                   render: v => <StatusPill status={v} cfg={DIRECTION_CFG} />,
                 },
-                { title: 'Flight', dataIndex: 'flight_id', render: v => `#${v}` },
+                { title: 'Flight', dataIndex: 'flight_ref', render: (v, r) => v || `#${r.flight_id}` },
               ]}
             />
           </div>

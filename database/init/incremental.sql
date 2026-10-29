@@ -639,3 +639,7 @@ ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state       VARCHAR(12);   --
 ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_at    TIMESTAMPTZ;
 ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_by    VARCHAR(150);
 ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_error TEXT;          -- last command's error, NULL when it worked
+
+-- Journey management: when the overdue alert was last sent (re-sent every 30 min while
+-- still overdue; cleared by a check-in, completion or cancellation).
+ALTER TABLE journey_plan ADD COLUMN IF NOT EXISTS overdue_alerted_at TIMESTAMPTZ;
