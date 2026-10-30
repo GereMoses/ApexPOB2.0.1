@@ -77,7 +77,8 @@ async def get_visitor_types(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/types", response_model=VisitorTypeResponse)
+@router.post("/types/", response_model=VisitorTypeResponse)
+@router.post("/types", response_model=VisitorTypeResponse, include_in_schema=False)
 async def create_visitor_type(
     type_data: VisitorTypeCreate,
     db: Session = Depends(get_db),
@@ -158,7 +159,8 @@ async def get_visitors(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/visitors", response_model=VisitorResponse)
+@router.post("/visitors/", response_model=VisitorResponse)
+@router.post("/visitors", response_model=VisitorResponse, include_in_schema=False)
 async def create_visitor(
     visitor_data: VisitorCreate,
     db: Session = Depends(get_db),
@@ -270,7 +272,8 @@ async def get_pre_registrations(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/pre-register", response_model=VisitorPreRegistrationResponse)
+@router.post("/pre-register/", response_model=VisitorPreRegistrationResponse)
+@router.post("/pre-register", response_model=VisitorPreRegistrationResponse, include_in_schema=False)
 async def create_pre_registration(
     pre_reg_data: VisitorPreRegistrationCreate,
     db: Session = Depends(get_db),
@@ -366,6 +369,8 @@ async def approve_pre_registration(
             message=f"Pre-registration {approval_data.status == 1 and 'approved' or 'rejected'} successfully",
             data=pre_reg
         )
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -480,7 +485,8 @@ async def scan_qr_code(
 
 
 # Check-In/Check-Out Endpoints
-@router.post("/check-in", response_model=VisitorVisitLogResponse)
+@router.post("/check-in/", response_model=VisitorVisitLogResponse)
+@router.post("/check-in", response_model=VisitorVisitLogResponse, include_in_schema=False)
 async def check_in_visitor(
     check_in_data: VisitorCheckIn,
     device_sn: Optional[str] = Query(None),
@@ -504,7 +510,8 @@ async def check_in_visitor(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/check-out", response_model=VisitorVisitLogResponse)
+@router.post("/check-out/", response_model=VisitorVisitLogResponse)
+@router.post("/check-out", response_model=VisitorVisitLogResponse, include_in_schema=False)
 async def check_out_visitor(
     check_out_data: VisitorCheckOut,
     device_sn: Optional[str] = Query(None),
@@ -520,6 +527,8 @@ async def check_out_visitor(
             message="Visitor checked out successfully",
             data=visit_log
         )
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -590,7 +599,8 @@ async def get_blacklist(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/blacklist", response_model=VisitorBlacklistResponse)
+@router.post("/blacklist/", response_model=VisitorBlacklistResponse)
+@router.post("/blacklist", response_model=VisitorBlacklistResponse, include_in_schema=False)
 async def add_to_blacklist(
     blacklist_data: VisitorBlacklistCreate,
     db: Session = Depends(get_db),
@@ -761,7 +771,8 @@ async def export_visit_records(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/check-out/{log_id}/force", response_model=VisitorVisitLogResponse)
+@router.post("/check-out/{log_id}/force/", response_model=VisitorVisitLogResponse)
+@router.post("/check-out/{log_id}/force", response_model=VisitorVisitLogResponse, include_in_schema=False)
 async def force_check_out(
     log_id: int,
     db: Session = Depends(get_db),
@@ -772,6 +783,8 @@ async def force_check_out(
         service = get_visitor_service(db)
         visit_log = service.force_check_out_by_log_id(log_id)
         return VisitorVisitLogResponse(success=True, message="Visitor force checked out", data=visit_log)
+    except ValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

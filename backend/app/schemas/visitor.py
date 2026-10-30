@@ -174,11 +174,14 @@ class VisitorVisitLogBase(BaseModel):
 
 class VisitorCheckIn(BaseModel):
     pre_reg_id: Optional[int] = None
+    qr_code: Optional[str] = None           # scanned pre-registration QR (the gate screen sends this)
     visitor_id: Optional[int] = None       # Existing visitor walk-in
     visitor_data: Optional[VisitorCreate] = None  # New walk-in visitor
     host_emp_id: Optional[int] = None
     area_id: Optional[int] = None
     device_sn: Optional[str] = None
+    card_no: Optional[str] = None           # physical visitor card handed over — loaded onto the door panels
+    induction_done: bool = False            # gate confirms the safety induction was given now
 
 
 class VisitorCheckOut(BaseModel):

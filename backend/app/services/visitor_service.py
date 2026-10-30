@@ -19,7 +19,7 @@ from app.models.visitor import (
 from app.models.personnel import Personnel, PersonnelAssignment
 from app.models.device import Device
 from app.models.zone import Zone
-from app.models.biotime_models import MusteringEvent, MusteringExpected, MusteringLog
+from app.models.biotime_models import MusteringEvent, MusteringLog
 from app.models.biotime_models import AccLevel
 from app.schemas.visitor import (
     VisitorCreate, VisitorUpdate, VisitorPreRegistrationCreate,
@@ -85,14 +85,9 @@ class VisitorService:
     
     def create_visitor(self, visitor_data: VisitorCreate) -> Visitor:
         """Create a new visitor"""
-        # Check if visitor already exists by ID or phone
-        existing = self.db.query(Visitor).filter(
-            or_(
-                Visitor.id_no == visitor_data.id_no,
-                Visitor.phone == visitor_data.phone
-            )
-        ).first()
-        
+        # Same person = same (non-empty) ID number or phone. Comparing empty values
+        # matched every visitor without an ID, so a second walk-in with no ID was refused.
+        existing = self._find_visitor(visitor_data)
         if existing:
             raise ValidationError("Visitor with this ID or phone already exists")
         
@@ -108,6 +103,27 @@ class VisitorService:
         self.db.refresh(visitor)
         return visitor
     
+    def _find_visitor(self, data) -> Optional[Visitor]:
+        conds = []
+        if (data.id_no or "").strip():
+            conds.append(func.lower(Visitor.id_no) == data.id_no.strip().lower())
+        if (data.phone or "").strip():
+            conds.append(Visitor.phone == data.phone.strip())
+        return self.db.query(Visitor).filter(or_(*conds)).first() if conds else None
+
+    def find_or_create_visitor(self, data: VisitorCreate) -> Visitor:
+        """A returning visitor (same ID number or phone) keeps their profile — blanks
+        are filled in from the new details — instead of the request being refused."""
+        existing = self._find_visitor(data)
+        if not existing:
+            return self.create_visitor(data)
+        for k, v in data.dict(exclude_unset=True).items():
+            if v not in (None, "") and getattr(existing, k, None) in (None, "", False):
+                setattr(existing, k, v)
+        self.db.commit()
+        self.db.refresh(existing)
+        return existing
+
     def update_visitor(self, visitor_id: int, visitor_data: VisitorUpdate) -> Visitor:
         """Update visitor information"""
         visitor = self.db.query(Visitor).filter(Visitor.id == visitor_id).first()
@@ -165,7 +181,7 @@ class VisitorService:
         # Create visitor if not exists
         visitor_id = pre_reg_data.visitor_id
         if pre_reg_data.visitor_data and not visitor_id:
-            visitor = self.create_visitor(pre_reg_data.visitor_data)
+            visitor = self.find_or_create_visitor(pre_reg_data.visitor_data)
             visitor_id = visitor.id
         
         # Generate QR code
@@ -194,6 +210,9 @@ class VisitorService:
 
         if not pre_reg:
             raise NotFoundError(f"Pre-registration {pre_reg_id}")
+        if pre_reg.status != 0:
+            # Re-approving a used / expired pass would make it valid at the gate again.
+            raise ValidationError("Only a request that is still waiting can be approved or rejected")
 
         # Safety screening: never let a blacklisted visitor be approved
         if approval_data.status == 1 and pre_reg.visitor and self._is_blacklisted(pre_reg.visitor):
@@ -282,48 +301,14 @@ class VisitorService:
         return visitor_data, host_data
 
     def _send_pre_reg_emails(self, pre_reg: VisitorPreRegistration, blocking: bool = False) -> Dict[str, Any]:
-        from app.services.email_service import VisitorEmailService
-        from app.core.config import settings
-
-        visitor_data, host_data = self._build_notification_payloads(pre_reg)
-        qr_code = pre_reg.qr_code
-        base = (getattr(settings, "FRONTEND_URL", "") or "").rstrip("/")
-        approval_url = f"{base}/visitor" if base else "the POB visitor portal"
-
-        def _run():
-            email = VisitorEmailService()
-            results = {}
-            try:
-                if host_data.get("email"):
-                    results["host"] = email.send_host_approval_email(host_data, visitor_data, approval_url)
-                if visitor_data.get("email"):
-                    results["visitor"] = email.send_visitor_registration_email(
-                        visitor_data, qr_code, host_data.get("full_name", "")
-                    )
-            except Exception as e:  # never let email break the request
-                logger.warning("Pre-registration email failed: %s", e)
-            return results
-
-        return _run() if blocking else self._fire(_run)
+        """Pending request → the host (WhatsApp / Telegram / email)."""
+        from .visitor_access import notify_host_approval
+        return notify_host_approval(self.db, pre_reg)
 
     def _send_decision_email(self, pre_reg: VisitorPreRegistration, blocking: bool = False) -> Dict[str, Any]:
-        from app.services.email_service import VisitorEmailService
-
-        visitor_data, host_data = self._build_notification_payloads(pre_reg)
-        status_str = "approved" if pre_reg.status == 1 else "rejected"
-
-        def _run():
-            email = VisitorEmailService()
-            try:
-                if visitor_data.get("email"):
-                    return {"visitor": email.send_approval_notification_email(
-                        visitor_data, host_data, status_str
-                    )}
-            except Exception as e:
-                logger.warning("Approval notification email failed: %s", e)
-            return {}
-
-        return _run() if blocking else self._fire(_run)
+        """Approved → QR gate pass to the visitor; rejected → a short note."""
+        from .visitor_access import notify_visitor_decision
+        return notify_visitor_decision(self.db, pre_reg)
 
     def _notify_pre_registration_created(self, pre_reg: VisitorPreRegistration):
         try:
@@ -352,20 +337,41 @@ class VisitorService:
     # Check-In/Check-Out Management
     def check_in_visitor(self, check_in_data: VisitorCheckIn, device_sn: Optional[str] = None,
                         created_by: Optional[int] = None) -> VisitorVisitLog:
-        """Check-in visitor"""
+        """Check a visitor in at the gate.
+
+        Pre-registered visitors (by QR code or id) must be APPROVED and booked for
+        today. The visitor type's safety induction must be done (or confirmed now). A
+        physical card handed over is loaded onto the door panels; with none they get
+        no door access. A visitor arriving during a muster is added to it, and the
+        host is told their visitor has arrived."""
+        from .visitor_access import card_in_use, is_temp_card, load_visitor_card, notify_host_arrival, _site_today
         visitor = None
         pre_reg = None
 
-        if check_in_data.pre_reg_id:
+        if check_in_data.qr_code and not check_in_data.pre_reg_id:
+            pre_reg = self.get_pre_registration_by_qr(check_in_data.qr_code.strip())
+            if not pre_reg:
+                raise NotFoundError("Pre-registration for that QR code")
+        elif check_in_data.pre_reg_id:
             pre_reg = self.db.query(VisitorPreRegistration).filter(
                 VisitorPreRegistration.id == check_in_data.pre_reg_id
             ).first()
             if not pre_reg:
                 raise NotFoundError("Pre-registration")
+
+        if pre_reg is not None:
+            state = {0: "is still waiting for the host's approval", 2: "was rejected by the host",
+                     3: "has already been used to check in", 4: "has already been used (checked out)",
+                     5: "has expired"}.get(pre_reg.status)
+            if state:
+                raise ValidationError(f"This pre-registration {state}")
+            today = _site_today()
+            if pre_reg.visit_date and pre_reg.visit_date != today:
+                raise ValidationError(
+                    f"This visit is booked for {pre_reg.visit_date:%d %b %Y}, not today — ask the host to rebook it")
             visitor = pre_reg.visitor
             if not visitor:
                 raise NotFoundError("Visitor")
-            pre_reg.status = 3  # checked_in
 
         elif check_in_data.visitor_id:
             # Returning visitor walk-in — look up existing profile
@@ -374,123 +380,120 @@ class VisitorService:
                 raise NotFoundError("Visitor")
 
         elif check_in_data.visitor_data:
-            visitor = self.create_visitor(check_in_data.visitor_data)
+            # Screen BEFORE creating a profile — a refused person leaves no new record.
+            if self._is_blacklisted(Visitor(**check_in_data.visitor_data.dict())):
+                raise ValidationError("Visitor is blacklisted")
+            visitor = self.find_or_create_visitor(check_in_data.visitor_data)
         else:
-            raise ValidationError("Either pre_reg_id, visitor_id, or visitor_data required")
-        
-        # Check blacklist
+            raise ValidationError("Scan a QR code, pick a returning visitor, or enter the walk-in's details")
+
         if self._is_blacklisted(visitor):
             raise ValidationError("Visitor is blacklisted")
-        
-        # Check if already checked in
+
         active_visit = self.db.query(VisitorVisitLog).filter(
-            and_(
-                VisitorVisitLog.visitor_id == visitor.id,
-                VisitorVisitLog.status == 0  # checked in
-            )
+            VisitorVisitLog.visitor_id == visitor.id, VisitorVisitLog.status.in_([0, 2])
         ).first()
-        
         if active_visit:
             raise ValidationError("Visitor is already checked in")
-        
-        # Generate temporary card number
-        card_no = self._generate_temp_card()
-        
-        # Create visit log
+
+        host_id = check_in_data.host_emp_id or (pre_reg.host_emp_id if pre_reg else None)
+        if not host_id:
+            raise ValidationError("Every visitor needs a host — pick the staff member they are visiting")
+
+        # Safety induction required by the visitor type
+        vtype = self.db.query(VisitorType).filter(VisitorType.id == visitor.visitor_type_id).first() \
+            if visitor.visitor_type_id else None
+        needs_induction = bool(vtype and (vtype.induction_required or vtype.safety_induction_required))
+        if needs_induction and not visitor.safety_induction_done:
+            if not check_in_data.induction_done:
+                raise ValidationError(f"{vtype.type_name} visitors need the safety induction — give it and tick "
+                                      f"'Safety induction done' to check in")
+            visitor.safety_induction_done = True
+
+        # Door card: a real card is checked for clashes; none → a TMP reference (no door access)
+        card_no = (check_in_data.card_no or "").strip()
+        if card_no:
+            holder = card_in_use(self.db, card_no)
+            if holder:
+                raise ValidationError(f"Card {card_no} is already held by {holder}")
+        else:
+            card_no = self._generate_temp_card()
+
+        if pre_reg is not None:
+            pre_reg.status = 3  # checked_in
+
         visit_log = VisitorVisitLog(
             visitor_id=visitor.id,
             pre_reg_id=pre_reg.id if pre_reg else None,
-            host_emp_id=check_in_data.host_emp_id or (pre_reg.host_emp_id if pre_reg else None),
+            host_emp_id=host_id,
             area_id=check_in_data.area_id or (pre_reg.area_id if pre_reg else None),
             card_no=card_no,
             device_sn=device_sn,
             created_by=created_by
         )
-        
-        # Set mustering zone if active event
-        active_event = self.db.query(MusteringEvent).filter(
-            MusteringEvent.status == 0  # active
-        ).first()
-        
-        if active_event:
-            # Determine mustering zone
-            mustering_zone_id = self._get_mustering_zone_for_visitor(
-                visit_log.area_id, visitor.visitor_type_id
-            )
-            visit_log.mustering_zone_id = mustering_zone_id
-            
-            # Add to mustering expected
-            mustering_expected = MusteringExpected(
-                event_id=active_event.id,
-                personnel_id=None,  # Not a regular employee
-                visitor_id=visitor.id,
-                mustering_zone_id=mustering_zone_id,
-                expected_time=datetime.utcnow()
-            )
-            self.db.add(mustering_expected)
-        
         self.db.add(visit_log)
         self.db.commit()
         self.db.refresh(visit_log)
-        
-        # Sync to devices
-        self._sync_visitor_to_device(visitor, card_no, device_sn)
-        
+
+        # Arriving during a muster: they are on site, so they must be accounted for.
+        try:
+            from .mustering_service import MusteringService
+            MusteringService(self.db).add_visitor_to_active_musters(visit_log.id)
+        except Exception as e:  # noqa: BLE001 — never block the gate on the muster list
+            logger.warning("Could not add visitor %s to the running muster: %s", visit_log.id, e)
+            self.db.rollback()
+        try:
+            notify_host_arrival(self.db, visit_log)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Host arrival message failed: %s", e)
+        if not is_temp_card(card_no):
+            load_visitor_card(visit_log.id)
         return visit_log
-    
-    def check_out_visitor(self, check_out_data: VisitorCheckOut, 
+
+    def check_out_visitor(self, check_out_data: VisitorCheckOut,
                          device_sn: Optional[str] = None) -> VisitorVisitLog:
-        """Check-out visitor"""
-        # Find active visit
+        """Check a visitor out (overstaying visitors too): their card stops working,
+        and in a running muster they count as left site, not missing."""
         visit_log = None
-        
+        on_site = VisitorVisitLog.status.in_([0, 2])
         if check_out_data.visitor_code:
+            code = check_out_data.visitor_code.strip()
             visit_log = self.db.query(VisitorVisitLog).join(Visitor).filter(
-                and_(
-                    Visitor.visitor_code == check_out_data.visitor_code,
-                    VisitorVisitLog.status == 0  # checked in
-                )
-            ).first()
+                Visitor.visitor_code == code, on_site).first()
+            if not visit_log:
+                # The gate scans the visitor's QR pass — the pre-registration code.
+                pre = self.get_pre_registration_by_qr(code)
+                if pre:
+                    visit_log = self.db.query(VisitorVisitLog).filter(
+                        VisitorVisitLog.pre_reg_id == pre.id, on_site).first()
         elif check_out_data.card_no:
             visit_log = self.db.query(VisitorVisitLog).filter(
-                and_(
-                    VisitorVisitLog.card_no == check_out_data.card_no,
-                    VisitorVisitLog.status == 0  # checked in
-                )
-            ).first()
-        
+                VisitorVisitLog.card_no == check_out_data.card_no.strip(), on_site).first()
         if not visit_log:
             raise NotFoundError("Active visitor visit")
-        
-        # Update visit log
+        return self._finish_visit(visit_log)
+
+    def _finish_visit(self, visit_log: VisitorVisitLog) -> VisitorVisitLog:
+        from .visitor_access import is_temp_card, remove_visitor_card
         visit_log.check_out_time = datetime.utcnow()
         visit_log.status = 1  # checked out
-        
-        # Update mustering if active event
-        active_event = self.db.query(MusteringEvent).filter(
-            MusteringEvent.status == 0
-        ).first()
-        
-        if active_event and visit_log.mustering_zone_id:
-            # Mark as safe in mustering log
-            mustering_log = MusteringLog(
-                event_id=active_event.id,
-                personnel_id=None,
-                visitor_id=visit_log.visitor_id,
-                mustering_zone_id=visit_log.mustering_zone_id,
-                status=1,  # safe
-                log_time=datetime.utcnow()
-            )
-            self.db.add(mustering_log)
-        
+        if visit_log.pre_reg_id:
+            pre_reg = self.db.query(VisitorPreRegistration).filter(
+                VisitorPreRegistration.id == visit_log.pre_reg_id).first()
+            if pre_reg:
+                pre_reg.status = 4  # checked_out
         self.db.commit()
         self.db.refresh(visit_log)
-        
-        # Remove from devices
-        self._remove_visitor_from_device(visit_log.visitor_id, device_sn)
-        
+        try:
+            from .mustering_service import MusteringService
+            MusteringService(self.db).mark_left_site(f"VIS-{visit_log.id}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Muster left-site for visitor %s failed: %s", visit_log.id, e)
+            self.db.rollback()
+        if not is_temp_card(visit_log.card_no):
+            remove_visitor_card(visit_log.id)
         return visit_log
-    
+
     def get_visit_records(self, start_date: Optional[date] = None, end_date: Optional[date] = None,
                          host_id: Optional[int] = None, status: Optional[int] = None,
                          search: Optional[str] = None, skip: int = 0, limit: int = 100) -> List[VisitorVisitLog]:
@@ -512,8 +515,9 @@ class VisitorService:
 
     def get_on_site_visitors(self) -> List[VisitorVisitLog]:
         """Get all visitors currently on site"""
+        # Overstaying visitors (status 2) are still on site — they must stay visible.
         return self.db.query(VisitorVisitLog).filter(
-            VisitorVisitLog.status == 0  # checked in
+            VisitorVisitLog.status.in_([0, 2])
         ).all()
 
     def get_dashboard_stats(self) -> Dict[str, Any]:
@@ -522,7 +526,7 @@ class VisitorService:
         today_end = datetime.combine(date.today(), time.max)
 
         total_visitors = self.db.query(Visitor).count()
-        on_site = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 0).count()
+        on_site = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status.in_([0, 2])).count()
         pending_approval = self.db.query(VisitorPreRegistration).filter(
             VisitorPreRegistration.status == 0
         ).count()
@@ -627,7 +631,7 @@ class VisitorService:
         ).all()
         
         total_visitors = len(visits)
-        checked_in = len([v for v in visits if v.status == 0])
+        checked_in = len([v for v in visits if v.status in (0, 2)])
         checked_out = len([v for v in visits if v.status == 1])
         on_site = checked_in
         overstay = len([v for v in visits if v.status == 2])
@@ -664,7 +668,7 @@ class VisitorService:
         
         overstays = self.db.query(VisitorVisitLog).join(Visitor).filter(
             and_(
-                VisitorVisitLog.status == 0,  # still checked in
+                VisitorVisitLog.status.in_([0, 2]),  # still on site (incl. already flagged)
                 VisitorVisitLog.check_in_time < cutoff_time
             )
         ).all()
@@ -693,29 +697,12 @@ class VisitorService:
         return results
     
     def force_check_out_by_log_id(self, log_id: int) -> VisitorVisitLog:
-        """Force check-out a visitor by visit log ID"""
+        """Force check-out a visitor by visit log ID (on site or overstaying)."""
         visit_log = self.db.query(VisitorVisitLog).filter(
-            VisitorVisitLog.id == log_id,
-            VisitorVisitLog.status == 0
-        ).first()
+            VisitorVisitLog.id == log_id, VisitorVisitLog.status.in_([0, 2])).first()
         if not visit_log:
             raise NotFoundError(f"Active visit log {log_id}")
-
-        visit_log.check_out_time = datetime.utcnow()
-        visit_log.status = 1
-
-        # Update pre-registration status if linked
-        if visit_log.pre_reg_id:
-            pre_reg = self.db.query(VisitorPreRegistration).filter(
-                VisitorPreRegistration.id == visit_log.pre_reg_id
-            ).first()
-            if pre_reg:
-                pre_reg.status = 4  # checked_out
-
-        self.db.commit()
-        self.db.refresh(visit_log)
-        self._remove_visitor_from_device(visit_log.visitor_id)
-        return visit_log
+        return self._finish_visit(visit_log)
 
     def get_visitor_frequency(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Get most frequent visitors by visit count"""
@@ -754,7 +741,7 @@ class VisitorService:
 
         # Overview
         total_visitors = self.db.query(Visitor).count()
-        active_visitors = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 0).count()
+        active_visitors = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status.in_([0, 2])).count()
         total_visits = self.db.query(VisitorVisitLog).filter(
             VisitorVisitLog.check_in_time >= period_start
         ).count()
@@ -917,54 +904,19 @@ class VisitorService:
         return f"TMP{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
     
     def _is_blacklisted(self, visitor: Visitor) -> bool:
-        """Check if visitor is blacklisted"""
+        """Blacklisted by flag, or by a blacklist entry matching their ID number,
+        phone or email (it matched the ID number only — the same person giving a
+        different ID was let in)."""
         if visitor.is_blacklist:
             return True
-        
-        # Check blacklist table
-        blacklist = self.db.query(VisitorBlacklist).filter(
-            and_(
-                VisitorBlacklist.id_no == visitor.id_no,
-                VisitorBlacklist.is_active == True
-            )
-        ).first()
-        
-        return blacklist is not None
-    
-    def _get_mustering_zone_for_visitor(self, area_id: Optional[int], 
-                                      visitor_type_id: Optional[int]) -> Optional[int]:
-        """Get appropriate mustering zone for visitor"""
-        # Try visitor type default first
-        if visitor_type_id:
-            visitor_type = self.db.query(VisitorType).filter(
-                VisitorType.id == visitor_type_id
-            ).first()
-            if visitor_type and visitor_type.mustering_zone_id:
-                return visitor_type.mustering_zone_id
-        
-        # Try area default
-        if area_id:
-            area = self.db.query(Zone).filter(Zone.id == area_id).first()
-            if area and area.mustering_zone_id:
-                return area.mustering_zone_id
-        
-        return None
-    
-    def _sync_visitor_to_device(self, visitor: Visitor, card_no: str, 
-                               device_sn: Optional[str] = None):
-        """Sync visitor to access control devices"""
-        # This would integrate with the device service
-        # For now, just log the action
-        print(f"Syncing visitor {visitor.visitor_code} with card {card_no} to devices")
-        
-        # TODO: Implement actual device sync via iclock_devcmd
-        # Send DATA UPDATE USERINFO command to visitor readers
-        
-    def _remove_visitor_from_device(self, visitor_id: int, device_sn: Optional[str] = None):
-        """Remove visitor from access control devices"""
-        # This would integrate with the device service
-        # For now, just log the action
-        print(f"Removing visitor {visitor_id} from devices")
-        
-        # TODO: Implement actual device removal via iclock_devcmd
-        # Send DATA DELETE USERINFO command to visitor readers
+        conds = []
+        if visitor.id_no:
+            conds.append(func.lower(VisitorBlacklist.id_no) == visitor.id_no.strip().lower())
+        if visitor.phone:
+            conds.append(VisitorBlacklist.phone == visitor.phone.strip())
+        if visitor.email:
+            conds.append(func.lower(VisitorBlacklist.email) == visitor.email.strip().lower())
+        if not conds:
+            return False
+        return self.db.query(VisitorBlacklist).filter(
+            VisitorBlacklist.is_active == True, or_(*conds)).first() is not None  # noqa: E712

@@ -23,7 +23,32 @@ if _TEST_DB and "test" in _TEST_DB.rsplit("/", 1)[-1]:
         os.environ["ALLOWED_HOSTS"] = ",".join(_hosts + ["testserver"])
 
 
+def _isolate_celery():
+    """Never hand a task to the LIVE Celery worker. The test container shares the
+    live Redis broker, so an alert queued by a test (dispatch_background → Celery)
+    was picked up by the production worker and sent through the live WhatsApp phone
+    (29 Oct 2026: made-up test numbers, nothing delivered). Tasks queued during
+    tests are recorded here instead and never run."""
+    from celery.app.task import Task
+    from celery.result import EagerResult
+
+    def _no_send(self, args=None, kwargs=None, **options):
+        QUEUED_TASKS.append((self.name, args, kwargs))
+        return EagerResult("test-not-sent", None, "PENDING")
+    Task.apply_async = _no_send
+    try:
+        from celery import Celery
+        Celery.send_task = lambda self, name, args=None, kwargs=None, **o: (
+            QUEUED_TASKS.append((name, args, kwargs)) or EagerResult("test-not-sent", None, "PENDING"))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+QUEUED_TASKS = []
+
+
 def pytest_configure(config):
+    _isolate_celery()
     if not (_TEST_DB and "test" in _TEST_DB.rsplit("/", 1)[-1]):
         pytest.exit("Refusing to run: set TEST_DATABASE_URL to a throwaway *test* database "
                     "(use scripts/run_tests.sh). Running against the live database would "

@@ -32,8 +32,8 @@ const CheckOut = () => {
         <div style={{ maxWidth: 420 }}>
           <Form form={form} layout="vertical"
             onFinish={v => checkOutMut.mutate({ visitor_code: v.code })}>
-            <Form.Item name="code" label="Scan QR Code or enter Visitor Code" rules={[{ required: true }]}>
-              <Input placeholder="VIS202506001 or QR code value…" size="large" />
+            <Form.Item name="code" label="Scan the visitor's QR pass or enter their Visitor Code" rules={[{ required: true }]}>
+              <Input placeholder="VIS20260529001 or the QR pass value…" size="large" />
             </Form.Item>
             <Button type="primary" icon={<LogoutOutlined />} htmlType="submit" loading={checkOutMut.isPending} block>
               Check Out
@@ -44,13 +44,13 @@ const CheckOut = () => {
     },
     {
       key: 'card',
-      label: <span><CreditCardOutlined />Temp Card</span>,
+      label: <span><CreditCardOutlined />Visitor Card</span>,
       children: (
         <div style={{ maxWidth: 420 }}>
           <Form layout="vertical"
             onFinish={v => checkOutMut.mutate({ card_no: v.card_no })}>
-            <Form.Item name="card_no" label="Temporary Card Number" rules={[{ required: true }]}>
-              <Input placeholder="TMP20260524123456…" size="large" />
+            <Form.Item name="card_no" label="Visitor Card Number" rules={[{ required: true }]}>
+              <Input placeholder="Card handed over at check-in (or the TMP… reference)" size="large" />
             </Form.Item>
             <Button type="primary" icon={<LogoutOutlined />} htmlType="submit" loading={checkOutMut.isPending} block>
               Check Out

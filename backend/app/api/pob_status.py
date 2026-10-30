@@ -182,8 +182,17 @@ async def get_pob_dashboard(db: Session = Depends(get_db)) -> Dict[str, Any]:
     except Exception as e:
         logger.debug(f"Transports query skipped: {e}")
 
+    # Visitors checked in at the gate are on board too (they are on the muster list).
+    try:
+        visitors = db.execute(text("SELECT COUNT(*) FROM vis_visit_log WHERE check_out_time IS NULL "
+                                   "AND status IN (0, 2)")).scalar() or 0
+    except Exception:
+        db.rollback()
+        visitors = 0
     return {
         "total":                  total,
+        "visitors_on_site":       visitors,
+        "total_with_visitors":    total + visitors,
         "offshore_count":         offshore,
         "onshore_count":          onshore,
         "transit_count":          transit,

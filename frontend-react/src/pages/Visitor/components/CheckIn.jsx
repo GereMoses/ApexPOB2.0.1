@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   Card, Form, Input, Select, Button, message, Alert, Descriptions, Tag, Divider,
-  Row, Col, Tabs, Space, Typography,
+  Row, Col, Tabs, Space, Typography, Checkbox,
 } from 'antd';
 import {
   LoginOutlined, QrcodeOutlined, UserAddOutlined, SearchOutlined,
@@ -34,10 +34,31 @@ const CheckIn = () => {
   });
   const typeOptions = (typesData?.data ?? []).map(t => ({ value: t.id, label: t.type_name }));
 
+  // Gate details for every check-in: the physical visitor card handed over (loaded onto
+  // the door panels — none = escorted, no door access) and the safety induction.
+  const [gate, setGateState] = useState({ card_no: '', induction_done: false });
+  // The submit reads the CURRENT card / induction (a ref) — reading state captured in an
+  // earlier render sent the old values (induction still 'off' after ticking it).
+  const gateRef = useRef(gate);
+  const setGate = (fn) => setGateState(g => { const n = typeof fn === 'function' ? fn(g) : fn; gateRef.current = n; return n; });
+  const gateFields = (
+    <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: 12, margin: '12px 0' }}>
+      <Input placeholder="Visitor card number (leave empty if escorted, no card)" value={gate.card_no}
+        onChange={e => setGate(g => ({ ...g, card_no: e.target.value }))} style={{ marginBottom: 8 }} />
+      <Checkbox checked={gate.induction_done} onChange={e => setGate(g => ({ ...g, induction_done: e.target.checked }))}>
+        Safety induction done (required for contractor / site visitor types)
+      </Checkbox>
+    </div>
+  );
+  const STATUS = { 0: ['gold', 'Waiting for host approval'], 1: ['green', 'Approved'], 2: ['red', 'Rejected'],
+                   3: ['blue', 'Already checked in'], 4: ['default', 'Used (checked out)'], 5: ['default', 'Expired'] };
+
   const checkInMut = useMutation({
-    mutationFn: (d) => visitorAPI.checkInVisitor(d),
+    mutationFn: (d) => visitorAPI.checkInVisitor({ ...d, card_no: gateRef.current.card_no.trim() || null, induction_done: gateRef.current.induction_done }),
     onSuccess: () => {
-      message.success('Visitor checked in successfully');
+      const card = gateRef.current.card_no.trim();
+      message.success(card ? `Visitor checked in — card ${card} is being loaded onto the doors` : 'Visitor checked in (no card — escort only)');
+      setGate({ card_no: '', induction_done: false });
       preRegForm.resetFields();
       walkInForm.resetFields();
       lookupForm.resetFields();
@@ -117,7 +138,7 @@ const CheckIn = () => {
   // ── PRE-REGISTERED TAB ───────────────────────────────────────────────────────
   const preRegTabContent = (
     <div style={{ maxWidth: 500 }}>
-      <Form form={preRegForm} layout="vertical">
+      <Form form={preRegForm} name="preRegQr" layout="vertical">
         <Form.Item name="qr_code" label="QR Code / Pre-Registration Code" rules={[{ required: true }]}>
           <Input.Search
             placeholder="Scan or type QR code…"
@@ -139,17 +160,17 @@ const CheckIn = () => {
             <Descriptions.Item label="Time">{preReg.visit_time_start} – {preReg.visit_time_end}</Descriptions.Item>
             <Descriptions.Item label="Purpose">{preReg.purpose || '—'}</Descriptions.Item>
             <Descriptions.Item label="Status">
-              <Tag color={preReg.status === 1 ? 'green' : 'gold'}>
-                {preReg.status === 1 ? 'Approved' : 'Pending'}
-              </Tag>
+              <Tag color={(STATUS[preReg.status] || ['default'])[0]}>{(STATUS[preReg.status] || [, `Status ${preReg.status}`])[1]}</Tag>
             </Descriptions.Item>
           </Descriptions>
+          {preReg.status === 1 && gateFields}
           <Button
             type="primary"
             icon={<LoginOutlined />}
             style={{ marginTop: 16 }}
             loading={checkInMut.isPending}
             onClick={handlePreRegCheckIn}
+            disabled={preReg.status !== 1}
             block
           >
             Confirm Check-In
@@ -180,7 +201,7 @@ const CheckIn = () => {
           )
         }
       >
-        <Form form={lookupForm} layout="inline">
+        <Form form={lookupForm} name="visitorLookup" layout="inline">
           <Form.Item name="phone" style={{ marginBottom: 8 }}>
             <Input placeholder="Phone number" prefix={<SearchOutlined />} style={{ width: 160 }} allowClear />
           </Form.Item>
@@ -224,7 +245,7 @@ const CheckIn = () => {
       {/* Step 2: returning visitor – just assign host */}
       {walkInMode === 'returning' && returnVisitor && (
         <Card size="small" title="Step 2 — Assign Host &amp; Check In">
-          <Form layout="vertical" onFinish={handleReturningCheckIn}>
+          <Form name="walkInReturning" layout="vertical" onFinish={handleReturningCheckIn}>
             <Form.Item name="host_emp_id" label="Host Employee" rules={[{ required: true }]}>
               <Select
                 options={empOptions}
@@ -233,6 +254,7 @@ const CheckIn = () => {
                 placeholder="Select host…"
               />
             </Form.Item>
+            {gateFields}
             <Button type="primary" icon={<LoginOutlined />} htmlType="submit" loading={checkInMut.isPending} block>
               Check In {returnVisitor.full_name}
             </Button>
@@ -243,7 +265,7 @@ const CheckIn = () => {
       {/* Step 2: new visitor – full form */}
       {walkInMode === 'new' && (
         <Card size="small" title={returnVisitor ? 'New Visitor Form' : 'Step 2 — New Visitor Details'}>
-          <Form form={walkInForm} layout="vertical" onFinish={handleNewWalkIn} initialValues={{ id_type: 0 }}>
+          <Form form={walkInForm} name="walkInNew" layout="vertical" onFinish={handleNewWalkIn} initialValues={{ id_type: 0 }}>
             <Row gutter={12}>
               <Col span={12}><Form.Item name="full_name" label="Full Name" rules={[{ required: true }]}><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="phone" label="Phone"><Input /></Form.Item></Col>
@@ -275,6 +297,7 @@ const CheckIn = () => {
                 </Form.Item>
               </Col>
             </Row>
+            {gateFields}
             <Button type="primary" icon={<LoginOutlined />} htmlType="submit" loading={checkInMut.isPending} block>
               Check In (New Visitor)
             </Button>

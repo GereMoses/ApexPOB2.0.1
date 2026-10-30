@@ -72,12 +72,14 @@ def _record(db: Session, ctrl_id: int, users: List[Dict], state: str, failed: Di
     db.commit()
 
 
-def load_users(db: Session, ctrl, users: List[Dict]) -> Dict:
-    """Write these users to one panel and remember the result."""
+def load_users(db: Session, ctrl, users: List[Dict], door_nos: Optional[List[int]] = None) -> Dict:
+    """Write these users to one panel and remember the result. door_nos defaults to
+    every door (staff); visitors pass a narrower list (no secure doors)."""
     from .zkteco import c3_zkaccess
     if not users:
         return {"pushed": 0, "failed": []}
-    res = c3_zkaccess.enroll_users(ctrl.ip_address, users, door_nos=list(range(1, (ctrl.door_count or 1) + 1)),
+    doors = door_nos if door_nos is not None else list(range(1, (ctrl.door_count or 1) + 1))
+    res = c3_zkaccess.enroll_users(ctrl.ip_address, users, door_nos=doors,
                                    port=ctrl.port or 4370, password=ctrl.comm_password or "")
     if not res.get("success"):
         _record(db, ctrl.id, users, "failed", {u["pin"]: res.get("error", "panel unreachable") for u in users})
@@ -103,19 +105,26 @@ def remove_users(db: Session, ctrl, pins: List[str]) -> Dict:
 
 
 def sync_controller(db: Session, ctrl) -> Dict:
+    from .visitor_access import visitor_panel_users, visitor_doors
     wanted, skipped = active_panel_users(db)
+    # Visitors on site with a card stay loaded (re-written nightly so their end date
+    # rolls forward); once they've left they drop out of `want` and are removed.
+    visitors = visitor_panel_users(db)
     want = {u["pin"]: u for u in wanted}
     rows = db.execute(text("SELECT pin, card_no, secret_hash, state FROM controller_user WHERE controller_id = :c"),
                       {"c": ctrl.id}).fetchall()
     have = {r.pin: r for r in rows if r.state == "loaded"}
     to_load = [u for p, u in want.items() if p not in have or (have[p].card_no or "") != (u["card_no"] or "")
                or (have[p].secret_hash or "") != _secret_hash(u)]
-    to_remove = [p for p in have if p not in want]
-    out = {"controller": ctrl.name, "to_load": len(to_load), "to_remove": len(to_remove),
-           "skipped_no_attendance_id": skipped}
+    keep = set(want) | {v["pin"] for v in visitors}
+    to_remove = [p for p in have if p not in keep]
+    out = {"controller": ctrl.name, "to_load": len(to_load), "visitors": len(visitors),
+           "to_remove": len(to_remove), "skipped_no_attendance_id": skipped}
     out["load"] = load_users(db, ctrl, to_load)
+    if visitors:
+        out["visitor_load"] = load_users(db, ctrl, visitors, door_nos=visitor_doors(db, ctrl))
     out["remove"] = remove_users(db, ctrl, to_remove)
-    logger.info("Panel sync %s: %s", ctrl.name, {k: v for k, v in out.items() if k not in ("load", "remove")})
+    logger.info("Panel sync %s: %s", ctrl.name, {k: v for k, v in out.items() if k not in ("load", "remove", "visitor_load")})
     return out
 
 

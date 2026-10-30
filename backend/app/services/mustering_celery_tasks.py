@@ -935,10 +935,8 @@ celery_app.conf.beat_schedule = {
         'task': 'app.services.mustering_celery_tasks.check_missing_escalations',
         'schedule': crontab(minute='*'),   # every minute — a 10-min threshold must not fire at 14
     },
-    'check-overdue-journeys': {
-        'task': 'app.services.mustering_celery_tasks.check_overdue_journeys',
-        'schedule': crontab(minute='*/3'),
-    },
+    # (check-overdue-journeys retired: the backend's journey watch — api/journey_management
+    #  journey_watch_loop — alerts the response team; this one double-alerted.)
     'pob-reconciliation': {
         'task': 'app.services.mustering_celery_tasks.pob_reconciliation',
         'schedule': crontab(minute='*/15'),
@@ -997,4 +995,59 @@ def sync_access_panels():
 celery_app.conf.beat_schedule["sync-access-panels-nightly"] = {
     "task": "app.services.mustering_celery_tasks.sync_access_panels",
     "schedule": crontab(minute=30, hour=1),   # 02:30 Lagos — after the SeamlessHR staff pull
+}
+
+
+# ── Visitors (the schedule in app/tasks/visitor_tasks.py was never loaded — every
+#    module that assigned celery_app.conf.beat_schedule replaced the others) ─────
+
+@celery_app.task(name="app.services.mustering_celery_tasks.visitor_overstay_check")
+def visitor_overstay_check():
+    """Hourly: a visitor still on site past their visitor type's allowed hours (8 h
+    without a type) is flagged OVERSTAY once — bell + their host."""
+    from datetime import timezone as _tz
+    from app.models.visitor import VisitorVisitLog, VisitorType
+    from app.services.visitor_access import notify_overstay
+    db = SessionLocal()
+    flagged = 0
+    try:
+        hours = {t.id: (t.default_visit_hours or 8) for t in db.query(VisitorType).all()}
+        now = datetime.now(_tz.utc)
+        for v in db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 0,
+                                                  VisitorVisitLog.check_out_time.is_(None)).all():
+            ci = v.check_in_time if v.check_in_time.tzinfo else v.check_in_time.replace(tzinfo=_tz.utc)
+            allowed = hours.get(v.visitor.visitor_type_id if v.visitor else None, 8)
+            over = (now - ci).total_seconds() / 3600 - allowed
+            if over > 0 and not v.overstay_alert_sent:
+                v.status, v.overstay_alert_sent = 2, True
+                db.commit()
+                notify_overstay(db, v, over)
+                flagged += 1
+        return {"overstays_flagged": flagged}
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.services.mustering_celery_tasks.visitor_expire_passes")
+def visitor_expire_passes():
+    """Daily: approved / pending passes for a day that has passed can no longer be
+    used at the gate (status 5 = expired)."""
+    from app.services.visitor_access import _site_today
+    db = SessionLocal()
+    try:
+        n = db.execute(text("UPDATE vis_pre_registration SET status = 5, updated_time = NOW() "
+                            "WHERE status IN (0, 1) AND visit_date < :d"), {"d": _site_today()}).rowcount
+        db.commit()
+        return {"expired": n}
+    finally:
+        db.close()
+
+
+celery_app.conf.beat_schedule["visitor-overstay-check"] = {
+    "task": "app.services.mustering_celery_tasks.visitor_overstay_check",
+    "schedule": crontab(minute=5),               # hourly
+}
+celery_app.conf.beat_schedule["visitor-expire-passes"] = {
+    "task": "app.services.mustering_celery_tasks.visitor_expire_passes",
+    "schedule": crontab(minute=15, hour=23),     # 00:15 Lagos
 }

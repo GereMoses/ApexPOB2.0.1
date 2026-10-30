@@ -776,10 +776,10 @@ export default function POBStatus() {
         <Col xs={12} sm={8} md={8} lg={24 / 5}>
           <KpiCard
             title="Total POB"
-            value={total}
+            value={total + (dash.visitors_on_site || 0)}
             icon={<TeamOutlined />}
             color={C.offshore}
-            subtitle="Personnel onboard"
+            subtitle={dash.visitors_on_site ? `${total} staff + ${dash.visitors_on_site} visitor${dash.visitors_on_site !== 1 ? 's' : ''}` : 'Personnel onboard'}
             trend={<TrendArrow today={ciToday} yesterday={ciYest} />}
           />
         </Col>

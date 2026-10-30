@@ -5,7 +5,7 @@ Complete mustering system with real-time headcount tracking
 
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func, or_, text, update
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import logging
 import json
@@ -1016,6 +1016,26 @@ class MusteringService:
             "current_zone_name": None,
             "phone": r.phone,
         } for r in rows]
+
+    def add_visitor_to_active_musters(self, visit_id: int) -> int:
+        """A visitor checked in while a muster is running: put them on its list as
+        MISSING (they must still reach a muster point). Returns how many musters."""
+        code = f"{self.VISITOR_PREFIX}{visit_id}"
+        row = next((r for r in self._visitors_on_site() if r["emp_code"] == code), None)
+        if not row:
+            return 0
+        added = 0
+        for ev in self.db.query(MusteringEvent).filter(MusteringEvent.status == 0).all():
+            if self.db.query(MusteringLog).filter(MusteringLog.event_id == ev.id, MusteringLog.emp_code == code).first():
+                continue
+            self.db.add(MusteringLog(event_id=ev.id, emp_code=code, emp_name=row["emp_name"], dept_name="Visitor",
+                                     check_time=datetime.now(timezone.utc), status=0,
+                                     notes="Checked in at the gate during the muster"))
+            self._adjust_event_counters(ev.id, delta_missing=+1, delta_expected=+1)
+            added += 1
+        if added:
+            self.db.commit()
+        return added
 
     def visitor_contacts(self, codes: List[str]) -> List[Dict[str, str]]:
         ids = [int(c[len(self.VISITOR_PREFIX):]) for c in codes

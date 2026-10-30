@@ -31,6 +31,11 @@ def _uniq_phone():
     return '+234' + str(uuid.uuid4().int)[:10]
 
 
+
+def _site_today():
+    from app.services.visitor_access import _site_today as t
+    return t()
+
 class TestVisitorService:
     """Test visitor service layer"""
     
@@ -87,7 +92,7 @@ class TestVisitorService:
         pre_reg_data = {
             'visitor_id': sample_visitor.id,
             'host_emp_id': sample_employee.id,
-            'visit_date': date.today() + timedelta(days=1),
+            'visit_date': _site_today(),   # a pass checks in on its own day only
             'visit_time_start': time(9, 0),
             'visit_time_end': time(17, 0),
             'purpose': 'Meeting',
@@ -113,7 +118,8 @@ class TestVisitorService:
         
         check_in_data = {
             'pre_reg_id': sample_pre_registration.id,
-            'host_emp_id': sample_pre_registration.host_emp_id
+            'host_emp_id': sample_pre_registration.host_emp_id,
+            'induction_done': True,   # the sample type requires the safety induction
         }
         
         from app.schemas.visitor import VisitorCheckIn
@@ -240,7 +246,7 @@ class TestVisitorAPI:
                 'id_no': 'PR123456-' + uuid.uuid4().hex[:6]
             },
             'host_emp_id': sample_employee.id,
-            'visit_date': (date.today() + timedelta(days=1)).isoformat(),
+            'visit_date': _site_today().isoformat(),
             'visit_time_start': '09:00',
             'visit_time_end': '17:00',
             'purpose': 'API Test Meeting'
@@ -261,7 +267,8 @@ class TestVisitorAPI:
         """Test visitor check-in API"""
         check_in_data = {
             'pre_reg_id': sample_pre_registration.id,
-            'host_emp_id': sample_pre_registration.host_emp_id
+            'host_emp_id': sample_pre_registration.host_emp_id,
+            'induction_done': True,
         }
         
         response = client.post(
@@ -403,7 +410,7 @@ class TestVisitorIntegration:
                     'visitor_type_id': visitor_type_id
                 },
                 'host_emp_id': 1,
-                'visit_date': (date.today() + timedelta(days=1)).isoformat(),
+                'visit_date': _site_today().isoformat(),
                 'visit_time_start': '10:00',
                 'visit_time_end': '12:00',
                 'purpose': 'Integration Test'
@@ -501,7 +508,7 @@ def sample_visitor(db_session, sample_visitor_type):
         visitor_code='VIS' + uuid.uuid4().hex[:10].upper(),
         full_name='Test Visitor',
         phone=_uniq_phone(),
-        email='visitor@example.com',
+        email=f'visitor-{uuid.uuid4().hex[:6]}@example.com',   # the blacklist matches email too
         company='Test Company',
         id_type=0,
         id_no='TEST123-' + uuid.uuid4().hex[:6],
@@ -518,7 +525,7 @@ def sample_pre_registration(db_session, sample_visitor, sample_employee):
     pre_reg = VisitorPreRegistration(
         visitor_id=sample_visitor.id,
         host_emp_id=sample_employee.id,
-        visit_date=date.today() + timedelta(days=1),
+        visit_date=_site_today(),
         visit_time_start=time(9, 0),
         visit_time_end=time(17, 0),
         purpose='Test Meeting',
