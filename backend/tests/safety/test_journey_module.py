@@ -8,6 +8,7 @@ Journey Management gaps (Oct 2026 review):
   * a journey created by mistake can be deleted — never one somebody boarded
 """
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 
@@ -146,3 +147,52 @@ def test_adding_inbound_passenger_already_on_board_warns(db, make_person):
                                              departure_time=datetime.now(timezone.utc) + timedelta(hours=4)), db, NS(id=1)))["id"]
     r = run(T.add_manifest_entry(fid, T.ManifestEntryCreate(passenger_name="", personnel_id=p["id"], direction="INBOUND"), db, NS(id=1)))
     assert "already on board" in r.get("pob_note", "")
+
+
+@needs_db
+def test_boarding_reports_every_broken_limit_and_override_names_them(db, make_person):
+    """Overriding 'flight full' used to silently override an expired medical and the
+    payload limit too — the operator was only ever shown the first problem."""
+    from app.api import transport_manifest as T
+    fid = run(T.create_flight(T.FlightCreate(transport_identifier="HEL-ALL", departure_location="Base", arrival_location="Rig",
+                                             transport_capacity=1, transport_max_payload_kg=150,
+                                             departure_time=datetime.now(timezone.utc) + timedelta(hours=3)), db, NS(id=1)))["id"]
+    a, b = make_person(), make_person()
+    db.execute(text("UPDATE personnel SET medical_fitness_date = now() - interval '5 days' WHERE id = :i"), {"i": b["id"]})
+    db.commit()
+    ea = run(T.add_manifest_entry(fid, T.ManifestEntryCreate(passenger_name="", personnel_id=a["id"], direction="INBOUND", body_weight=100), db, NS(id=1)))
+    eb = run(T.add_manifest_entry(fid, T.ManifestEntryCreate(passenger_name="", personnel_id=b["id"], direction="INBOUND", body_weight=90), db, NS(id=1)))
+    run(T.update_manifest_entry(fid, ea["id"], T.ManifestEntryUpdate(status="CONFIRMED"), ADMIN, db, NS(id=1)))
+    with pytest.raises(HTTPException) as ex:
+        run(T.update_manifest_entry(fid, eb["id"], T.ManifestEntryUpdate(status="CONFIRMED"), ADMIN, db, NS(id=1)))
+    d = ex.value.detail
+    assert ex.value.status_code == 409 and "capacity" in d and "Not fit" in d and "payload" in d
+    r = run(T.update_manifest_entry(fid, eb["id"], T.ManifestEntryUpdate(
+        status="CONFIRMED", override_capacity=True, override_compliance=True, override_weight=True, remarks="Agreed"),
+        ADMIN, db, NS(id=1, username="ops")))
+    assert "seat capacity" in r["remarks"] and "fitness to travel" in r["remarks"] and "weight limit" in r["remarks"]
+
+
+@needs_db
+def test_weigh_in_edit_then_reader_check_in_and_cargo_warning(db, make_person):
+    """A passenger booked without a weight can be weighed in (there was no way to);
+    a TRANSPORT_CHECKIN reader can exist (the DB refused the purpose) and its tap
+    checks them in; cargo that tips the flight over its limit is flagged."""
+    from app.api import transport_manifest as T
+    from app.api.adms_protocol import handle_attlog
+    fid = run(T.create_flight(T.FlightCreate(transport_identifier="HEL-WI", departure_location="Rig", arrival_location="Base",
+                                             transport_max_payload_kg=200,
+                                             departure_time=datetime.now(timezone.utc) + timedelta(hours=1)), db, NS(id=1)))["id"]
+    pin = str(uuid.uuid4().int)[:7]
+    p = make_person(attendance_id=pin)
+    e = run(T.add_manifest_entry(fid, T.ManifestEntryCreate(passenger_name="", personnel_id=p["id"], direction="OUTBOUND"), db, NS(id=1)))
+    r = run(T.edit_manifest_entry(fid, e["id"], T.ManifestEntryDetails(body_weight=95, baggage_weight=10), db, NS(id=1)))
+    assert r["body_weight"] == 95 and r["baggage_weight"] == 10
+    sn = "TC" + uuid.uuid4().hex[:8].upper()
+    db.execute(text("INSERT INTO iclock_terminal (sn, alias, state, reader_purpose) VALUES (:s, 'Helideck', 1, 'TRANSPORT_CHECKIN')"), {"s": sn})
+    db.commit()
+    handle_attlog([{"PIN": pin, "Time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"), "Status": "0"}], sn, db)
+    db.expire_all()
+    assert db.execute(text("SELECT status FROM manifest_entry WHERE id = :i"), {"i": e["id"]}).scalar() == "CONFIRMED"
+    w = run(T.set_cargo(fid, T.CargoUpdate(items=[T.CargoItem(description="Gas", weight_kg=150, dangerous_goods=True)]), db, NS(id=1)))
+    assert "Over the payload limit" in w["warning"] and "UN number" in w["warning"]

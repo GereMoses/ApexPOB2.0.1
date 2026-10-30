@@ -5471,7 +5471,7 @@ CREATE TABLE public.iclock_terminal (
     platform character varying(30),
     mac_address character varying(17),
     oem_vendor character varying(50),
-    CONSTRAINT iclock_terminal_reader_purpose_check CHECK (((reader_purpose)::text = ANY ((ARRAY['ATTENDANCE'::character varying, 'ACCESS_ENTRY'::character varying, 'ACCESS_EXIT'::character varying, 'MUSTERING'::character varying, 'POB'::character varying, 'EMERGENCY'::character varying])::text[])))
+    CONSTRAINT iclock_terminal_reader_purpose_check CHECK (((reader_purpose)::text = ANY ((ARRAY['ATTENDANCE'::character varying, 'ACCESS_ENTRY'::character varying, 'ACCESS_EXIT'::character varying, 'MUSTERING'::character varying, 'POB'::character varying, 'EMERGENCY'::character varying, 'TRANSPORT_CHECKIN'::character varying])::text[])))
 );
 
 

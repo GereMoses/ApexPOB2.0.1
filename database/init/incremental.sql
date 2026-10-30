@@ -643,3 +643,9 @@ ALTER TABLE acc_door ADD COLUMN IF NOT EXISTS lock_state_error TEXT;          --
 -- Journey management: when the overdue alert was last sent (re-sent every 30 min while
 -- still overdue; cleared by a check-in, completion or cancellation).
 ALTER TABLE journey_plan ADD COLUMN IF NOT EXISTS overdue_alerted_at TIMESTAMPTZ;
+
+-- Helideck / gangway readers: the Devices screen offered "Transport check-in" but the
+-- check constraint refused it, so no reader could ever be set up for it.
+ALTER TABLE iclock_terminal DROP CONSTRAINT IF EXISTS iclock_terminal_reader_purpose_check;
+ALTER TABLE iclock_terminal ADD CONSTRAINT iclock_terminal_reader_purpose_check CHECK (reader_purpose::text = ANY (ARRAY[
+    'ATTENDANCE', 'ACCESS_ENTRY', 'ACCESS_EXIT', 'MUSTERING', 'POB', 'EMERGENCY', 'TRANSPORT_CHECKIN']::text[]));

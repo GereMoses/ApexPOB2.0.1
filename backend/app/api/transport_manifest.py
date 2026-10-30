@@ -75,6 +75,16 @@ class ManifestEntryUpdate(BaseModel):
     override_weight: bool = False      # board even if it exceeds the weight-and-balance limit
 
 
+class ManifestEntryDetails(BaseModel):
+    """Passenger details that can change after booking (weigh-in at the helideck)."""
+    body_weight: Optional[float] = None
+    baggage_weight: Optional[float] = None
+    direction: Optional[str] = None
+    company: Optional[str] = None
+    id_number: Optional[str] = None
+    remarks: Optional[str] = None
+
+
 class FlightStatusUpdate(BaseModel):
     status: str                        # SCHEDULED / CONFIRMED / CANCELLED / COMPLETED / IN_TRANSIT
     notify: bool = True                # tell the passengers when the flight is cancelled
@@ -772,47 +782,58 @@ def _set_entry_status(db: Session, flight_id: int, entry: ManifestEntry,
         if not (payload.remarks or "").strip():
             raise HTTPException(status_code=400, detail="Give a reason for the override")
 
+    breached: List[str] = []          # limits this boarding actually breaks (named in the override note)
     if new_status == "CONFIRMED" and entry.status != "CONFIRMED":
+        # Check EVERY limit and report them all together. It stopped at the first one, so
+        # an operator overriding "flight is full" also overrode an expired medical and the
+        # payload limit without ever being told.
         t = schedule.transport
+        blocks: List[str] = []
         cap = t.capacity if t else None
-        if cap and not payload.override_capacity:
+        if cap:
             already = db.query(ManifestEntry).filter(
                 ManifestEntry.schedule_id == flight_id, ManifestEntry.status == "CONFIRMED",
                 ManifestEntry.id != entry.id).count()
             if already >= cap:
-                raise HTTPException(status_code=409,
-                                    detail=f"Flight is at capacity ({already}/{cap}). Offload a passenger or override.")
+                breached.append("seat capacity")
+                if not payload.override_capacity:
+                    blocks.append(f"Flight is at capacity ({already}/{cap})")
 
-        if entry.personnel_id and not payload.override_compliance:
+        if entry.personnel_id:
             person = db.query(Personnel).filter(Personnel.id == entry.personnel_id).first()
             comp = travel_compliance(person)
             if comp["status"] == "blocked":
-                raise HTTPException(status_code=409,
-                                    detail=f"Not fit to travel — {'; '.join(comp['issues'])}. Override to board.")
+                breached.append("fitness to travel")
+                if not payload.override_compliance:
+                    blocks.append(f"Not fit to travel — {'; '.join(comp['issues'])}")
 
         max_kg = getattr(t, "max_payload_kg", None) if t else None
-        if max_kg and not payload.override_weight:
-            # A missing weight used to count as 0 kg, silently defeating the limit.
+        if max_kg:
             if entry.body_weight is None:
-                raise HTTPException(status_code=409,
-                                    detail="Passenger weight missing — enter body weight (kg) before boarding "
-                                           "(this aircraft/vessel has a payload limit).")
-            confirmed_wt = (db.query(func.coalesce(func.sum(
-                func.coalesce(ManifestEntry.body_weight, 0) + func.coalesce(ManifestEntry.baggage_weight, 0)), 0))
-                .filter(ManifestEntry.schedule_id == flight_id, ManifestEntry.status == "CONFIRMED",
-                        ManifestEntry.id != entry.id).scalar() or 0)
-            cargo_wt = sum((c.get("weight_kg") or 0) for c in (schedule.cargo_manifest or []) if isinstance(c, dict))
-            projected = float(confirmed_wt) + float(cargo_wt) + float(entry.body_weight or 0) + float(entry.baggage_weight or 0)
-            if projected > float(max_kg):
-                raise HTTPException(status_code=409,
-                                    detail=f"Over payload limit — {projected:.0f} kg would exceed {max_kg:.0f} kg. "
-                                           f"Offload weight or override.")
+                breached.append("weight limit (no weight)")
+                if not payload.override_weight:
+                    blocks.append("Passenger weight missing — enter body weight (kg) before boarding "
+                                  "(this aircraft/vessel has a payload limit)")
+            else:
+                confirmed_wt = (db.query(func.coalesce(func.sum(
+                    func.coalesce(ManifestEntry.body_weight, 0) + func.coalesce(ManifestEntry.baggage_weight, 0)), 0))
+                    .filter(ManifestEntry.schedule_id == flight_id, ManifestEntry.status == "CONFIRMED",
+                            ManifestEntry.id != entry.id).scalar() or 0)
+                cargo_wt = sum((c.get("weight_kg") or 0) for c in (schedule.cargo_manifest or []) if isinstance(c, dict))
+                projected = float(confirmed_wt) + float(cargo_wt) + float(entry.body_weight or 0) + float(entry.baggage_weight or 0)
+                if projected > float(max_kg):
+                    breached.append("weight limit")
+                    if not payload.override_weight:
+                        blocks.append(f"Over payload limit — {projected:.0f} kg would exceed {max_kg:.0f} kg")
+        if blocks:
+            raise HTTPException(status_code=409,
+                                detail=". ".join(blocks) + ". Fix it, or override with a reason.")
 
     entry.status = new_status
     if payload.remarks is not None:
         entry.remarks = payload.remarks
-    if overrides:
-        note = f"[OVERRIDE {', '.join(overrides)} by {actor or user_id}] {payload.remarks.strip()}"
+    if overrides and breached:
+        note = f"[OVERRIDE {', '.join(breached)} by {actor or user_id}] {payload.remarks.strip()}"
         entry.remarks = note
         logger.warning("Transport override on flight %s passenger %s: %s", flight_id, entry.passenger_name, note)
     if new_status == "CONFIRMED":
@@ -845,6 +866,39 @@ async def update_manifest_entry(
     return _set_entry_status(db, flight_id, entry, payload, getattr(current_user, "id", None),
                              can_override=_perm(request, "transport.override"),
                              actor=getattr(current_user, "username", "") or getattr(current_user, "email", ""))
+
+
+@router.put("/flights/{flight_id}/manifest/{entry_id}")
+async def edit_manifest_entry(flight_id: int, entry_id: int, payload: ManifestEntryDetails,
+                              db: Session = Depends(get_db), _=Depends(get_current_user)) -> Dict[str, Any]:
+    """Weigh-in / correct a passenger's details. There was no way to add a weight after
+    booking — a payload-limited flight then left only 'override' or remove + re-add."""
+    entry = (db.query(ManifestEntry)
+             .filter(ManifestEntry.id == entry_id, ManifestEntry.schedule_id == flight_id).first())
+    if not entry:
+        raise HTTPException(status_code=404, detail="Manifest entry not found")
+    schedule = db.query(TransportSchedule).filter(TransportSchedule.id == flight_id).first()
+    if (schedule.status or "").upper() in ("IN_TRANSIT", "COMPLETED", "CANCELLED"):
+        raise HTTPException(status_code=400, detail=f"A {schedule.status} flight's manifest can no longer be edited")
+    data = payload.dict(exclude_unset=True)
+    for k in ("body_weight", "baggage_weight"):
+        if data.get(k) is not None and not (0 <= data[k] <= 400):
+            raise HTTPException(status_code=400, detail=f"{k.replace('_', ' ')} must be between 0 and 400 kg")
+    if "direction" in data:
+        d = (data["direction"] or "").upper()
+        if d not in ("INBOUND", "OUTBOUND"):
+            raise HTTPException(status_code=400, detail="direction must be INBOUND or OUTBOUND")
+        if d != entry.direction and entry.status == "CONFIRMED":
+            raise HTTPException(status_code=400, detail="Reset the passenger to Manifested before changing direction")
+        data["direction"] = d
+    for k, v in data.items():
+        setattr(entry, k, v)
+    db.commit()
+    db.refresh(entry)
+    out = _entry_to_dict(entry)
+    person = db.query(Personnel).filter(Personnel.id == entry.personnel_id).first() if entry.personnel_id else None
+    out["compliance"] = travel_compliance(person)
+    return out
 
 
 @router.post("/flights/{flight_id}/checkin")
@@ -897,15 +951,25 @@ def checkin_from_reader(db: Session, emp_code: str, punch_time: datetime, device
         return "checked_in"
     except HTTPException as e:
         db.rollback()
+        sched = (db.query(TransportSchedule).options(joinedload(TransportSchedule.transport))
+                 .filter(TransportSchedule.id == entry.schedule_id).first())
+        ref = (sched.transport.identifier if sched and sched.transport else f"#{entry.schedule_id}")
+        reader = db.execute(text("SELECT COALESCE(alias, sn) FROM iclock_terminal WHERE sn = :s"), {"s": device_sn}).scalar() or device_sn
+        title = f"Check-in blocked: {entry.passenger_name}"
+        msg = (f"{entry.passenger_name} tapped at {reader} but could not be boarded on {ref}: "
+               f"{str(e.detail).replace(' Fix it, or override with a reason.', '')} — sort it out at the desk.")
         db.execute(text("""
-            INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, expires_at)
-            VALUES (:dk, 'transport_checkin_blocked', :t, :m, 'high', NOW() + INTERVAL '1 day')
+            INSERT INTO sys_notifications (dedup_key, notification_type, title, message, priority, link, expires_at)
+            VALUES (:dk, 'transport_checkin_blocked', :t, :m, 'high', '/transport-manifest', NOW() + INTERVAL '1 day')
             ON CONFLICT (dedup_key) DO NOTHING
-        """), {"dk": f"tcheckin_{entry.id}_{pt:%Y%m%d%H%M}",
-               "t": f"Check-in blocked: {entry.passenger_name}",
-               "m": f"{entry.passenger_name} tapped at {device_sn} but could not be boarded on flight "
-                    f"#{entry.schedule_id}: {e.detail}"})
+        """), {"dk": f"tcheckin_{entry.id}_{pt:%Y%m%d%H%M}", "t": title, "m": msg})
         db.commit()
+        try:   # pop up on the helideck desk's screen too — the bell alone was easy to miss
+            from .notifications import notify_sync
+            notify_sync({"type": "transport_checkin_blocked", "priority": "high", "title": title, "message": msg,
+                         "link": "/transport-manifest"})
+        except Exception as ne:  # noqa: BLE001
+            logger.warning("check-in blocked broadcast failed: %s", ne)
         return "blocked"
 
 
@@ -951,7 +1015,19 @@ async def set_cargo(flight_id: int, payload: CargoUpdate, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Flight not found")
     s.cargo_manifest = [i.dict() for i in payload.items]
     db.commit()
-    return {"items": s.cargo_manifest}
+    out = {"items": s.cargo_manifest}
+    # Cargo counts against the payload limit too — say so when it tips the flight over.
+    s2 = (db.query(TransportSchedule).options(joinedload(TransportSchedule.transport), joinedload(TransportSchedule.manifest_entries))
+          .filter(TransportSchedule.id == flight_id).first())
+    summ = _schedule_to_dict(s2)
+    if summ.get("over_payload"):
+        out["warning"] = (f"Over the payload limit: {summ['total_weight_kg']:.0f} kg against {summ['max_payload_kg']:.0f} kg "
+                          f"(passengers + baggage + cargo). Offload before departure.")
+    missing_un = [c.description for c in payload.items if c.dangerous_goods and not (c.un_number or "").strip()]
+    if missing_un:
+        out["warning"] = (out.get("warning", "") + " " if out.get("warning") else "") + \
+            f"Dangerous goods without a UN number: {', '.join(missing_un)}."
+    return out
 
 
 # ─── Notifications, export & analytics ──────────────────────────────────────────
@@ -1098,8 +1174,11 @@ async def export_manifest_xlsx(flight_id: int, db: Session = Depends(get_db),
         ("Departure", s.departure_time.astimezone(_site_tz()).strftime("%d %b %Y  %H:%M") if s.departure_time else "—"),
         ("Operator", (s.transport.operator if s.transport else "") or "—"),
         ("Crew", ", ".join(f"{c.get('name')} ({c.get('role')})" for c in (s.crew or [])) or "—"),
-        ("Weight", f"{summary['total_weight_kg']} kg  (pax {summary['body_weight_kg']} + bag {summary['baggage_weight_kg']} + cargo {summary['cargo_weight_kg']})"),
-        ("Seats", f"{summary['seats_taken']}/{summary['capacity'] or '—'}"),
+        ("Weight", f"{summary['total_weight_kg']} kg  (pax {summary['body_weight_kg']} + bag {summary['baggage_weight_kg']} + cargo {summary['cargo_weight_kg']})"
+                   + (f"   limit {summary['max_payload_kg']:.0f} kg" if summary.get('max_payload_kg') else "")
+                   + ("   ⚠ OVER LIMIT" if summary.get('over_payload') else "")),
+        ("Seats", f"{summary['seats_taken']}/{summary['capacity'] or '—'}" + ("   ⚠ OVERBOOKED" if summary.get('overbooked') else "")),
+        ("Status", f"{s.status}" + (f"   departed {s.actual_departure_time.astimezone(_site_tz()):%d %b %H:%M}" if s.actual_departure_time else "")),
     ]
     r = 2
     for label, val in meta:
@@ -1109,7 +1188,7 @@ async def export_manifest_xlsx(flight_id: int, db: Session = Depends(get_db),
         r += 1
 
     r += 1
-    headers = ["#", "Passenger", "Emp/ID", "Company", "Direction", "Weight (kg)", "Status"]
+    headers = ["#", "Passenger", "Emp/ID", "Company", "Direction", "Weight (kg)", "Status", "Remarks / overrides"]
     for c, h in enumerate(headers, 1):
         cell = ws.cell(row=r, column=c, value=h)
         cell.font = Font(bold=True, color="FFFFFFFF")
@@ -1120,15 +1199,37 @@ async def export_manifest_xlsx(flight_id: int, db: Session = Depends(get_db),
         r += 1
         wt = (e.body_weight or 0) + (e.baggage_weight or 0)
         row = [i, e.passenger_name, e.emp_code or e.id_number or "", e.company or "",
-               e.direction, wt or "", e.status]
+               e.direction, wt or "", e.status, e.remarks or ""]
         for c, val in enumerate(row, 1):
             cell = ws.cell(row=r, column=c, value=val)
             cell.border = border
+            if c == 8 and "OVERRIDE" in str(val):
+                cell.font = Font(bold=True, color="FFB91C1C")
+
+    # Cargo — weight counts against the limit; dangerous goods must be declared to the pilot.
+    cargo = [c for c in (s.cargo_manifest or []) if isinstance(c, dict)]
+    if cargo:
+        r += 2
+        for c, h in enumerate(["#", "Cargo", "Weight (kg)", "Dangerous goods", "UN number", "Remarks"], 1):
+            cell = ws.cell(row=r, column=c, value=h)
+            cell.font = Font(bold=True, color="FFFFFFFF")
+            cell.fill = hdr_fill
+            cell.border = border
+        for i, it in enumerate(cargo, 1):
+            r += 1
+            vals = [i, it.get("description"), it.get("weight_kg") or 0, "YES" if it.get("dangerous_goods") else "no",
+                    it.get("un_number") or ("MISSING" if it.get("dangerous_goods") else ""), it.get("remarks") or ""]
+            for c, val in enumerate(vals, 1):
+                cell = ws.cell(row=r, column=c, value=val)
+                cell.border = border
+                if it.get("dangerous_goods") and c in (4, 5):
+                    cell.font = Font(bold=True, color="FFB91C1C")
 
     ws.column_dimensions["B"].width = 26
     ws.column_dimensions["D"].width = 20
     for col in ("A", "C", "E", "F", "G"):
         ws.column_dimensions[col].width = 14
+    ws.column_dimensions["H"].width = 48
 
     buf = io.BytesIO()
     wb.save(buf)

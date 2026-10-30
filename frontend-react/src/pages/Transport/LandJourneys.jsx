@@ -20,6 +20,8 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 dayjs.extend(relativeTime);
 
+const DT_FORMATS = ['DD MMM YYYY HH:mm', 'YYYY-MM-DD HH:mm', 'YYYY-MM-DD HH:mm:ss', 'DD/MM/YYYY HH:mm'];
+
 const RISK = {
   LOW:    { color: 'green',  label: 'Low' },
   MEDIUM: { color: 'orange', label: 'Medium' },
@@ -82,7 +84,9 @@ export default function LandJourneys() {
       const res = await apiService.get('/api/v1/transport/personnel-search', { q });
       const list = Array.isArray(res) ? res : [];
       setPaxStaff(prev => ({ ...prev, ...Object.fromEntries(list.map(p => [p.emp_code, { name: p.name, emp_code: p.emp_code }])) }));
-      setPaxOptions(list.map(p => ({ value: p.emp_code, label: `${p.name} (${p.emp_code})` })));
+      // keep earlier picks so a chosen person still shows by name after a new search
+      setPaxOptions(prev => [...new Map([...prev, ...list.map(p => ({ value: p.emp_code, label: `${p.name} (${p.emp_code})` }))]
+        .map(o => [o.value, o])).values()]);
     } catch (_) { /* search is best-effort */ }
   };
 
@@ -119,15 +123,19 @@ export default function LandJourneys() {
   });
 
   const toBody = (v) => {
-    const { vehicle_checks, passenger_codes, ...rest } = v;
+    const { vehicle_checks, staff_codes, guest_names, ...rest } = v;
     const done = new Set(vehicle_checks || []);
     return {
       ...rest,
       planned_departure: v.planned_departure.toISOString(),
       planned_arrival: v.planned_arrival ? v.planned_arrival.toISOString() : null,
-      // Staff picked from search keep their code (links them to personnel); anything
-      // typed in is a guest name.
-      passengers: (passenger_codes || []).map(c => paxStaff[c] || { name: c }),
+      // Staff and guests are picked in separate boxes: in the old single "tags" box the
+      // typed text was the first option, so picking a staff member often added a GUEST
+      // of that name instead — and staff were then never moved on/off POB.
+      passengers: [
+        ...(staff_codes || []).map(c => paxStaff[c] || { name: c, emp_code: c }),
+        ...(guest_names || []).filter(n => n && n.trim()).map(n => ({ name: n.trim() })),
+      ],
       vehicle_check: Object.fromEntries(VEHICLE_CHECKS.map(([k]) => [k, done.has(k)])),
     };
   };
@@ -159,7 +167,8 @@ export default function LandJourneys() {
       risk_factors: jj.risk_manual_factors || [],
       pob_movement: jj.pob_movement || 'NONE',
       notes: jj.notes,
-      passenger_codes: (jj.passengers || []).map(p => p.emp_code || p.name),
+      staff_codes: (jj.passengers || []).filter(p => p.emp_code).map(p => p.emp_code),
+      guest_names: (jj.passengers || []).filter(p => !p.emp_code).map(p => p.name),
       vehicle_checks: Object.entries(jj.vehicle_check || {}).filter(([, ok]) => ok).map(([k]) => k),
     });
     setShowCreate(true);
@@ -288,14 +297,14 @@ export default function LandJourneys() {
             <Form.Item name="vehicle_reg" label="Vehicle reg."><Input placeholder="ABC-123-XY" /></Form.Item>
             <Form.Item name="vehicle_type" label="Vehicle type"><Input placeholder="Toyota Hilux" /></Form.Item>
             <Form.Item name="planned_departure" label="Planned departure" rules={[{ required: true }]}>
-              <DatePicker showTime style={{ width: '100%' }} />
+              <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="planned_arrival" label="Planned arrival (ETA)" dependencies={['planned_departure']}
               rules={[({ getFieldValue }) => ({
                 validator: (_, v) => (!v || !getFieldValue('planned_departure') || v.isAfter(getFieldValue('planned_departure'))
                   ? Promise.resolve() : Promise.reject(new Error('Arrival must be after departure'))),
               })]}>
-              <DatePicker showTime style={{ width: '100%' }} />
+              <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="checkin_interval_min" label="Check-in every (min)" initialValue={60}>
               <InputNumber min={15} max={240} style={{ width: '100%' }} />
@@ -309,10 +318,15 @@ export default function LandJourneys() {
             <Select allowClear placeholder="Suggest from origin / destination"
               options={Object.entries(POB_MOVEMENT).map(([value, label]) => ({ value, label }))} />
           </Form.Item>
-          <Form.Item name="passenger_codes" label="Passengers"
-            tooltip="Search staff by name or code; type a name and press Enter for a guest">
-            <Select mode="tags" showSearch filterOption={false} onSearch={searchPax}
-              options={paxOptions} placeholder="Search staff…" style={{ width: '100%' }} />
+          <Form.Item name="staff_codes" label="Staff passengers"
+            tooltip="Search by name or staff code and pick from the list — staff are moved on / off POB with the journey">
+            <Select mode="multiple" showSearch filterOption={false} onSearch={searchPax}
+              options={paxOptions} placeholder="Search staff…" style={{ width: '100%' }}
+              notFoundContent="Type 2+ letters of a name or staff code" />
+          </Form.Item>
+          <Form.Item name="guest_names" label="Guests (no staff record)"
+            tooltip="Type a name and press Enter — guests are on the journey but have no POB record">
+            <Select mode="tags" open={false} placeholder="Type a guest's name and press Enter" style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="vehicle_checks" label="Pre-trip vehicle check (all must pass before the journey can start)">
             <Checkbox.Group options={VEHICLE_CHECKS.map(([value, label]) => ({ value, label }))}

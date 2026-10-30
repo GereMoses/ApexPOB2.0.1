@@ -15,6 +15,10 @@ import dayjs from 'dayjs';
 import apiService from '../../services/api';
 import LandJourneys from './LandJourneys';
 
+// Shown as the first format; any of them can be typed (the reschedule box only took
+// "DD MMM YYYY HH:mm" — a typed 2026-10-30 13:20 was silently ignored).
+const DT_FORMATS = ['DD MMM YYYY HH:mm', 'YYYY-MM-DD HH:mm', 'YYYY-MM-DD HH:mm:ss', 'DD/MM/YYYY HH:mm'];
+
 const TRANSPORT_TYPES = [
   { value: 3, label: 'Helicopter' },
   { value: 4, label: 'Vessel' },
@@ -322,14 +326,14 @@ function FlightList({ onSelectFlight }) {
                 filterOption={(i, o) => (o?.value ?? '').toLowerCase().includes(i.toLowerCase())} />
             </Form.Item>
             <Form.Item name="departure_time" label="Departure Time" rules={[{ required: true }]}>
-              <DatePicker showTime style={{ width: '100%' }} />
+              <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item name="arrival_time" label="ETA (optional)" dependencies={['departure_time']}
               rules={[({ getFieldValue }) => ({
                 validator: (_, v) => (!v || !getFieldValue('departure_time') || v.isAfter(getFieldValue('departure_time'))
                   ? Promise.resolve() : Promise.reject(new Error('ETA must be after departure'))),
               })]}>
-              <DatePicker showTime style={{ width: '100%' }} />
+              <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
             </Form.Item>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0 16px' }}>
@@ -396,6 +400,13 @@ function ManifestDrawer({ flight: picked, onClose }) {
   const [badgeCode, setBadgeCode] = useState('');
   const [showEdit, setShowEdit] = useState(false);
   const [editForm] = Form.useForm();
+  const [paxEdit, setPaxEdit] = useState(null);          // manifest entry being weighed / corrected
+  const [paxForm] = Form.useForm();
+  const openPaxEdit = (row) => {
+    setPaxEdit(row);
+    paxForm.setFieldsValue({ body_weight: row.body_weight, baggage_weight: row.baggage_weight, direction: row.direction,
+                             company: row.company, id_number: row.id_number, remarks: row.remarks });
+  };
   const qc = useQueryClient();
 
   const editFlight = useMutation({
@@ -468,7 +479,8 @@ function ManifestDrawer({ flight: picked, onClose }) {
   const checkinBadge = useMutation({
     mutationFn: (emp_code) => apiService.post(`/api/v1/transport/flights/${flight.id}/checkin`, { emp_code }),
     onSuccess: (res) => {
-      message.success(`${res?.passenger_name || res?.emp_code || 'Passenger'} checked in`);
+      message.success(res?.already_checked_in ? `${res?.passenger_name || res?.emp_code} is already checked in`
+        : `${res?.passenger_name || res?.emp_code || 'Passenger'} checked in`);
       setBadgeCode('');
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
@@ -492,23 +504,36 @@ function ManifestDrawer({ flight: picked, onClose }) {
       const alreadyOverridden = vars?.override_capacity && vars?.override_compliance && vars?.override_weight;
       // Any safety hard-block (capacity / fitness-to-travel / weight-and-balance)
       // comes back as 409 — surface the reason and require an explicit override.
-      if (e?.status === 409 && vars?.status === 'CONFIRMED' && !alreadyOverridden) {
+      if (e?.status === 409 && vars?.status === 'CONFIRMED' && /weight missing/i.test(e.message || '')) {
+        // Missing weight is a data gap, not a judgement call: weigh them in.
+        const row = (data?.entries || []).find(x => x.id === vars.entryId);
+        modal.confirm({
+          title: 'Weight needed before boarding',
+          icon: <WarningOutlined style={{ color: '#d97706' }} />,
+          content: e.message,
+          okText: 'Enter weight', cancelText: 'Cancel',
+          onOk: () => { if (row) openPaxEdit(row); },
+        });
+      } else if (e?.status === 409 && vars?.status === 'CONFIRMED' && !alreadyOverridden) {
         // An override is an accountable decision: a reason is required and recorded
         // on the passenger (and needs the transport.override permission).
         let reason = '';
-        modal.confirm({
+        // Override stays disabled until a reason is typed (an accountable decision).
+        const dlg = modal.confirm({
           title: 'Boarding blocked',
           icon: <WarningOutlined style={{ color: '#dc2626' }} />,
           content: (
             <div>
-              <div style={{ marginBottom: 8 }}>{e.message}</div>
+              <div style={{ marginBottom: 6 }}>Overriding boards this passenger despite <b>every</b> problem below:</div>
+              <ul style={{ margin: '0 0 10px 18px', padding: 0, color: '#b91c1c' }}>
+                {(e.message || '').replace(/\. Fix it, or override with a reason\.?$/, '').split('. ').filter(Boolean).map((t, i) => <li key={i}>{t}</li>)}
+              </ul>
               <Input.TextArea rows={2} placeholder="Reason for overriding (required)"
-                onChange={(ev) => { reason = ev.target.value; }} />
+                onChange={(ev) => { reason = ev.target.value; dlg.update({ okButtonProps: { danger: true, disabled: !reason.trim() } }); }} />
             </div>
           ),
-          okType: 'danger', okText: 'Override & confirm',
+          okType: 'danger', okText: 'Override & confirm', okButtonProps: { danger: true, disabled: true },
           onOk: () => {
-            if (!reason.trim()) { message.error('Enter a reason for the override'); return Promise.reject(); }
             updateEntry.mutate({
               ...vars, override_capacity: true, override_compliance: true, override_weight: true,
               remarks: reason.trim(),
@@ -534,8 +559,8 @@ function ManifestDrawer({ flight: picked, onClose }) {
 
   const setCargo = useMutation({
     mutationFn: (items) => apiService.put(`/api/v1/transport/flights/${flight.id}/cargo`, { items }),
-    onSuccess: () => {
-      message.success('Cargo updated');
+    onSuccess: (r) => {
+      if (r?.warning) message.warning(`Cargo saved — ${r.warning}`, 10); else message.success('Cargo updated');
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       setShowCargo(false);
     },
@@ -569,6 +594,17 @@ function ManifestDrawer({ flight: picked, onClose }) {
       message.error('Export failed');
     }
   };
+
+  const savePax = useMutation({
+    mutationFn: (v) => apiService.put(`/api/v1/transport/flights/${flight.id}/manifest/${paxEdit.id}`, v),
+    onSuccess: () => {
+      message.success('Passenger details saved');
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      qc.invalidateQueries({ queryKey: ['transport-flights'] });
+      setPaxEdit(null);
+    },
+    onError: (e) => message.error(e.message || 'Could not save'),
+  });
 
   const deleteFlight = useMutation({
     mutationFn: () => apiService.delete(`/api/v1/transport/flights/${flight.id}`),
@@ -660,6 +696,12 @@ function ManifestDrawer({ flight: picked, onClose }) {
       icon: <SyncOutlined />,
       label: 'Reset to Manifested',
       onClick: () => updateEntry.mutate({ entryId: row.id, status: 'MANIFESTED' }),
+    },
+    !['IN_TRANSIT', 'COMPLETED', 'CANCELLED'].includes(flight?.status) && {
+      key: 'edit',
+      icon: <AuditOutlined />,
+      label: 'Edit details / weigh-in',
+      onClick: () => openPaxEdit(row),
     },
     { type: 'divider' },
     {
@@ -777,13 +819,26 @@ function ManifestDrawer({ flight: picked, onClose }) {
             style={{ width: 130 }}
             onChange={(v) => {
               if (v === 'IN_TRANSIT' || v === 'COMPLETED' || v === 'CANCELLED') {
+                // Before it moves: everything still wrong with this flight, in one place.
+                const issues = (v === 'IN_TRANSIT' || v === 'COMPLETED') ? [
+                  summary.over_payload && `Over the payload limit (${summary.total_weight_kg} / ${summary.max_payload_kg} kg)`,
+                  summary.overbooked && `Overbooked (${summary.seats_taken} / ${summary.capacity} seats)`,
+                  (summary.cargo || []).some(c => c.dangerous_goods && !c.un_number) && 'Dangerous goods without a UN number',
+                  outstanding > 0 && `${outstanding} passenger(s) not checked in yet`,
+                  !(summary.crew || []).length && 'No crew recorded',
+                ].filter(Boolean) : [];
                 modal.confirm({
                   title: `Mark flight ${FLIGHT_STATUS_CFG[v]?.label}?`,
-                  content: v === 'IN_TRANSIT'
+                  okText: issues.length ? 'Depart anyway' : 'OK',
+                  okButtonProps: issues.length ? { danger: true } : undefined,
+                  content: <div>{issues.length > 0 && (
+                    <Alert type="warning" showIcon style={{ marginBottom: 10 }} message="Check before it moves"
+                      description={<ul style={{ margin: 0, paddingLeft: 18 }}>{issues.map(i => <li key={i}>{i}</li>)}</ul>} />)}
+                    {v === 'IN_TRANSIT'
                     ? 'Boarded OUTBOUND passengers will be taken off POB.'
                     : v === 'COMPLETED'
                       ? 'Boarded INBOUND passengers will be added to POB (and outbound taken off if not already).'
-                      : 'Any POB changes already made for this flight will be undone, and the passengers are told it is cancelled.',
+                      : 'Any POB changes already made for this flight will be undone, and the passengers are told it is cancelled.'}</div>,
                   onOk: () => updateFlightStatus.mutate(v),
                 });
               } else {
@@ -1164,6 +1219,32 @@ function ManifestDrawer({ flight: picked, onClose }) {
         )}
       </Modal>
       <Modal
+        title={`Passenger details — ${paxEdit?.passenger_name || ''}`}
+        open={!!paxEdit}
+        onCancel={() => setPaxEdit(null)}
+        onOk={() => paxForm.validateFields().then(v => savePax.mutate(v)).catch(() => {})}
+        confirmLoading={savePax.isPending}
+        okText="Save"
+      >
+        <Form form={paxForm} layout="vertical">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 16px' }}>
+            <Form.Item name="body_weight" label="Body Weight (kg)" rules={[{ type: 'number', min: 0, max: 400 }]}>
+              <InputNumber min={0} max={400} style={{ width: '100%' }} autoFocus />
+            </Form.Item>
+            <Form.Item name="baggage_weight" label="Baggage (kg)" rules={[{ type: 'number', min: 0, max: 200 }]}>
+              <InputNumber min={0} max={200} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item name="direction" label="Direction">
+              <Select disabled={paxEdit?.status === 'CONFIRMED'} options={[
+                { value: 'INBOUND', label: '↓ Inbound (arriving)' }, { value: 'OUTBOUND', label: '↑ Outbound (departing)' }]} />
+            </Form.Item>
+            <Form.Item name="company" label="Company"><Input /></Form.Item>
+            <Form.Item name="id_number" label="Passport / ID No."><Input /></Form.Item>
+            <Form.Item name="remarks" label="Remarks"><Input /></Form.Item>
+          </div>
+        </Form>
+      </Modal>
+      <Modal
         title="Reschedule / edit flight"
         open={showEdit}
         onCancel={() => setShowEdit(false)}
@@ -1175,14 +1256,14 @@ function ManifestDrawer({ flight: picked, onClose }) {
           <Form.Item name="departure_location" label="From" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="arrival_location" label="To" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="departure_time" label="Departure" rules={[{ required: true }]}>
-            <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
+            <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="arrival_time" label="Arrival (optional)" dependencies={['departure_time']}
             rules={[({ getFieldValue }) => ({
               validator: (_, v) => (!v || !getFieldValue('departure_time') || v.isAfter(getFieldValue('departure_time'))
                 ? Promise.resolve() : Promise.reject(new Error('Arrival must be after departure'))),
             })]}>
-            <DatePicker showTime format="DD MMM YYYY HH:mm" style={{ width: '100%' }} />
+            <DatePicker showTime format={DT_FORMATS} style={{ width: '100%' }} />
           </Form.Item>
           <Form.Item name="notify" valuePropName="checked">
             <Checkbox>Tell passengers if the departure time changes (email / SMS when configured)</Checkbox>
