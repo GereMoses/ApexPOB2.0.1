@@ -527,6 +527,51 @@ class AttendanceCalculationService:
         # punch on its own calendar date.
         consumed_overnight: set = set()
 
+        # ── Days that are NOT absences when nobody taps ───────────────────────
+        # Leave and public holidays were ignored: a scheduled person on approved leave
+        # (or SeamlessHR leave) or on a holiday was scored ABSENT — and the absence
+        # went to SeamlessHR/payroll. STATUS_LEAVE existed but was never set.
+        leave_days: set = set()
+        for lv in db.execute(text("""
+                SELECT start_time, end_time FROM att_leave
+                WHERE emp_id = :pe AND approval_status = 1
+                  AND start_time::date <= :e AND end_time::date >= :s"""),
+                {"pe": pe_id, "s": start_dt, "e": end_dt}).fetchall():
+            d = max(_naive(lv.start_time).date(), start_dt)
+            while d <= min(_naive(lv.end_time).date(), end_dt):
+                leave_days.add(d)
+                d += timedelta(days=1)
+        # Leave raised on the Attendance → Leaves screen (contractors / non-SeamlessHR).
+        for lv in db.execute(text("""
+                SELECT lm.start_date, lm.end_date FROM leave_management lm JOIN personnel p ON p.id = lm.personnel_id
+                WHERE p.emp_code = :c AND lm.status IN ('approved', 'on_leave', 'completed')
+                  AND lm.start_date <= :e AND lm.end_date >= :s"""),
+                {"c": emp_code, "s": start_dt, "e": end_dt}).fetchall():
+            d = max(lv.start_date, start_dt)
+            while d <= min(lv.end_date, end_dt):
+                leave_days.add(d)
+                d += timedelta(days=1)
+        shr = db.execute(text("SELECT on_leave, leave_end_date FROM personnel WHERE emp_code = :c"),
+                         {"c": emp_code}).fetchone()
+        if shr and shr.on_leave:
+            # SeamlessHR gives "on leave now (until …)", not history: trust it for
+            # yesterday and today only (the nightly run), never to rewrite older days.
+            from datetime import datetime as _dtm
+            today = _dtm.now(SITE_TZ).date()
+            d = max(start_dt, today - timedelta(days=1))
+            while d <= min(end_dt, shr.leave_end_date or end_dt):
+                leave_days.add(d)
+                d += timedelta(days=1)
+        holiday_days: set = set()
+        for h in db.execute(text("""
+                SELECT start_date, end_date FROM att_holiday
+                WHERE COALESCE(is_active, TRUE) AND start_date <= :e AND end_date >= :s"""),
+                {"s": start_dt, "e": end_dt}).fetchall():
+            d = max(h.start_date, start_dt)
+            while d <= min(h.end_date, end_dt):
+                holiday_days.add(d)
+                d += timedelta(days=1)
+
         cur = start_dt
         while cur <= end_dt:
             sched = _schedule_for_day(schedules, cur) or fallback_sched
@@ -626,8 +671,15 @@ class AttendanceCalculationService:
             ot_mins = max(0, work_mins - sched_mins)
 
             # ── Status (mirrors BioTime exception priority) ───────────────────
+            if not day_punches and cur in holiday_days:
+                # A public holiday with no taps is a day off, not an absence.
+                db.execute(text("DELETE FROM att_report WHERE emp_id = :e AND att_date = :d AND att_status = 3"),
+                           {"e": pe_id, "d": cur})
+                _sync_exceptions(db, pe_id, cur, dept_id, {})
+                cur += timedelta(days=1)
+                continue
             if not day_punches:
-                att_status = STATUS_ABSENT
+                att_status = STATUS_LEAVE if cur in leave_days else STATUS_ABSENT
             elif late_mins > 0 and early_mins > 0:
                 att_status = STATUS_LATE      # late-in takes priority when both
             elif late_mins > 0:
@@ -680,6 +732,20 @@ class AttendanceCalculationService:
                 "dept_id":      dept_id,
                 "sched_mins":   sched_mins,
             })
+            # Exceptions for the supervisor (Attendance → Exceptions). Absent, early
+            # departure and missing punch only once the check-out window has closed.
+            shift_over = datetime.now(SITE_TZ).replace(tzinfo=None) > sched_out_dt + timedelta(minutes=co_after)
+            found = {}
+            if late_mins > 0:
+                found["late_arrival"] = (late_mins, f"Clocked in {ci_naive:%H:%M}, shift starts {start_t:%H:%M}")
+            if shift_over:
+                if att_status == STATUS_ABSENT:
+                    found["absent"] = (0, "Scheduled, no clock-in or clock-out")
+                elif day_punches and not (check_in and check_out):
+                    found["missing_punch"] = (0, "No clock-out recorded" if check_in else "No clock-in recorded")
+                if early_mins > 0:
+                    found["early_departure"] = (early_mins, f"Clocked out {co_naive:%H:%M}, shift ends {end_t:%H:%M}")
+            _sync_exceptions(db, pe_id, cur, dept_id, found)
             cur += timedelta(days=1)
 
     @staticmethod
@@ -696,6 +762,26 @@ class AttendanceCalculationService:
 
 
 # ── Module-level helpers (used by service and by _async_recalculate) ──────────
+
+AUTO_EXCEPTIONS = ("late_arrival", "early_departure", "absent", "missing_punch")
+
+
+def _sync_exceptions(db, emp_id: int, day: date, dept_id, found: dict) -> None:
+    """Make the open exceptions for this person/day match `found` {type: (minutes, note)}.
+    Exceptions a supervisor has already handled are left alone and not raised again."""
+    handled = {r[0] for r in db.execute(text("""
+        SELECT exception_type FROM att_exception
+        WHERE emp_id = :e AND att_date = :d AND handled_at IS NOT NULL"""), {"e": emp_id, "d": day}).fetchall()}
+    db.execute(text("""DELETE FROM att_exception WHERE emp_id = :e AND att_date = :d
+                       AND handled_at IS NULL AND exception_type = ANY(:t)"""),
+               {"e": emp_id, "d": day, "t": list(AUTO_EXCEPTIONS)})
+    for kind, (mins, note) in found.items():
+        if kind not in handled:
+            db.execute(text("""INSERT INTO att_exception (emp_id, att_date, exception_type, deviation_minutes,
+                                                          exception_note, department_id)
+                               VALUES (:e, :d, :k, :m, :n, :dp)"""),
+                       {"e": emp_id, "d": day, "k": kind, "m": mins, "n": note, "dp": dept_id})
+
 
 def _schedule_for_day(schedules: list, day: date) -> Optional[dict]:
     for s in schedules:

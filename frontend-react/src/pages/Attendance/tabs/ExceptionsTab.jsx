@@ -25,6 +25,7 @@ const EX_TYPE = {
   overtime:        { label:'Overtime',        color:'processing', tag:'blue' },
   area_mismatch:   { label:'Area Mismatch',   color:'default', tag:'purple'  },
 };
+const HANDLED_LABEL = { approve:'Excused', ignore:'Dismissed', flag:'Flagged' };
 const exCfg = (t) => EX_TYPE[t] || { label: t||'Unknown', color:'default', tag:'default' };
 
 const HANDLE_OPT = [
@@ -106,7 +107,7 @@ const ExceptionsTab = () => {
         />
       ),
     },
-    { title:'Date',      key:'date',    dataIndex:'exception_date', width:130,
+    { title:'Date',      key:'date',    dataIndex:'att_date', width:130,
       render: d => d ? dayjs(d).format('DD MMM YYYY') : '—' },
     { title:'Exception', key:'type',    dataIndex:'exception_type', width:150,
       render: t => { const c = exCfg(t); return <Tag color={c.tag}>{c.label}</Tag>; } },
@@ -115,7 +116,7 @@ const ExceptionsTab = () => {
     { title:'Note',      key:'note',    dataIndex:'exception_note', ellipsis:true },
     { title:'Status',    key:'status',  dataIndex:'handled_at', width:110,
       render: (v, r) => v
-        ? <Badge status="success" text={r.handle_action||'Handled'} />
+        ? <Badge status={r.handle_action === 'flag' ? 'error' : 'success'} text={HANDLED_LABEL[r.handle_action] || 'Handled'} />
         : <Badge status="warning" text="Open" /> },
   ];
 
@@ -285,7 +286,7 @@ const ExceptionsTab = () => {
             <Descriptions column={2} size="small" bordered>
               <Descriptions.Item label="Name" span={2}><strong>{detailRec.emp_name||`#${detailRec.emp_id}`}</strong></Descriptions.Item>
               <Descriptions.Item label="Code">{detailRec.emp_code||'—'}</Descriptions.Item>
-              <Descriptions.Item label="Date">{detailRec.exception_date ? dayjs(detailRec.exception_date).format('DD MMM YYYY') : '—'}</Descriptions.Item>
+              <Descriptions.Item label="Date">{detailRec.att_date ? dayjs(detailRec.att_date).format('DD MMM YYYY') : '—'}</Descriptions.Item>
             </Descriptions>
             <Divider orientation="left" style={{ fontSize:12, marginTop:14 }}>Exception</Divider>
             <Descriptions column={2} size="small" bordered>
@@ -295,7 +296,7 @@ const ExceptionsTab = () => {
               <Descriptions.Item label="Deviation">{detailRec.deviation_minutes ? `${detailRec.deviation_minutes} min` : '—'}</Descriptions.Item>
               <Descriptions.Item label="Status">
                 {detailRec.handled_at
-                  ? <Badge status="success" text={detailRec.handle_action||'Handled'} />
+                  ? <Badge status="success" text={HANDLED_LABEL[detailRec.handle_action] || 'Handled'} />
                   : <Badge status="warning" text="Open" />}
               </Descriptions.Item>
               <Descriptions.Item label="Note" span={2}>{detailRec.exception_note||'—'}</Descriptions.Item>

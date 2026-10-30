@@ -3,7 +3,7 @@ import {
   Table, Button, Space, Tag, App, Modal, Drawer,
   Select, Row, Col, Divider, Descriptions, Tooltip, Badge,
   Input, DatePicker, Form, InputNumber, TimePicker,
-  Popover, Popconfirm,
+  Popover, Popconfirm, Alert,
 } from 'antd';
 import {
   PlusOutlined, CheckOutlined, CloseOutlined, EyeOutlined,
@@ -299,6 +299,9 @@ const OvertimeTab = () => {
 
   return (
     <div style={{ padding: 24 }}>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }}
+        message="SeamlessHR staff request overtime in SeamlessHR"
+        description="SeamlessHR is the system of record for staff overtime — raise and approve it there and ApexPOB picks it up automatically. Use this screen only for contractors and others who are not in SeamlessHR." />
       <style>{`
         .ot-mod-table .ant-table-thead .ant-table-cell {
           background: #f8fafc !important; color: #64748b !important;

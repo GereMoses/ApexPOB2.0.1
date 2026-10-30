@@ -1042,6 +1042,34 @@ async def get_leaves(
         logger.error(f"Error fetching leaves: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch leaves: {str(e)}")
 
+def _refuse_if_seamlesshr(db: Session, emp_id: int, what: str) -> None:
+    """SeamlessHR owns leave and overtime for its staff (governance rule, 7 Jul): a
+    request raised here would never reach SeamlessHR or payroll and the two systems
+    would disagree. ApexPOB keeps these only for people not in SeamlessHR
+    (contractors / third parties). Approved SeamlessHR leave is pulled nightly."""
+    src = db.execute(text("""
+        SELECT p.hr_source FROM personnel_employee pe JOIN personnel p ON p.emp_code = pe.emp_code
+        WHERE pe.id = :i"""), {"i": emp_id}).scalar()
+    if src == "SEAMLESSHR":
+        raise HTTPException(status_code=400, detail=(
+            f"This employee's {what} is managed in SeamlessHR — raise and approve it there; "
+            f"ApexPOB picks it up automatically. Use this screen only for contractors and others not in SeamlessHR."))
+
+
+@router.get("/leaves/seamlesshr")
+async def seamlesshr_leave(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Who is on leave today according to SeamlessHR (pulled nightly) — read-only."""
+    rows = db.execute(text("""
+        SELECT emp_code, COALESCE(NULLIF(full_name, ''), TRIM(CONCAT(first_name, ' ', last_name))) AS name,
+               department, leave_end_date
+        FROM personnel WHERE is_active AND on_leave ORDER BY name""")).fetchall()
+    last = db.execute(text("SELECT max(created_at) FROM hr_sync_log WHERE message ILIKE '%leave%'")).scalar() \
+        if db.execute(text("SELECT to_regclass('hr_sync_log')")).scalar() else None
+    return {"success": True, "data": [{"emp_code": r.emp_code, "name": r.name, "department": r.department,
+                                        "until": r.leave_end_date.isoformat() if r.leave_end_date else None} for r in rows],
+            "last_pull": last.isoformat() if last else None}
+
+
 @router.post("/leaves")
 async def create_leave(
     leave: LeaveCreate,
@@ -1049,6 +1077,7 @@ async def create_leave(
     current_user = Depends(get_current_user)
 ):
     """Create new leave request"""
+    _refuse_if_seamlesshr(db, leave.emp_id, "leave")
     try:
         # Validate leave request
         is_valid, errors = await attendance_validation_service.validate_leave_request(
@@ -1250,6 +1279,7 @@ async def create_overtime(
     current_user = Depends(get_current_user)
 ):
     """Create overtime request"""
+    _refuse_if_seamlesshr(db, overtime.personnel_id, "overtime")
     try:
         d = overtime.dict()
         minutes = round((d.get('overtime_hours') or 0) * 60) or round((d.get('hours_worked') or 0) * 60) or 0
@@ -1467,6 +1497,41 @@ async def create_manual_log(
         logger.error(f"Error creating manual log: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to create manual log: {str(e)}")
 
+async def _apply_manual_log(db: Session, log_id: int, approved: bool) -> str:
+    """An approved manual log IS a punch: write it into iclock_transaction (no reader,
+    tagged manual:<id>) and recalculate the person's day, so the timesheet and the
+    SeamlessHR push see it. Approving used to change only the log's status — the
+    calculation never read att_manual_log, so a fixed missing clock-out stayed missing
+    (and was never paid). Rejecting removes the punch again."""
+    row = db.execute(text("""
+        SELECT ml.punch_time, COALESCE(ml.punch_state, 0) AS punch_state, pe.emp_code, p.id AS pid
+        FROM att_manual_log ml JOIN personnel_employee pe ON pe.id = ml.emp_id
+        LEFT JOIN personnel p ON p.emp_code = pe.emp_code
+        WHERE ml.id = :i"""), {"i": log_id}).fetchone()
+    if not row:
+        return ""
+    tag = f"manual:{log_id}"
+    db.execute(text("DELETE FROM iclock_transaction WHERE area_alias = :t"), {"t": tag})
+    if approved:
+        db.execute(text("""
+            INSERT INTO iclock_transaction (emp_code, punch_time, punch_state, verify_type, work_code,
+                                            terminal_sn, area_alias, upload_time)
+            VALUES (:c, :t, :s, 100, 0, NULL, :tag, NOW())"""),
+                   {"c": row.emp_code, "t": row.punch_time, "s": row.punch_state, "tag": tag})
+    db.commit()
+    if not row.pid:
+        return "punch recorded"
+    from ..services.attendance_calculation_service import attendance_calculation_service, SITE_TZ
+    day = row.punch_time.astimezone(SITE_TZ).date()
+    try:
+        await attendance_calculation_service.calculate_attendance(
+            emp_ids=[row.pid], start_date=str(day - timedelta(days=1)), end_date=str(day), db=db)
+        return f"{'added to' if approved else 'removed from'} {day:%d %b} and the day recalculated"
+    except Exception as e:  # noqa: BLE001 — the log decision stands; the nightly calc catches up
+        logger.warning("Recalc after manual log %s failed: %s", log_id, e)
+        return "punch recorded; the day recalculates tonight"
+
+
 @router.post("/manual-logs/{log_id}/approve")
 async def approve_manual_log(
     log_id: int,
@@ -1491,8 +1556,9 @@ async def approve_manual_log(
             WHERE id = :log_id
         """), {"status": status, "approver_id": current_user.id, "log_id": log_id})
         db.commit()
+        recalc = await _apply_manual_log(db, log_id, approved=(status == 1))
         verb = "approved" if action == "approve" else "rejected"
-        return {"success": True, "message": f"Manual log {verb} successfully"}
+        return {"success": True, "message": f"Manual log {verb} — {recalc}" if recalc else f"Manual log {verb} successfully"}
     except HTTPException:
         raise
     except Exception as e:
@@ -2650,8 +2716,8 @@ async def get_dashboard_analytics(
 
         # --- active employee count (status is smallint; 0 = active in BioTime) ---
         active_row = db.execute(text("""
-            SELECT COUNT(*) AS cnt FROM personnel_employee
-        """), {}).fetchone()
+            SELECT COUNT(*) AS cnt FROM personnel WHERE is_active
+        """), {}).fetchone()   # leavers were counted (personnel_employee keeps them)
         active_employees = (active_row._mapping['cnt'] or 0) if active_row else 0
 
         # --- monthly KPIs from att_report ---

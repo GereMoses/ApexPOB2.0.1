@@ -3,7 +3,7 @@ import {
   Table, Button, Space, Tag, App, Modal, Drawer,
   Select, Row, Col, Divider, Descriptions, Tooltip, Badge,
   Input, DatePicker, Form, InputNumber,
-  Popover, Popconfirm,
+  Popover, Popconfirm, Alert,
 } from 'antd';
 import {
   PlusOutlined, CheckOutlined, CloseOutlined, EyeOutlined,
@@ -250,6 +250,10 @@ const LeavesTab = () => {
 
   return (
     <div style={{ padding: 24 }}>
+      <Alert type="info" showIcon style={{ marginBottom: 16 }}
+        message="SeamlessHR staff request leave in SeamlessHR"
+        description="SeamlessHR is the system of record for staff leave — raise and approve it there and ApexPOB picks it up automatically (nightly). Use this screen only for contractors and others who are not in SeamlessHR." />
+      <SeamlessLeaveToday />
       <style>{`
         .lv-mod-table .ant-table-thead .ant-table-cell {
           background: #f8fafc !important; color: #64748b !important;
@@ -501,4 +505,21 @@ const LeavesTab = () => {
     </div>
   );
 };
+// Who SeamlessHR says is on leave today (read-only, pulled nightly).
+function SeamlessLeaveToday() {
+  const { data } = useQuery({ queryKey: ['shr-leave-today'], queryFn: () => apiService.get('/api/v1/attendance/leaves/seamlesshr') });
+  const rows = data?.data || [];
+  return (
+    <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: 10, padding: '10px 14px', marginBottom: 16 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>
+        On leave today — from SeamlessHR <Tag color="blue" style={{ marginLeft: 6 }}>{rows.length}</Tag>
+        {data?.last_pull && <span style={{ fontSize: 12, color: '#94a3b8', fontWeight: 400 }}> · last pulled {dayjs(data.last_pull).format('DD MMM HH:mm')}</span>}
+      </div>
+      {rows.length === 0 ? <span style={{ fontSize: 12, color: '#94a3b8' }}>Nobody is on leave in SeamlessHR today.</span>
+        : <Space wrap size={[6, 6]}>{rows.map(r => (
+            <Tag key={r.emp_code}>{r.name} · {r.department || '—'}{r.until ? ` · until ${dayjs(r.until).format('DD MMM')}` : ''}</Tag>))}</Space>}
+    </div>
+  );
+}
+
 export default LeavesTab;

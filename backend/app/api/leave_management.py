@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -18,6 +19,7 @@ from ..schemas.leave_management import (
 )
 from ..models.user import User
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -439,6 +441,12 @@ async def create_leave_request(
     personnel = db.query(Personnel).filter(Personnel.id == leave_data.personnel_id).first()
     if not personnel:
         raise HTTPException(status_code=404, detail=f"Personnel {leave_data.personnel_id} not found")
+    if personnel.hr_source == "SEAMLESSHR":
+        # SeamlessHR owns staff leave (governance rule) — leave raised here never reaches
+        # SeamlessHR or payroll. Approved SeamlessHR leave is pulled in nightly.
+        raise HTTPException(status_code=400, detail=(
+            "This employee's leave is managed in SeamlessHR — raise and approve it there; ApexPOB picks it up "
+            "automatically. Use this screen only for contractors and others not in SeamlessHR."))
 
     # Blackout check
     blackouts = db.query(LeaveBlackout).filter(
@@ -599,6 +607,7 @@ async def approve_leave_request(
     leave.approved_at = datetime.utcnow()
     db.commit()
     db.refresh(leave)
+    await _recalc_leave_days(db, leave)
     return _enrich_leave(leave)
 
 
@@ -649,4 +658,19 @@ async def cancel_leave_request(
     leave.status = "cancelled"
     db.commit()
     db.refresh(leave)
+    await _recalc_leave_days(db, leave)
     return _enrich_leave(leave)
+
+
+async def _recalc_leave_days(db: Session, leave) -> None:
+    """Re-score the days already past so the timesheet (and its absence exceptions)
+    follow an approval or cancellation straight away — future days are scored nightly."""
+    from ..services.attendance_calculation_service import attendance_calculation_service, SITE_TZ
+    end = min(leave.end_date, datetime.now(SITE_TZ).date())
+    if end < leave.start_date:
+        return
+    try:
+        await attendance_calculation_service.calculate_attendance(
+            emp_ids=[leave.personnel_id], start_date=str(leave.start_date), end_date=str(end), db=db)
+    except Exception as e:  # noqa: BLE001 — the leave decision stands; the nightly run catches up
+        logger.warning("Leave %s: timesheet recalculation failed: %s", leave.id, e)

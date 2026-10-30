@@ -447,6 +447,12 @@ def _to_punch_events(r: Dict, opts: Dict, emp_map: Dict[str, str]) -> List[Dict]
     return [e for e in events if e]
 
 
+def only_seamlesshr_staff(db: Session, records: List[Dict]) -> Tuple[List[Dict], List[Dict]]:
+    """(records for staff mastered in SeamlessHR, the rest)."""
+    shr = {r[0] for r in db.execute(text("SELECT emp_code FROM personnel WHERE hr_source = 'SEAMLESSHR'")).fetchall()}
+    return [r for r in records if r["employee_id"] in shr], [r for r in records if r["employee_id"] not in shr]
+
+
 async def push_attendance(
     db: Session,
     sync_date: Optional[date] = None,
@@ -499,7 +505,13 @@ async def push_attendance(
         return result
 
     records = _build_attendance_records(db, sync_date)
+    # Only staff who come from SeamlessHR are sent there. Contractors / third parties
+    # (and anyone ApexPOB created locally) don't exist in SeamlessHR — sending them
+    # was rejected at best and muddled payroll at worst.
+    records, local = only_seamlesshr_staff(db, records)
     result["records_built"] = len(records)
+    if local:
+        result["skipped_not_in_seamlesshr"] = len(local)
 
     if not records:
         result["status"]  = "success"
