@@ -6,7 +6,7 @@ import DepartmentTree         from './Department/DepartmentTree';
 import PositionList           from './Position/PositionList';
 import ResignationList        from './Resignation/ResignationList';
 import CustomAttributes       from './CustomAttributes/CustomAttributes';
-import OnboardingManagement   from './Onboarding/OnboardingManagement';
+import SiteMobilisation       from './Mobilisation/SiteMobilisation';
 import VendorManagement       from './Vendor/VendorManagement';
 import PersonnelDetail        from './PersonnelDetail';
 import LeaveManagement        from './LeaveManagement/LeaveManagement';
@@ -33,7 +33,8 @@ const Personnel = () => (
     <Route path="positions"               element={<PositionList />} />
     <Route path="resignation"             element={<ResignationList />} />
     <Route path="custom-attributes"       element={<CustomAttributes />} />
-    <Route path="onboarding"              element={<OnboardingManagement />} />
+    <Route path="mobilisation"            element={<SiteMobilisation />} />
+    <Route path="onboarding"              element={<Navigate to="/personnel/mobilisation" replace />} />
     <Route path="vendors"                 element={<VendorManagement />} />
     <Route path="shift-management"        element={<ShiftManagement />} />
     <Route path="overtime-management"     element={<OvertimeManagement />} />

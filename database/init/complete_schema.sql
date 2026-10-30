@@ -20112,3 +20112,23 @@ CREATE TABLE IF NOT EXISTS public.journey_checkin (
     created_at timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_journey_checkin_journey ON public.journey_checkin(journey_id);
+
+-- Site mobilisation (replaces the generic HR onboarding, which duplicated SeamlessHR):
+-- one row per person being readied for site. Most checklist items are read live from
+-- the records; `checks` holds the ones HSE confirms by hand (induction, PPE, accommodation).
+CREATE TABLE IF NOT EXISTS site_mobilisation (
+    id              SERIAL PRIMARY KEY,
+    personnel_id    INTEGER NOT NULL REFERENCES personnel(id) ON DELETE CASCADE,
+    mobilise_date   DATE NOT NULL,
+    status          VARCHAR(12) NOT NULL DEFAULT 'PREPARING',   -- PREPARING | MOBILISED | CANCELLED
+    checks          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    notes           TEXT,
+    override_reason TEXT,                                      -- mobilised with items outstanding
+    outstanding     JSONB,                                     -- what was outstanding at that moment
+    created_by      VARCHAR(150),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    mobilised_at    TIMESTAMPTZ,
+    mobilised_by    VARCHAR(150)
+);
+CREATE INDEX IF NOT EXISTS ix_site_mobilisation_person ON site_mobilisation (personnel_id, status);

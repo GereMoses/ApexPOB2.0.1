@@ -89,7 +89,7 @@ const NAV_GROUPS = [
           // { key: '/personnel/resignation',            icon: <FileTextOutlined />,         label: 'Resignation' },
           // Hidden per Netcom review (2026-07-08):
           // { key: '/personnel/custom-attributes',      icon: <SettingOutlined />,          label: 'Custom Attributes' },
-          { key: '/personnel/onboarding',             icon: <SafetyCertificateOutlined />,label: 'Onboarding' },
+          { key: '/personnel/mobilisation',           icon: <SafetyCertificateOutlined />,label: 'Site Mobilisation' },
           // Hidden per Netcom walkthrough action #8 — vendor master lives in Business Central:
           // { key: '/personnel/vendors',                icon: <ToolOutlined />,             label: 'Contractor/Vendor' },
         ],

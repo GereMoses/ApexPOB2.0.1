@@ -132,6 +132,8 @@ api_router.include_router(bc_integration_router, prefix="/bc-integration", tags=
 # Transport Manifest & Reconciliation
 from .transport_manifest import router as transport_manifest_router
 api_router.include_router(transport_manifest_router, tags=["Transport Manifest"])
+from .mobilisation import router as mobilisation_router
+api_router.include_router(mobilisation_router)
 from .journey_management import router as journey_management_router
 api_router.include_router(journey_management_router, tags=["Journey Management"])
 
