@@ -196,3 +196,42 @@ def test_weigh_in_edit_then_reader_check_in_and_cargo_warning(db, make_person):
     assert db.execute(text("SELECT status FROM manifest_entry WHERE id = :i"), {"i": e["id"]}).scalar() == "CONFIRMED"
     w = run(T.set_cargo(fid, T.CargoUpdate(items=[T.CargoItem(description="Gas", weight_kg=150, dangerous_goods=True)]), db, NS(id=1)))
     assert "Over the payload limit" in w["warning"] and "UN number" in w["warning"]
+
+
+@needs_db
+def test_training_module_certificates_decide_fitness_to_travel(db, make_person):
+    """An expired BOSIET recorded in Personnel → Training used to be invisible to the
+    flight check (it read personnel JSON nothing fills) — the person boarded anyway."""
+    from app.api import transport_manifest as T
+    from app.models.personnel import Personnel
+    code = "BOS" + uuid.uuid4().hex[:5].upper()
+    cid = db.execute(text("INSERT INTO training_courses (course_code, course_name, is_mandatory, valid_period_months) "
+                          "VALUES (:c, 'BOSIET test', TRUE, 48) RETURNING id"), {"c": code}).scalar()
+    p = make_person()
+    db.commit()
+    person = lambda: db.query(Personnel).filter(Personnel.id == p["id"]).first()
+    c = T.travel_compliance(person())
+    assert c["status"] == "warning" and any(f"No {code}" in i for i in c["issues"])          # mandatory, not on file
+    eid = db.execute(text("INSERT INTO training_enrollment (personnel_id, course_id, status, completion_date, expiry_date) "
+                          "VALUES (:p, :c, 'completed', current_date - 1500, current_date - 3) RETURNING id"),
+                     {"p": p["id"], "c": cid}).scalar()
+    db.commit(); db.expire_all()
+    c = T.travel_compliance(person())
+    assert c["status"] == "blocked" and any(f"{code} expired" in i for i in c["issues"])
+    fid = run(T.create_flight(T.FlightCreate(transport_identifier="HEL-TR", departure_location="Base", arrival_location="Rig",
+                                             departure_time=datetime.now(timezone.utc) + timedelta(hours=2)), db, NS(id=1)))["id"]
+    e = run(T.add_manifest_entry(fid, T.ManifestEntryCreate(passenger_name="", personnel_id=p["id"], direction="INBOUND"), db, NS(id=1)))
+    with pytest.raises(HTTPException) as ex:
+        run(T.update_manifest_entry(fid, e["id"], T.ManifestEntryUpdate(status="CONFIRMED"), ADMIN, db, NS(id=1)))
+    assert ex.value.status_code == 409 and f"{code} expired" in ex.value.detail
+    db.execute(text("INSERT INTO training_enrollment (personnel_id, course_id, status, completion_date, expiry_date) "
+                    "VALUES (:p, :c, 'completed', current_date, current_date + 1400)"), {"p": p["id"], "c": cid})
+    db.commit(); db.expire_all()
+    assert T.travel_compliance(person())["status"] == "ok"                                      # renewed
+    db.execute(text("UPDATE training_enrollment SET expiry_date = current_date + 10 WHERE personnel_id = :p AND id <> :e"),
+               {"p": p["id"], "e": eid})
+    db.commit(); db.expire_all()
+    assert T.travel_compliance(person())["status"] == "warning"                                 # expiring soon
+    db.execute(text("DELETE FROM training_enrollment WHERE course_id = :c"), {"c": cid})
+    db.execute(text("DELETE FROM training_courses WHERE id = :c"), {"c": cid})
+    db.commit()

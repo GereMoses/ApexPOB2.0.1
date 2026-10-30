@@ -116,7 +116,7 @@ const StaffingBadge = ({ assigned, headcount }) => {
 };
 
 // ── Position cell ─────────────────────────────────────────────────────────────
-const PositionCell = ({ name, code, type, onView }) => (
+const PositionCell = ({ name, code, type, hr, onView }) => (
   <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
       <span
@@ -127,6 +127,7 @@ const PositionCell = ({ name, code, type, onView }) => (
     <Space size={4}>
       <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8c8c8c' }}>{code}</span>
       {type && <Tag color={TYPE_COLOR[type] || 'default'} style={{ margin: 0, fontSize: 10, padding: '0 4px' }}>{type}</Tag>}
+      {hr && <Tag color="blue" style={{ margin: 0, fontSize: 10, padding: '0 4px' }}>SeamlessHR</Tag>}
     </Space>
   </div>
 );
@@ -699,7 +700,7 @@ const PositionList = () => {
       sorter: (a, b) => a.position_name.localeCompare(b.position_name),
       render: (_, r) => (
         <PositionCell name={r.position_name} code={r.position_code} type={r.position_type}
-          onView={() => setDetailPos(r)} />
+          hr={r.hr_managed} onView={() => setDetailPos(r)} />
       ),
     },
     {
@@ -832,7 +833,7 @@ const PositionList = () => {
                           <span style={{ color: record.assigned_count > 0 ? '#bfbfbf' : '#ff4d4f' }}>Deactivate</span>
                         </Tooltip>
                       ),
-                      disabled: record.assigned_count > 0,
+                      disabled: record.assigned_count > 0 || record.hr_managed,
                       onClick: () => {
                         Modal.confirm({
                           title: 'Deactivate position?',
@@ -1408,23 +1409,28 @@ const PositionList = () => {
       >
         <Form form={form} layout="vertical" size="small" style={{ marginTop: 8 }}>
           {/* Code warning on edit */}
-          {editingPosition && (
+          {editingPosition && (editingPosition.hr_managed ? (
+            <Alert
+              type="warning" showIcon style={{ marginBottom: 14, fontSize: 12 }}
+              message="This position comes from SeamlessHR — its name and code are changed there and sync here. Safety and certificate details below are ApexPOB's own and can be edited."
+            />
+          ) : (
             <Alert
               type="info" showIcon style={{ marginBottom: 14, fontSize: 12 }}
               message="Position code can be edited. Changes propagate to all linked records on save."
             />
-          )}
+          ))}
 
           <Divider orientation="left" style={{ fontSize: 12, marginTop: 4 }}>Identity</Divider>
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="position_code" label="Position Code" rules={[{ required: true, message: 'Required' }]}>
-                <Input placeholder="e.g. POS-001" />
+                <Input placeholder="e.g. POS-001" disabled={!!editingPosition?.hr_managed} />
               </Form.Item>
             </Col>
             <Col span={16}>
               <Form.Item name="position_name" label="Position Name" rules={[{ required: true, message: 'Required' }]}>
-                <Input placeholder="e.g. Senior Safety Engineer" />
+                <Input placeholder="e.g. Senior Safety Engineer" disabled={!!editingPosition?.hr_managed} />
               </Form.Item>
             </Col>
           </Row>

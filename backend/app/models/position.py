@@ -47,6 +47,7 @@ class Position(Base):
 
     # Status
     is_active = Column(Boolean, default=True, index=True)
+    hr_source = Column(String(20), nullable=True)   # 'SEAMLESSHR' = name/code mastered there (read-only here)
     is_safety_critical = Column(Boolean, default=False, index=True)
     requires_background_check = Column(Boolean, default=False)
     

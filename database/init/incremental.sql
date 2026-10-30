@@ -649,3 +649,7 @@ ALTER TABLE journey_plan ADD COLUMN IF NOT EXISTS overdue_alerted_at TIMESTAMPTZ
 ALTER TABLE iclock_terminal DROP CONSTRAINT IF EXISTS iclock_terminal_reader_purpose_check;
 ALTER TABLE iclock_terminal ADD CONSTRAINT iclock_terminal_reader_purpose_check CHECK (reader_purpose::text = ANY (ARRAY[
     'ATTENDANCE', 'ACCESS_ENTRY', 'ACCESS_EXIT', 'MUSTERING', 'POB', 'EMERGENCY', 'TRANSPORT_CHECKIN']::text[]));
+
+-- Positions mastered by SeamlessHR (job roles / designations): created from the titles
+-- staff carry, read-only in ApexPOB (name/code), so the Positions page matches SeamlessHR.
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS hr_source VARCHAR(20);

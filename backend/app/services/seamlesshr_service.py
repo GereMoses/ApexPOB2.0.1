@@ -731,6 +731,39 @@ def _log_sync(db: Session, result: Dict):
 
 # ── Employee pull (SeamlessHR is the master; pulled personnel are read-only here) ──
 
+def ensure_position(db: Session, title: Optional[str]) -> None:
+    """SeamlessHR owns job roles: make sure the title a person carries exists as a
+    Position (marked SEAMLESSHR, so it is read-only here). The Positions page showed 1
+    position while staff carried 146 titles from SeamlessHR."""
+    title = " ".join((title or "").split())
+    if not title:
+        return
+    row = db.execute(text("SELECT id, hr_source FROM positions WHERE lower(position_name) = lower(:n) LIMIT 1"),
+                     {"n": title}).fetchone()
+    if row:
+        if row.hr_source != "SEAMLESSHR":
+            db.execute(text("UPDATE positions SET hr_source = 'SEAMLESSHR', is_active = TRUE WHERE id = :i"), {"i": row.id})
+        return
+    base = "SHR-" + (re.sub(r"[^A-Z0-9]", "", title.upper())[:12] or "POS")
+    code, n = base, 1
+    while db.execute(text("SELECT 1 FROM positions WHERE position_code = :c"), {"c": code}).fetchone():
+        n += 1
+        code = f"{base[:16]}{n}"
+    db.execute(text("""INSERT INTO positions (position_code, position_name, is_active, hr_source, level, sort_order)
+                       VALUES (:c, :n, TRUE, 'SEAMLESSHR', 1, 0)"""), {"c": code, "n": title[:100]})
+
+
+def sync_positions_from_staff(db: Session) -> int:
+    """Back-fill: one Position per job title carried by SeamlessHR staff."""
+    titles = [r[0] for r in db.execute(text(
+        "SELECT DISTINCT position FROM personnel WHERE hr_source = 'SEAMLESSHR' AND COALESCE(TRIM(position), '') <> ''")).fetchall()]
+    before = db.execute(text("SELECT count(*) FROM positions WHERE hr_source = 'SEAMLESSHR'")).scalar() or 0
+    for t in titles:
+        ensure_position(db, t)
+    db.commit()
+    return (db.execute(text("SELECT count(*) FROM positions WHERE hr_source = 'SEAMLESSHR'")).scalar() or 0) - before
+
+
 def _link_department(db: Session, person, unmatched: set) -> None:
     """Resolve the department NAME that SeamlessHR sends into ApexPOB's
     departments.id and store it on personnel.department_id.
@@ -979,6 +1012,7 @@ async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str,
                             person.is_onboard = False
                             person.is_pob = False
                         _link_department(db, person, unmatched_departments)
+                        ensure_position(db, getattr(person, "position", None))
                         # Dates: the generic copy above stored employment_date's date
                         # part, which is a day early (UTC-encoded site midnight).
                         hd = _seamless_date(emp.get(fmap.get("hire_date") or "employment_date"))

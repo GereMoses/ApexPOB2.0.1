@@ -37,6 +37,8 @@ def _pos_to_dict(pos, dept_name=None, dept_code=None, assigned_count=0):
         "id": pos.id,
         "position_code": pos.position_code,
         "position_name": pos.position_name,
+        "hr_source": getattr(pos, "hr_source", None),
+        "hr_managed": getattr(pos, "hr_source", None) == "SEAMLESSHR",
         "description": pos.description,
         "parent_id": pos.parent_id,
         "level": pos.level,
@@ -389,6 +391,14 @@ def update_position(
     pos = db.query(Position).filter(Position.id == position_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
+    if getattr(pos, "hr_source", None) == "SEAMLESSHR":
+        # SeamlessHR owns job roles: the name/code come from there. ApexPOB-only details
+        # (safety-critical, required certificates, …) stay editable.
+        locked = [f for f in ("position_name", "position_code") if f in body and body[f] != getattr(pos, f)]
+        if locked:
+            raise HTTPException(status_code=403, detail=(
+                "This position comes from SeamlessHR — rename it there and it syncs here. "
+                f"Read-only here: {', '.join(locked)}."))
 
     # Allow position_code change — check uniqueness only if it changed
     new_code = body.get("position_code")
@@ -436,6 +446,8 @@ def delete_position(
     pos = db.query(Position).filter(Position.id == position_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
+    if getattr(pos, "hr_source", None) == "SEAMLESSHR":
+        raise HTTPException(status_code=403, detail="This position comes from SeamlessHR — remove it there")
 
     active_assignments = db.query(PositionAssignment).filter(
         PositionAssignment.position_id == position_id,

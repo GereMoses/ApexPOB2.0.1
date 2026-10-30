@@ -235,6 +235,50 @@ def _parse_date(v):
         return None
 
 
+def _scan_training_module(p: Personnel, issues: List[str]):
+    """Certificates recorded in Personnel → Training (training_enrollment). These never
+    reached this check — it only read the personnel JSON fields nothing fills, so an
+    expired BOSIET recorded in Training did not stop anyone boarding.
+
+    Per course the best (latest-expiring) completion counts. Returns 'blocked' (a course
+    has only expired completions), 'warning' (expiring within 30 days, or a MANDATORY
+    course with no completion on file), True (records, all fine) or False (none)."""
+    from sqlalchemy.orm import object_session
+    db = object_session(p)
+    if db is None:
+        return False
+    try:
+        rows = db.execute(text("""
+            SELECT c.id, c.course_code, c.course_name, c.is_mandatory,
+                   MAX(CASE WHEN LOWER(e.status) IN ('completed', 'passed', 'certified') OR e.completion_date IS NOT NULL
+                            THEN COALESCE(e.expiry_date, DATE '9999-12-31') END) AS valid_to
+            FROM training_courses c
+            LEFT JOIN training_enrollment e ON e.course_id = c.id AND e.personnel_id = :pid
+            GROUP BY c.id, c.course_code, c.course_name, c.is_mandatory
+        """), {"pid": p.id}).fetchall()
+    except Exception:  # noqa: BLE001 — training tables missing: no records, never an error
+        db.rollback()
+        return False
+    today = date.today()
+    soon = today + timedelta(days=30)
+    outcome = False
+    for r in rows:
+        label = r.course_code or r.course_name
+        if r.valid_to is None:
+            if r.is_mandatory:
+                issues.append(f"No {label} on file")
+                outcome = outcome if outcome == "blocked" else "warning"
+            continue
+        outcome = outcome or True
+        if r.valid_to < today:
+            issues.append(f"{label} expired {r.valid_to.isoformat()}")
+            outcome = "blocked"
+        elif r.valid_to <= soon and r.valid_to.year < 9999:
+            issues.append(f"{label} expires {r.valid_to.isoformat()}")
+            outcome = outcome if outcome == "blocked" else "warning"
+    return outcome
+
+
 def travel_compliance(p: Optional[Personnel]) -> Dict[str, Any]:
     """Assess fitness to travel: medical + safety training / certifications.
 
@@ -279,7 +323,12 @@ def travel_compliance(p: Optional[Personnel]) -> Dict[str, Any]:
 
     has_training = _scan(getattr(p, "training_records", None))
     has_certs = _scan(getattr(p, "certifications", None))
-    if med is None and not has_training and not has_certs:
+    has_courses = _scan_training_module(p, issues)
+    if has_courses == "blocked":
+        blocked, has_courses = True, True
+    elif has_courses == "warning":
+        warning, has_courses = True, True
+    if med is None and not has_training and not has_certs and not has_courses:
         # No records at all (nothing feeds them yet — SeamlessHR does not send them).
         # Flagging every passenger as a warning teaches people to ignore the column;
         # report "unknown" and keep blocking only on a record that has EXPIRED.
